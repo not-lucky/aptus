@@ -42,6 +42,7 @@ export type {
   CanonicalBatchSubmission,
   CanonicalBatchResult,
 } from "./canonical.js";
+export type { RouteCandidate } from "./routing.js";
 
 export type {
   ValidationIssueCode,
