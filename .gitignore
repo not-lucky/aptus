@@ -1,0 +1,105 @@
+# ==========================
+# Dependencies
+# ==========================
+node_modules/
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ==========================
+# Environment files
+# ==========================
+.env
+.env.*
+!.env.example
+
+# ==========================
+# Logs
+# ==========================
+logs/
+*.log
+
+# ==========================
+# Runtime data
+# ==========================
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# ==========================
+# Coverage
+# ==========================
+coverage/
+.nyc_output/
+
+# ==========================
+# Build output
+# ==========================
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+.storybook-out/
+.vite/
+.vercel/
+.netlify/
+
+# ==========================
+# TypeScript
+# ==========================
+*.tsbuildinfo
+
+# ==========================
+# Cache
+# ==========================
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+.tmp/
+temp/
+
+# ==========================
+# Testing
+# ==========================
+playwright-report/
+test-results/
+cypress/videos/
+cypress/screenshots/
+
+# ==========================
+# IDE & Editor
+# ==========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# ==========================
+# OS files
+# ==========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ==========================
+# Local database
+# ==========================
+*.sqlite
+*.sqlite3
+
+# ==========================
+# Misc
+# ==========================
+*.tgz
+
+# Keep placeholder files
+!.gitkeep

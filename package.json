@@ -1,0 +1,31 @@
+{
+  "name": "llm-routing-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "engines": { "node": ">=24.0.0" },
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "knip": "knip"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "@logtape/logtape": "2.2.4",
+    "zod": "4.4.3",
+    "js-yaml": "5.2.1"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "@types/express": "5.0.6",
+    "@types/node": "26.1.1",
+    "vitest": "4.1.10",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5",
+    "knip": "6.27.0"
+  }
+}
