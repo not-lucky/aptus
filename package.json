@@ -1,0 +1,42 @@
+{
+  "name": "@aptus/aptus",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "A protocol-native LLM gateway with optional fail-closed cross-protocol translation.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "aptus": "./bin/aptus.js"
+  },
+  "exports": {
+    ".": "./src/bootstrap/cli.ts",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check src bin scripts vitest.config.ts",
+    "architecture": "node scripts/check-architecture.ts"
+  },
+  "dependencies": {
+    "@logtape/logtape": "2.3.0",
+    "express": "5.2.1",
+    "prom-client": "15.1.3",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "@types/express": "5.0.6",
+    "@types/node": "24.13.3",
+    "fast-check": "4.4.0",
+    "skott": "0.35.11",
+    "tsx": "4.20.6",
+    "typescript": "5.9.2",
+    "vitest": "4.1.10"
+  }
+}
