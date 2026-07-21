@@ -48,6 +48,8 @@ export function checkRequiredCapabilities(
   supported: readonly Capability[],
 ): CapabilityRequirementResult {
   const available = new Set(supported);
-  const missing = sortedUnique(required.filter((capability) => !available.has(capability)));
+  const missing = sortedUnique(
+    required.filter((capability) => !available.has(capability)),
+  );
   return { satisfied: missing.length === 0, missing };
 }

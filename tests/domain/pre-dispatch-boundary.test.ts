@@ -22,10 +22,13 @@ describe("pre-dispatch boundary", () => {
       throw new Error("network access is forbidden");
     }) as typeof fetch;
     try {
-      const badMedia = validateContentBlock({ type: "image_url", url: "file:///secret-path" });
+      const badMedia = validateContentBlock({
+        type: "image_url",
+        url: "file:///secret-path",
+      });
       expect(badMedia.valid).toBe(false);
 
-      const secretArguments = "{\"apiKey\":\"sk-super-secret\"";
+      const secretArguments = '{"apiKey":"sk-super-secret"';
       const badArguments = validateToolCallArgumentsJson(secretArguments);
       expect(badArguments.valid).toBe(false);
 
@@ -34,7 +37,10 @@ describe("pre-dispatch boundary", () => {
         code: "invalid_request",
         message: "Request failed validation.",
         requestId: "req_1",
-        details: { issues: badMedia.valid ? [] : badMedia.issues, argumentsJson: secretArguments },
+        details: {
+          issues: badMedia.valid ? [] : badMedia.issues,
+          argumentsJson: secretArguments,
+        },
       });
 
       expect(error.status).toBe(400);
@@ -49,7 +55,10 @@ describe("pre-dispatch boundary", () => {
   });
 
   it("lets unknown-but-valid capabilities pass without producing an error", () => {
-    const result = checkRequiredCapabilities(["future-capability"], ["future-capability", "tools"]);
+    const result = checkRequiredCapabilities(
+      ["future-capability"],
+      ["future-capability", "tools"],
+    );
     expect(result.satisfied).toBe(true);
   });
 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { GatewayErrorCategory, UpstreamClassification } from "../../src/domain/index.js";
+import type {
+  GatewayErrorCategory,
+  UpstreamClassification,
+} from "../../src/domain/index.js";
 import {
   REDACTION_PLACEHOLDER,
   classifyUpstreamStatus,
@@ -22,24 +25,35 @@ const CATEGORIES: [GatewayErrorCategory, number, boolean][] = [
 ];
 
 describe("category defaults", () => {
-  it.each(CATEGORIES)("maps %s to status %i and retryable %s", (category, status, retryable) => {
-    expect(defaultStatusForCategory(category)).toBe(status);
-    expect(defaultRetryableForCategory(category)).toBe(retryable);
-  });
+  it.each(CATEGORIES)(
+    "maps %s to status %i and retryable %s",
+    (category, status, retryable) => {
+      expect(defaultStatusForCategory(category)).toBe(status);
+      expect(defaultRetryableForCategory(category)).toBe(retryable);
+    },
+  );
 });
 
 describe("createGatewayError", () => {
-  it.each(CATEGORIES)("builds a complete %s error with defaults", (category, status, retryable) => {
-    const error = createGatewayError({ category, code: `${category}_code`, message: "safe message", requestId: "req_1" });
-    expect(error).toEqual({
-      code: `${category}_code`,
-      message: "safe message",
-      category,
-      retryable,
-      status,
-      requestId: "req_1",
-    });
-  });
+  it.each(CATEGORIES)(
+    "builds a complete %s error with defaults",
+    (category, status, retryable) => {
+      const error = createGatewayError({
+        category,
+        code: `${category}_code`,
+        message: "safe message",
+        requestId: "req_1",
+      });
+      expect(error).toEqual({
+        code: `${category}_code`,
+        message: "safe message",
+        category,
+        retryable,
+        status,
+        requestId: "req_1",
+      });
+    },
+  );
 
   it("honors explicit status and retryable overrides", () => {
     const error = createGatewayError({
@@ -55,7 +69,12 @@ describe("createGatewayError", () => {
   });
 
   it("omits optional fields entirely rather than setting undefined", () => {
-    const error = createGatewayError({ category: "internal", code: "x", message: "y", requestId: "req_1" });
+    const error = createGatewayError({
+      category: "internal",
+      code: "x",
+      message: "y",
+      requestId: "req_1",
+    });
     expect("providerId" in error).toBe(false);
     expect("credentialId" in error).toBe(false);
     expect("retryAfterMs" in error).toBe(false);
@@ -83,9 +102,15 @@ describe("createGatewayError", () => {
       code: "bad_token",
       message: "Authentication failed.",
       requestId: "req_1",
-      details: { authorization: "Bearer super-secret", nested: { apiKey: "sk-leak", ok: 1 } },
+      details: {
+        authorization: "Bearer super-secret",
+        nested: { apiKey: "sk-leak", ok: 1 },
+      },
     });
-    expect(error.details).toEqual({ authorization: REDACTION_PLACEHOLDER, nested: { apiKey: REDACTION_PLACEHOLDER, ok: 1 } });
+    expect(error.details).toEqual({
+      authorization: REDACTION_PLACEHOLDER,
+      nested: { apiKey: REDACTION_PLACEHOLDER, ok: 1 },
+    });
     expect(JSON.stringify(error)).not.toContain("super-secret");
     expect(JSON.stringify(error)).not.toContain("sk-leak");
   });
@@ -114,8 +139,14 @@ describe("classifyUpstreamStatus", () => {
   });
 
   it("applies the route status policy override in both directions", () => {
-    expect(classifyUpstreamStatus(500, { retryable: [], nonRetryable: [500] }).retryable).toBe(false);
-    expect(classifyUpstreamStatus(400, { retryable: [400], nonRetryable: [] }).retryable).toBe(true);
+    expect(
+      classifyUpstreamStatus(500, { retryable: [], nonRetryable: [500] })
+        .retryable,
+    ).toBe(false);
+    expect(
+      classifyUpstreamStatus(400, { retryable: [400], nonRetryable: [] })
+        .retryable,
+    ).toBe(true);
   });
 });
 

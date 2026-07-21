@@ -64,12 +64,12 @@ export class ConfigurationUnavailableError extends Error {
 
 function freezeDeep<T>(value: T): T {
   if (value !== null && typeof value === "object") {
-    for (const child of Object.values(value as Record<string, unknown>)) freezeDeep(child);
+    for (const child of Object.values(value as Record<string, unknown>))
+      freezeDeep(child);
     Object.freeze(value);
   }
   return value;
 }
-
 
 function emptyCounts(): CredentialCounts {
   return { active: 0, cooldown: 0, critical_failure: 0, suspended: 0 };
@@ -79,7 +79,9 @@ function validCount(value: number): boolean {
 }
 
 /** Atomically owns validated configuration and computes secret-free liveness/readiness snapshots. */
-export class ConfigurationCoordinator implements RouteConfigPort<GatewayConfig>, HealthPort<ReadinessSnapshot> {
+export class ConfigurationCoordinator
+  implements RouteConfigPort<GatewayConfig>, HealthPort<ReadinessSnapshot>
+{
   private config: Readonly<GatewayConfig> | undefined;
   private operational: OperationalReadinessState = {
     pluginsRegistered: false,
@@ -99,17 +101,40 @@ export class ConfigurationCoordinator implements RouteConfigPort<GatewayConfig>,
 
   /** Replaces all operational readiness inputs as one immutable state transition. */
   setOperationalState(state: OperationalReadinessState): void {
-    if (typeof state.pluginsRegistered !== "boolean" || typeof state.eligibleCredential !== "boolean") throw new TypeError("readiness boolean state must be boolean");
+    if (
+      typeof state.pluginsRegistered !== "boolean" ||
+      typeof state.eligibleCredential !== "boolean"
+    )
+      throw new TypeError("readiness boolean state must be boolean");
     const counts = state.credentials;
-    if (![counts.active, counts.cooldown, counts.critical_failure, counts.suspended].every((value) => Number.isFinite(value) && Number.isInteger(value) && value >= 0)) throw new TypeError("credential counts must be finite non-negative integers");
+    if (
+      ![
+        counts.active,
+        counts.cooldown,
+        counts.critical_failure,
+        counts.suspended,
+      ].every(
+        (value) =>
+          Number.isFinite(value) && Number.isInteger(value) && value >= 0,
+      )
+    )
+      throw new TypeError(
+        "credential counts must be finite non-negative integers",
+      );
     const upstreamChecks: Record<string, "ok" | "failed"> = {};
     for (const [provider, status] of Object.entries(state.upstreamChecks)) {
-      if (status !== "ok" && status !== "failed") throw new TypeError("upstream check status must be ok or failed");
+      if (status !== "ok" && status !== "failed")
+        throw new TypeError("upstream check status must be ok or failed");
       upstreamChecks[provider] = status;
     }
     this.operational = {
       pluginsRegistered: state.pluginsRegistered,
-      credentials: freezeDeep({ active: counts.active, cooldown: counts.cooldown, critical_failure: counts.critical_failure, suspended: counts.suspended }),
+      credentials: freezeDeep({
+        active: counts.active,
+        cooldown: counts.cooldown,
+        critical_failure: counts.critical_failure,
+        suspended: counts.suspended,
+      }),
       eligibleCredential: state.eligibleCredential,
       upstreamChecks: freezeDeep(upstreamChecks),
       requiredUpstreamProviders: new Set(state.requiredUpstreamProviders),
@@ -126,8 +151,14 @@ export class ConfigurationCoordinator implements RouteConfigPort<GatewayConfig>,
   async check(signal: AbortSignal): Promise<ReadinessSnapshot> {
     if (signal.aborted) throw signal.reason;
     const configValid = this.config !== undefined;
-    const requiredUpstreamsReady = [...this.operational.requiredUpstreamProviders].every((provider) => this.operational.upstreamChecks[provider] === "ok");
-    const ready = configValid && this.operational.pluginsRegistered && this.operational.eligibleCredential && requiredUpstreamsReady;
+    const requiredUpstreamsReady = [
+      ...this.operational.requiredUpstreamProviders,
+    ].every((provider) => this.operational.upstreamChecks[provider] === "ok");
+    const ready =
+      configValid &&
+      this.operational.pluginsRegistered &&
+      this.operational.eligibleCredential &&
+      requiredUpstreamsReady;
     return freezeDeep({
       status: ready ? "healthy" : "not_ready",
       ready,
@@ -141,4 +172,3 @@ export class ConfigurationCoordinator implements RouteConfigPort<GatewayConfig>,
     });
   }
 }
-

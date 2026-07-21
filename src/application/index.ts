@@ -4,6 +4,11 @@ export type {
   GatewayContext,
   GatewayPlugin,
   HookManager,
+  HookTimeoutConfiguration,
+  RequestIdFactory,
+  GatewayCommand,
+  GatewayExchange,
+  GatewayExchangeFactory,
 } from "./lifecycle.js";
 export type {
   RouteResolver,
@@ -26,7 +31,6 @@ export type {
   ProviderPayloadBuilder,
   TraceRecordBuilder,
   GatewayApplication,
-  GatewayCommand,
   ContentBlockVisitor,
   ChunkVisitor,
   CooldownPlugin,
@@ -46,3 +50,5 @@ export type {
   RedactingTraceDecorator,
 } from "./patterns.js";
 export type { CredentialState, CredentialStatePort } from "./patterns.js";
+export { DefaultGatewayApplication } from "./gateway-application.js";
+export type { GatewayApplicationDependencies } from "./gateway-application.js";

@@ -5,13 +5,52 @@ import type {
   GatewayError,
   RouteCandidate,
 } from "../domain/index.js";
-import type { EgressValue } from "../ports/translation.js";
+import type { EgressValue, RawIngressInput } from "../ports/translation.js";
 
 /** Lifecycle stages at which injected plugins may observe or transform values. */
 export type HookName =
-  | "onIngressReceived" | "onCanonicalTranslate" | "onRouteResolve"
-  | "beforeUpstreamDispatch" | "onUpstreamResponse" | "onStreamChunk"
-  | "onEgressTranslate" | "onError";
+  | "onIngressReceived"
+  | "onCanonicalTranslate"
+  | "onRouteResolve"
+  | "beforeUpstreamDispatch"
+  | "onUpstreamResponse"
+  | "onStreamChunk"
+  | "onEgressTranslate"
+  | "onError";
+
+/** Explicit timeout and retry policy for each lifecycle hook. */
+export type HookTimeoutConfiguration = Readonly<
+  Record<HookName, { readonly timeoutMs: number; readonly retryable: boolean }>
+>;
+
+/** Generates a request identity when ingress did not provide one. */
+export type RequestIdFactory = () => string;
+
+/** Cancellable lifecycle command with optional caller-owned undo cleanup. */
+export interface GatewayCommand<T = unknown> {
+  /** Executes once while observing the supplied cancellation signal. */
+  execute(signal: AbortSignal): Promise<T>;
+  /** Undoes command-owned effects; the caller owns invocation timing. */
+  undo?(): Promise<void>;
+}
+
+/** Request-scoped canonical exchange including the adapter-owned egress boundary. */
+export interface GatewayExchange {
+  /** Runs canonical non-stream processing. */
+  handle(): Promise<CanonicalResponse | GatewayError>;
+  /** Runs bounded canonical stream processing. */
+  stream(): AsyncIterable<CanonicalChunk>;
+  /** Runs the egress hook over one encoded adapter value. */
+  runEgress(value: EgressValue): Promise<EgressValue | GatewayError>;
+  /** Finalizes the exchange and all request-owned resources. */
+  close(): Promise<void>;
+}
+
+/** Opens an isolated request-scoped exchange. */
+export interface GatewayExchangeFactory {
+  /** Opens one isolated request-scoped exchange. */
+  open(input: RawIngressInput): GatewayExchange;
+}
 
 /** Deterministic result used to retain, replace, short-circuit, or abort a stage. */
 export type HookResult<T> =
@@ -36,6 +75,8 @@ export interface GatewayContext {
   setState<T>(key: string, value: T): void;
   /** Candidate selected for the current route stage, when available. */
   readonly selectedCandidate?: RouteCandidate;
+  /** Executes a command and registers its undo after successful completion. */
+  execute<T>(command: GatewayCommand<T>): Promise<T>;
 }
 
 /** Injected plugin contract with distinct typed lifecycle transformations. */
@@ -53,21 +94,47 @@ export interface GatewayPlugin {
   /** Plugin IDs that must follow this plugin. */
   readonly after?: ReadonlyArray<string>;
   /** Transforms the initial canonical request. */
-  onIngressReceived?(context: GatewayContext, request: CanonicalRequest): Promise<HookResult<CanonicalRequest>> | HookResult<CanonicalRequest>;
+  onIngressReceived?(
+    context: GatewayContext,
+    request: CanonicalRequest,
+  ): Promise<HookResult<CanonicalRequest>> | HookResult<CanonicalRequest>;
   /** Transforms canonical normalization output. */
-  onCanonicalTranslate?(context: GatewayContext, request: CanonicalRequest): Promise<HookResult<CanonicalRequest>> | HookResult<CanonicalRequest>;
+  onCanonicalTranslate?(
+    context: GatewayContext,
+    request: CanonicalRequest,
+  ): Promise<HookResult<CanonicalRequest>> | HookResult<CanonicalRequest>;
   /** Transforms ordered route candidates. */
-  onRouteResolve?(context: GatewayContext, candidates: ReadonlyArray<RouteCandidate>): Promise<HookResult<ReadonlyArray<RouteCandidate>>> | HookResult<ReadonlyArray<RouteCandidate>>;
+  onRouteResolve?(
+    context: GatewayContext,
+    candidates: ReadonlyArray<RouteCandidate>,
+  ):
+    | Promise<HookResult<ReadonlyArray<RouteCandidate>>>
+    | HookResult<ReadonlyArray<RouteCandidate>>;
   /** Transforms the request immediately before dispatch. */
-  beforeUpstreamDispatch?(context: GatewayContext, request: CanonicalRequest): Promise<HookResult<CanonicalRequest>> | HookResult<CanonicalRequest>;
+  beforeUpstreamDispatch?(
+    context: GatewayContext,
+    request: CanonicalRequest,
+  ): Promise<HookResult<CanonicalRequest>> | HookResult<CanonicalRequest>;
   /** Transforms one complete upstream response. */
-  onUpstreamResponse?(context: GatewayContext, response: CanonicalResponse): Promise<HookResult<CanonicalResponse>> | HookResult<CanonicalResponse>;
+  onUpstreamResponse?(
+    context: GatewayContext,
+    response: CanonicalResponse,
+  ): Promise<HookResult<CanonicalResponse>> | HookResult<CanonicalResponse>;
   /** Transforms one bounded canonical stream chunk. */
-  onStreamChunk?(context: GatewayContext, chunk: CanonicalChunk): Promise<HookResult<CanonicalChunk>> | HookResult<CanonicalChunk>;
+  onStreamChunk?(
+    context: GatewayContext,
+    chunk: CanonicalChunk,
+  ): Promise<HookResult<CanonicalChunk>> | HookResult<CanonicalChunk>;
   /** Transforms one egress value after encoding. */
-  onEgressTranslate?(context: GatewayContext, value: EgressValue): Promise<HookResult<EgressValue>> | HookResult<EgressValue>;
+  onEgressTranslate?(
+    context: GatewayContext,
+    value: EgressValue,
+  ): Promise<HookResult<EgressValue>> | HookResult<EgressValue>;
   /** Handles one owned safe gateway error. */
-  onError?(context: GatewayContext, error: GatewayError): Promise<HookResult<GatewayError>> | HookResult<GatewayError>;
+  onError?(
+    context: GatewayContext,
+    error: GatewayError,
+  ): Promise<HookResult<GatewayError>> | HookResult<GatewayError>;
 }
 
 /** Orders and executes injected lifecycle plugins without owning their state. */
@@ -75,7 +142,11 @@ export interface HookManager {
   /** Registers one plugin for the process/application lifetime. */
   register(plugin: GatewayPlugin): void;
   /** Reduces one typed stage value through the ordered hook chain. */
-  run<T>(hook: HookName, context: GatewayContext, value: T): Promise<HookResult<T>>;
+  run<T>(
+    hook: HookName,
+    context: GatewayContext,
+    value: T,
+  ): Promise<HookResult<T>>;
   /** Returns the deterministic order for a lifecycle stage. */
   ordered(hook: HookName): ReadonlyArray<GatewayPlugin>;
   /** Releases manager-owned plugin resources. */

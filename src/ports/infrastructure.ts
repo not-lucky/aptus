@@ -9,7 +9,10 @@ export interface ClockPort {
 }
 
 /** Transport capability independent of provider SDKs and wire DTOs. */
-export interface ProviderTransportPort<TRequest = unknown, TResponse = unknown> {
+export interface ProviderTransportPort<
+  TRequest = unknown,
+  TResponse = unknown,
+> {
   /** Sends one request while observing cancellation. */
   request(request: TRequest, signal: AbortSignal): Promise<TResponse>;
   /** Yields bounded byte chunks while observing cancellation. */
@@ -25,13 +28,22 @@ export interface SecretResolverPort {
 /** Stores credential values behind an injected process/application lifetime. */
 export interface CredentialStorePort<TCredential = unknown> {
   /** Returns a credential or undefined on a miss; observes cancellation. */
-  get(credentialId: string, signal: AbortSignal): Promise<TCredential | undefined>;
+  get(
+    credentialId: string,
+    signal: AbortSignal,
+  ): Promise<TCredential | undefined>;
   /** Replaces a credential while observing cancellation. */
-  set(credentialId: string, credential: TCredential, signal: AbortSignal): Promise<void>;
+  set(
+    credentialId: string,
+    credential: TCredential,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 /** Exposes an already validated shallow readonly configuration snapshot. */
-export interface RouteConfigPort<TSnapshot extends object = Readonly<Record<string, unknown>>> {
+export interface RouteConfigPort<
+  TSnapshot extends object = Readonly<Record<string, unknown>>,
+> {
   /** Returns the current snapshot without mutating or reloading it. */
   snapshot(): Readonly<TSnapshot>;
 }
@@ -55,21 +67,41 @@ export interface RateLimitPort<TRequest = unknown, TReservation = unknown> {
 /** Minimal metrics sink with caller-supplied bounded labels. */
 export interface MetricsPort {
   /** Increments a named counter. */
-  incrementCounter(name: string, value: number, labels: Readonly<Record<string, string>>): void;
+  incrementCounter(
+    name: string,
+    value: number,
+    labels: Readonly<Record<string, string>>,
+  ): void;
   /** Records one histogram observation. */
-  observeHistogram(name: string, value: number, labels: Readonly<Record<string, string>>): void;
+  observeHistogram(
+    name: string,
+    value: number,
+    labels: Readonly<Record<string, string>>,
+  ): void;
   /** Sets one gauge value. */
-  setGauge(name: string, value: number, labels: Readonly<Record<string, string>>): void;
+  setGauge(
+    name: string,
+    value: number,
+    labels: Readonly<Record<string, string>>,
+  ): void;
 }
 
 /** Trace sink receiving records already redacted by its caller. */
-export interface TracePort<TRecord extends Readonly<Record<string, JsonValue>> = Readonly<Record<string, JsonValue>>> {
+export interface TracePort<
+  TRecord extends Readonly<Record<string, JsonValue>> = Readonly<
+    Record<string, JsonValue>
+  >,
+> {
   /** Records one caller-redacted trace entry. */
   record(record: TRecord): Promise<void>;
 }
 
 /** Logger sink receiving entries already redacted by its caller. */
-export interface LoggerPort<TEntry extends Readonly<Record<string, JsonValue>> = Readonly<Record<string, JsonValue>>> {
+export interface LoggerPort<
+  TEntry extends Readonly<Record<string, JsonValue>> = Readonly<
+    Record<string, JsonValue>
+  >,
+> {
   /** Logs one caller-redacted entry without inspecting request bodies. */
   log(entry: TEntry): Promise<void>;
 }

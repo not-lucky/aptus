@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import type { CostErrorReason, PricesPerMillionUsd, TokenUsage } from "../../src/domain/index.js";
-import { billableInputTokens, cacheWriteTokens, calculateCost, zeroCost } from "../../src/domain/index.js";
+import type {
+  CostErrorReason,
+  PricesPerMillionUsd,
+  TokenUsage,
+} from "../../src/domain/index.js";
+import {
+  billableInputTokens,
+  cacheWriteTokens,
+  calculateCost,
+  zeroCost,
+} from "../../src/domain/index.js";
 
-const PRICES: PricesPerMillionUsd = { input: 2, output: 8, cacheRead: 0.5, cacheWrite: 1 };
+const PRICES: PricesPerMillionUsd = {
+  input: 2,
+  output: 8,
+  cacheRead: 0.5,
+  cacheWrite: 1,
+};
 
 function usage(overrides: Partial<TokenUsage>): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, totalTokens: 0, ...overrides };
@@ -17,14 +31,27 @@ function costOf(u: TokenUsage, prices: PricesPerMillionUsd = PRICES) {
 
 describe("zero and dry-run cost", () => {
   it("returns all-zero USD metrics", () => {
-    expect(zeroCost()).toEqual({ inputUsd: 0, outputUsd: 0, cacheReadUsd: 0, cacheWriteUsd: 0, totalUsd: 0, currency: "USD" });
+    expect(zeroCost()).toEqual({
+      inputUsd: 0,
+      outputUsd: 0,
+      cacheReadUsd: 0,
+      cacheWriteUsd: 0,
+      totalUsd: 0,
+      currency: "USD",
+    });
     expect(costOf(usage({}))).toEqual(zeroCost());
   });
 });
 
 describe("normal and fractional pricing", () => {
   it("prices whole-million token counts", () => {
-    const cost = costOf(usage({ inputTokens: 1_000_000, outputTokens: 500_000, totalTokens: 1_500_000 }));
+    const cost = costOf(
+      usage({
+        inputTokens: 1_000_000,
+        outputTokens: 500_000,
+        totalTokens: 1_500_000,
+      }),
+    );
     expect(cost.inputUsd).toBe(2);
     expect(cost.outputUsd).toBe(4);
     expect(cost.totalUsd).toBe(6);
@@ -32,14 +59,23 @@ describe("normal and fractional pricing", () => {
   });
 
   it("prices fractional-price rates deterministically", () => {
-    const cost = costOf(usage({ inputTokens: 500_000, totalTokens: 500_000 }), { input: 0.5, output: 0, cacheRead: 0, cacheWrite: 0 });
+    const cost = costOf(usage({ inputTokens: 500_000, totalTokens: 500_000 }), {
+      input: 0.5,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
     expect(cost.inputUsd).toBe(0.25);
   });
 });
 
 describe("cache accounting", () => {
   it("treats cached input tokens as a subset billed at the cache-read rate", () => {
-    const u = usage({ inputTokens: 1_000_000, cachedInputTokens: 400_000, totalTokens: 1_000_000 });
+    const u = usage({
+      inputTokens: 1_000_000,
+      cachedInputTokens: 400_000,
+      totalTokens: 1_000_000,
+    });
     expect(billableInputTokens(u)).toBe(600_000);
     const cost = costOf(u);
     expect(cost.inputUsd).toBeCloseTo(1.2, 10);
@@ -76,12 +112,28 @@ describe("uncosted token dimensions", () => {
 describe("invalid and overflowing inputs", () => {
   const cases: [Partial<TokenUsage>, PricesPerMillionUsd, CostErrorReason][] = [
     [{ inputTokens: -1 }, PRICES, "negative_tokens"],
-    [{ inputTokens: Number.MAX_SAFE_INTEGER + 1 }, PRICES, "unsafe_token_count"],
+    [
+      { inputTokens: Number.MAX_SAFE_INTEGER + 1 },
+      PRICES,
+      "unsafe_token_count",
+    ],
     [{ inputTokens: Number.NaN }, PRICES, "unsafe_token_count"],
-    [{ inputTokens: 100 }, { ...PRICES, input: Number.NaN }, "non_finite_price"],
-    [{ inputTokens: 100 }, { ...PRICES, input: Number.POSITIVE_INFINITY }, "non_finite_price"],
+    [
+      { inputTokens: 100 },
+      { ...PRICES, input: Number.NaN },
+      "non_finite_price",
+    ],
+    [
+      { inputTokens: 100 },
+      { ...PRICES, input: Number.POSITIVE_INFINITY },
+      "non_finite_price",
+    ],
     [{ inputTokens: 100 }, { ...PRICES, input: -1 }, "negative_price"],
-    [{ inputTokens: Number.MAX_SAFE_INTEGER, totalTokens: 0 }, { ...PRICES, input: Number.MAX_VALUE }, "non_finite_cost"],
+    [
+      { inputTokens: Number.MAX_SAFE_INTEGER, totalTokens: 0 },
+      { ...PRICES, input: Number.MAX_VALUE },
+      "non_finite_cost",
+    ],
   ];
   it.each(cases)("rejects invalid input %#", (overrides, prices, reason) => {
     const result = calculateCost(usage(overrides), prices);

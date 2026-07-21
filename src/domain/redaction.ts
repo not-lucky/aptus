@@ -67,7 +67,8 @@ function normalizeKey(key: string): string {
 
 /** A plain data object (object literal or null-prototype), not an array. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
   const prototype: unknown = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
@@ -87,7 +88,9 @@ function redactInternal(value: unknown, seen: WeakSet<object>): unknown {
   seen.add(value);
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    result[key] = isSensitiveKey(key) ? REDACTION_PLACEHOLDER : redactInternal(entry, seen);
+    result[key] = isSensitiveKey(key)
+      ? REDACTION_PLACEHOLDER
+      : redactInternal(entry, seen);
   }
   seen.delete(value);
   return result;
@@ -116,5 +119,8 @@ export function redactDetails(
   details: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (details === undefined) return undefined;
-  return redactInternal(details, new WeakSet<object>()) as Record<string, unknown>;
+  return redactInternal(details, new WeakSet<object>()) as Record<
+    string,
+    unknown
+  >;
 }

@@ -76,12 +76,16 @@ const CATEGORY_RETRYABLE: Record<GatewayErrorCategory, boolean> = {
 };
 
 /** Default gateway-facing HTTP status for a category. */
-export function defaultStatusForCategory(category: GatewayErrorCategory): number {
+export function defaultStatusForCategory(
+  category: GatewayErrorCategory,
+): number {
   return CATEGORY_STATUS[category];
 }
 
 /** Default retryability for a category. */
-export function defaultRetryableForCategory(category: GatewayErrorCategory): boolean {
+export function defaultRetryableForCategory(
+  category: GatewayErrorCategory,
+): boolean {
   return CATEGORY_RETRYABLE[category];
 }
 
@@ -90,7 +94,9 @@ export function defaultRetryableForCategory(category: GatewayErrorCategory): boo
  * recursively redacted. Optional fields are included only when defined so the
  * result satisfies `exactOptionalPropertyTypes` (absent, never `undefined`).
  */
-export function createGatewayError(input: CreateGatewayErrorInput): GatewayError {
+export function createGatewayError(
+  input: CreateGatewayErrorInput,
+): GatewayError {
   const redactedDetails = redactDetails(input.details);
   return {
     code: input.code,
@@ -99,9 +105,13 @@ export function createGatewayError(input: CreateGatewayErrorInput): GatewayError
     retryable: input.retryable ?? defaultRetryableForCategory(input.category),
     status: input.status ?? defaultStatusForCategory(input.category),
     requestId: input.requestId,
-    ...(input.retryAfterMs !== undefined ? { retryAfterMs: input.retryAfterMs } : {}),
+    ...(input.retryAfterMs !== undefined
+      ? { retryAfterMs: input.retryAfterMs }
+      : {}),
     ...(input.providerId !== undefined ? { providerId: input.providerId } : {}),
-    ...(input.credentialId !== undefined ? { credentialId: input.credentialId } : {}),
+    ...(input.credentialId !== undefined
+      ? { credentialId: input.credentialId }
+      : {}),
     ...(redactedDetails !== undefined ? { details: redactedDetails } : {}),
   };
 }
@@ -144,8 +154,10 @@ function baseClassification(upstreamStatus: number): UpstreamClassification {
     default:
       break;
   }
-  if (upstreamStatus >= 500) return { category: "upstream", retryable: true, status: 502 };
-  if (upstreamStatus >= 400) return { category: "upstream", retryable: false, status: 502 };
+  if (upstreamStatus >= 500)
+    return { category: "upstream", retryable: true, status: 502 };
+  if (upstreamStatus >= 400)
+    return { category: "upstream", retryable: false, status: 502 };
   return { category: "upstream", retryable: true, status: 502 };
 }
 
@@ -153,7 +165,10 @@ function baseClassification(upstreamStatus: number): UpstreamClassification {
  * Lift a pure cost-calculation failure into a canonical internal error, keeping
  * {@link GatewayError} as the only error object that crosses module boundaries.
  */
-export function costFailureToError(reason: CostErrorReason, requestId: string): GatewayError {
+export function costFailureToError(
+  reason: CostErrorReason,
+  requestId: string,
+): GatewayError {
   return createGatewayError({
     category: "internal",
     code: "cost_calculation_failed",

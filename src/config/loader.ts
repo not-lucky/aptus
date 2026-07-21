@@ -39,12 +39,18 @@ export class ConfigurationLoadError extends Error {
   }
 }
 
-function issue(path: ReadonlyArray<PropertyKey>, message: string): ConfigurationLoadError {
+function issue(
+  path: ReadonlyArray<PropertyKey>,
+  message: string,
+): ConfigurationLoadError {
   return new ConfigurationLoadError([{ path, message }]);
 }
 
 /** Parses, validates, and then consumes referenced secrets without retaining their values. */
-export async function loadConfiguration(yamlText: string, options: ConfigurationLoadOptions): Promise<GatewayConfig> {
+export async function loadConfiguration(
+  yamlText: string,
+  options: ConfigurationLoadOptions,
+): Promise<GatewayConfig> {
   let parsed: unknown;
   try {
     parsed = yaml.load(yamlText);
@@ -57,38 +63,80 @@ export async function loadConfiguration(yamlText: string, options: Configuration
 
   const result = GatewayConfigSchema.safeParse(parsed);
   if (!result.success) {
-    throw new ConfigurationLoadError(result.error.issues.map((diagnostic) => ({
-      path: diagnostic.path,
-      message: diagnostic.message,
-    })));
+    throw new ConfigurationLoadError(
+      result.error.issues.map((diagnostic) => ({
+        path: diagnostic.path,
+        message: diagnostic.message,
+      })),
+    );
   }
 
   const config = result.data;
   for (const client of config.clients) {
     let value: string;
     try {
-      value = await options.resolver.resolve(client.tokenHashRef, options.signal);
+      value = await options.resolver.resolve(
+        client.tokenHashRef,
+        options.signal,
+      );
     } catch {
-      throw issue(["clients", config.clients.indexOf(client), "tokenHashRef"], "secret resolution failed");
+      throw issue(
+        ["clients", config.clients.indexOf(client), "tokenHashRef"],
+        "secret resolution failed",
+      );
     }
     try {
-      await options.consumeSecret({ scope: "client-token-hash", ownerId: client.id, reference: client.tokenHashRef, value });
+      await options.consumeSecret({
+        scope: "client-token-hash",
+        ownerId: client.id,
+        reference: client.tokenHashRef,
+        value,
+      });
     } catch {
-      throw issue(["clients", config.clients.indexOf(client), "tokenHashRef"], "secret consumption failed");
+      throw issue(
+        ["clients", config.clients.indexOf(client), "tokenHashRef"],
+        "secret consumption failed",
+      );
     }
   }
   for (const provider of config.providers) {
     for (const credential of provider.credentials) {
       let value: string;
       try {
-        value = await options.resolver.resolve(credential.secretRef, options.signal);
+        value = await options.resolver.resolve(
+          credential.secretRef,
+          options.signal,
+        );
       } catch {
-        throw issue(["providers", config.providers.indexOf(provider), "credentials", provider.credentials.indexOf(credential), "secretRef"], "secret resolution failed");
+        throw issue(
+          [
+            "providers",
+            config.providers.indexOf(provider),
+            "credentials",
+            provider.credentials.indexOf(credential),
+            "secretRef",
+          ],
+          "secret resolution failed",
+        );
       }
       try {
-        await options.consumeSecret({ scope: "provider-credential", ownerId: credential.id, reference: credential.secretRef, value });
+        await options.consumeSecret({
+          scope: "provider-credential",
+          ownerId: credential.id,
+          reference: credential.secretRef,
+          value,
+        });
       } catch {
-        throw issue(["providers", config.providers.indexOf(provider), "credentials", provider.credentials.indexOf(credential), "secretRef"], "secret consumption failed");
+        throw issue(
+          [
+            "providers",
+            config.providers.indexOf(provider),
+            "credentials",
+            provider.credentials.indexOf(credential),
+            "secretRef",
+          ],
+          "secret consumption failed",
+        );
       }
     }
   }

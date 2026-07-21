@@ -1,27 +1,52 @@
 /** JSON scalar value retained without protocol normalization. */
 export type JsonPrimitive = string | number | boolean | null;
 /** Recursive JSON value retained without protocol normalization. */
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 /** Canonical ordered-message role. */
-export type CanonicalRole = "system" | "developer" | "user" | "assistant" | "tool";
+export type CanonicalRole =
+  "system" | "developer" | "user" | "assistant" | "tool";
 
 /**
  * Known capability tags used for routing and validation. Deliberately an open
  * string type: literals provide autocomplete while providers may add values.
  */
 export type KnownCapability =
-  | "reasoning" | "tools" | "server_tools" | "mcp" | "vision" | "multimodal"
-  | "audio_input" | "audio_output" | "image_generation" | "computer_use"
-  | "code_execution" | "web_search" | "citations" | "structured_outputs"
-  | "strict_tools" | "prompt_caching" | "logprobs" | "multiple_choices"
-  | "json" | "long_context" | "batch" | "background_execution";
+  | "reasoning"
+  | "tools"
+  | "server_tools"
+  | "mcp"
+  | "vision"
+  | "multimodal"
+  | "audio_input"
+  | "audio_output"
+  | "image_generation"
+  | "computer_use"
+  | "code_execution"
+  | "web_search"
+  | "citations"
+  | "structured_outputs"
+  | "strict_tools"
+  | "prompt_caching"
+  | "logprobs"
+  | "multiple_choices"
+  | "json"
+  | "long_context"
+  | "batch"
+  | "background_execution";
 /** Open capability name retaining unknown provider capabilities. */
 export type Capability = KnownCapability | (string & {});
 
 /** Structured source pointer attached to generated or search text. */
 export interface Citation {
-  kind: "char_span" | "page_span" | "block_span" | "search_result_span" | "url" | "file";
+  kind:
+    | "char_span"
+    | "page_span"
+    | "block_span"
+    | "search_result_span"
+    | "url"
+    | "file";
   sourceId?: string;
   sourceTitle?: string;
   citedText?: string;
@@ -49,27 +74,101 @@ export interface ContentBlockBase {
  * Ordered canonical content. Reasoning, text, and tool blocks remain interleaved
  * exactly as observed. Nested results preserve their own ordered content.
  */
-export type ContentBlock = ContentBlockBase & (
-  | { type: "text"; text: string; citations?: Citation[] }
-  | { type: "refusal"; refusal: string }
-  | { type: "image_url"; url: string; detail?: "auto" | "low" | "high" }
-  | { type: "image_base64"; mediaType: string; data: string }
-  | { type: "generated_image"; mediaType: string; data: string; revisedPrompt?: string; size?: string; background?: "transparent" | "opaque" | "auto" }
-  | { type: "audio_url"; url: string; format?: string }
-  | { type: "audio_base64"; mediaType: string; data: string }
-  | { type: "audio_output"; mediaType: string; data?: string; transcript?: string; expiresAt?: string }
-  | { type: "document_url"; url: string; mediaType?: string; title?: string; citationsEnabled?: boolean }
-  | { type: "document_base64"; mediaType: string; data: string; title?: string; citationsEnabled?: boolean }
-  | { type: "file_reference"; fileId: string; mediaType?: string; filename?: string }
-  | { type: "search_result"; sourceId: string; title: string; text: string; citationsEnabled?: boolean }
-  | { type: "reasoning"; text?: string; signature?: string; redactedData?: string; encryptedContent?: string }
-  | { type: "tool_call"; toolCallId: string; name: string; argumentsJson: string; caller?: "model" | "program" }
-  | { type: "tool_result"; toolCallId: string; content: ContentBlock[]; isError?: boolean }
-  | { type: "server_tool_call"; toolCallId: string; toolKind: string; name?: string; serverName?: string; input?: JsonValue; argumentsJson?: string; caller?: "model" | "program" }
-  | { type: "server_tool_result"; toolCallId: string; toolKind: string; content: ContentBlock[]; isError?: boolean }
-  | { type: "tool_approval_request"; toolCallId: string; toolKind?: string; reason?: string }
-  | { type: "tool_approval_response"; toolCallId: string; approved: boolean }
-);
+export type ContentBlock = ContentBlockBase &
+  (
+    | { type: "text"; text: string; citations?: Citation[] }
+    | { type: "refusal"; refusal: string }
+    | { type: "image_url"; url: string; detail?: "auto" | "low" | "high" }
+    | { type: "image_base64"; mediaType: string; data: string }
+    | {
+        type: "generated_image";
+        mediaType: string;
+        data: string;
+        revisedPrompt?: string;
+        size?: string;
+        background?: "transparent" | "opaque" | "auto";
+      }
+    | { type: "audio_url"; url: string; format?: string }
+    | { type: "audio_base64"; mediaType: string; data: string }
+    | {
+        type: "audio_output";
+        mediaType: string;
+        data?: string;
+        transcript?: string;
+        expiresAt?: string;
+      }
+    | {
+        type: "document_url";
+        url: string;
+        mediaType?: string;
+        title?: string;
+        citationsEnabled?: boolean;
+      }
+    | {
+        type: "document_base64";
+        mediaType: string;
+        data: string;
+        title?: string;
+        citationsEnabled?: boolean;
+      }
+    | {
+        type: "file_reference";
+        fileId: string;
+        mediaType?: string;
+        filename?: string;
+      }
+    | {
+        type: "search_result";
+        sourceId: string;
+        title: string;
+        text: string;
+        citationsEnabled?: boolean;
+      }
+    | {
+        type: "reasoning";
+        text?: string;
+        signature?: string;
+        redactedData?: string;
+        encryptedContent?: string;
+      }
+    | {
+        type: "tool_call";
+        toolCallId: string;
+        name: string;
+        argumentsJson: string;
+        caller?: "model" | "program";
+      }
+    | {
+        type: "tool_result";
+        toolCallId: string;
+        content: ContentBlock[];
+        isError?: boolean;
+      }
+    | {
+        type: "server_tool_call";
+        toolCallId: string;
+        toolKind: string;
+        name?: string;
+        serverName?: string;
+        input?: JsonValue;
+        argumentsJson?: string;
+        caller?: "model" | "program";
+      }
+    | {
+        type: "server_tool_result";
+        toolCallId: string;
+        toolKind: string;
+        content: ContentBlock[];
+        isError?: boolean;
+      }
+    | {
+        type: "tool_approval_request";
+        toolCallId: string;
+        toolKind?: string;
+        reason?: string;
+      }
+    | { type: "tool_approval_response"; toolCallId: string; approved: boolean }
+  );
 
 /**
  * System/developer instructions remain ordinary messages at their original
@@ -133,7 +232,8 @@ export interface McpServerConnection {
 /** Canonical reasoning mode. */
 export type ReasoningMode = "disabled" | "adaptive" | "enabled";
 /** Requested visibility of reasoning content. */
-export type ThinkingDisplay = "summarized" | "omitted" | "auto" | "concise" | "detailed";
+export type ThinkingDisplay =
+  "summarized" | "omitted" | "auto" | "concise" | "detailed";
 
 /**
  * Reasoning controls. Manual budgets remain available for older models;
@@ -169,7 +269,12 @@ export interface OutputConfiguration {
   effort?: "none" | "low" | "medium" | "high" | "max";
   verbosity?: "low" | "medium" | "high";
   format?: "text" | "json_object" | "json_schema";
-  jsonSchema?: { name?: string; description?: string; schema: Record<string, JsonValue>; strict?: boolean };
+  jsonSchema?: {
+    name?: string;
+    description?: string;
+    schema: Record<string, JsonValue>;
+    strict?: boolean;
+  };
   logprobs?: { enabled: boolean; topLogprobs?: number };
   providerParameters?: Record<string, JsonValue>;
 }
@@ -242,7 +347,12 @@ export interface StreamOptions {
 export interface CanonicalRequest {
   requestId: string;
   receivedAt: string;
-  source: { adapter: string; protocol: "openai-chat" | "openai-responses" | "anthropic-messages" | "custom"; path: string };
+  source: {
+    adapter: string;
+    protocol:
+      "openai-chat" | "openai-responses" | "anthropic-messages" | "custom";
+    path: string;
+  };
   model: string;
   messages: CanonicalMessage[];
   tools?: ToolDefinition[];
@@ -319,7 +429,13 @@ export type FinishReason =
   | "error";
 
 /** Lifecycle status shared by responses, jobs, and batches. */
-export type ResponseStatus = "queued" | "in_progress" | "completed" | "incomplete" | "failed" | "cancelled";
+export type ResponseStatus =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "incomplete"
+  | "failed"
+  | "cancelled";
 
 /** One independently generated response choice with ordered output. */
 export interface CanonicalChoice {
@@ -361,17 +477,86 @@ export interface ChunkAddress {
  * their values independently of cancellation and preserve sequence/address data.
  */
 export type CanonicalChunk =
-  | { type: "response_start"; responseId: string; model: string; createdAt: string; sequenceNumber?: number }
-  | { type: "content_block_start"; address: ChunkAddress; block: { type: ContentBlock["type"]; id?: string; name?: string; toolKind?: string; serverName?: string }; sequenceNumber?: number }
-  | { type: "text_delta"; address: ChunkAddress; text: string; sequenceNumber?: number }
-  | { type: "refusal_delta"; address: ChunkAddress; text: string; sequenceNumber?: number }
-  | { type: "reasoning_delta"; address: ChunkAddress; text?: string; signatureDelta?: string; redactedDataDelta?: string; encryptedContentDelta?: string; sequenceNumber?: number }
-  | { type: "audio_delta"; address: ChunkAddress; audioBase64?: string; transcriptDelta?: string; sequenceNumber?: number }
-  | { type: "tool_call_delta"; address: ChunkAddress; id?: string; name?: string; argumentsDelta?: string; sequenceNumber?: number }
-  | { type: "citation_added"; address: ChunkAddress; citation: Citation; sequenceNumber?: number }
-  | { type: "content_block_stop"; address: ChunkAddress; block?: ContentBlock; sequenceNumber?: number }
-  | { type: "usage"; usage: TokenUsage; cost?: CostMetrics; sequenceNumber?: number }
-  | { type: "choice_end"; choiceIndex?: number; finishReason: FinishReason; stopSequence?: string; sequenceNumber?: number }
+  | {
+      type: "response_start";
+      responseId: string;
+      model: string;
+      createdAt: string;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "content_block_start";
+      address: ChunkAddress;
+      block: {
+        type: ContentBlock["type"];
+        id?: string;
+        name?: string;
+        toolKind?: string;
+        serverName?: string;
+      };
+      sequenceNumber?: number;
+    }
+  | {
+      type: "text_delta";
+      address: ChunkAddress;
+      text: string;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "refusal_delta";
+      address: ChunkAddress;
+      text: string;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "reasoning_delta";
+      address: ChunkAddress;
+      text?: string;
+      signatureDelta?: string;
+      redactedDataDelta?: string;
+      encryptedContentDelta?: string;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "audio_delta";
+      address: ChunkAddress;
+      audioBase64?: string;
+      transcriptDelta?: string;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "tool_call_delta";
+      address: ChunkAddress;
+      id?: string;
+      name?: string;
+      argumentsDelta?: string;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "citation_added";
+      address: ChunkAddress;
+      citation: Citation;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "content_block_stop";
+      address: ChunkAddress;
+      block?: ContentBlock;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "usage";
+      usage: TokenUsage;
+      cost?: CostMetrics;
+      sequenceNumber?: number;
+    }
+  | {
+      type: "choice_end";
+      choiceIndex?: number;
+      finishReason: FinishReason;
+      stopSequence?: string;
+      sequenceNumber?: number;
+    }
   | { type: "response_end"; status: ResponseStatus; sequenceNumber?: number }
   | { type: "ping" }
   | { type: "error"; error: GatewayError; sequenceNumber?: number };
@@ -380,7 +565,15 @@ export type CanonicalChunk =
 export interface GatewayError {
   code: string;
   message: string;
-  category: "validation" | "authentication" | "authorization" | "rate_limit" | "upstream" | "timeout" | "routing" | "internal";
+  category:
+    | "validation"
+    | "authentication"
+    | "authorization"
+    | "rate_limit"
+    | "upstream"
+    | "timeout"
+    | "routing"
+    | "internal";
   retryable: boolean;
   retryAfterMs?: number;
   status: number;
@@ -392,7 +585,8 @@ export interface GatewayError {
 
 /** Lossless fields belonging to a source protocol. */
 export interface ProtocolParameterSet {
-  protocol: "openai-chat" | "openai-responses" | "anthropic-messages" | "custom";
+  protocol:
+    "openai-chat" | "openai-responses" | "anthropic-messages" | "custom";
   body: Record<string, JsonValue>;
   headers: Record<string, string>;
   sourceFields: ReadonlyArray<string>;
@@ -438,5 +632,9 @@ export interface CanonicalBatchSubmission {
 export interface CanonicalBatchResult {
   batchId: string;
   status: ResponseStatus;
-  results: { customId: string; response?: CanonicalResponse; error?: GatewayError }[];
+  results: {
+    customId: string;
+    response?: CanonicalResponse;
+    error?: GatewayError;
+  }[];
 }

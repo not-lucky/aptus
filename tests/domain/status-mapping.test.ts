@@ -49,7 +49,9 @@ describe("isContinuableFinishReason", () => {
 
 describe("deriveResponseStatus", () => {
   it("prioritizes an explicit error", () => {
-    expect(deriveResponseStatus({ finishReasons: ["stop"], hasError: true })).toBe("failed");
+    expect(
+      deriveResponseStatus({ finishReasons: ["stop"], hasError: true }),
+    ).toBe("failed");
   });
 
   it.each<[FinishReason[], ResponseStatus]>([
@@ -59,6 +61,8 @@ describe("deriveResponseStatus", () => {
     [["stop", "pause_turn"], "in_progress"],
     [["stop", "incomplete"], "incomplete"],
   ])("derives %j to %s", (finishReasons, status) => {
-    expect(deriveResponseStatus({ finishReasons, hasError: false })).toBe(status);
+    expect(deriveResponseStatus({ finishReasons, hasError: false })).toBe(
+      status,
+    );
   });
 });

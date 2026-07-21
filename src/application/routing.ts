@@ -1,16 +1,26 @@
-import type { CanonicalRequest, CanonicalResponse, GatewayError, RouteCandidate } from "../domain/index.js";
+import type {
+  CanonicalRequest,
+  CanonicalResponse,
+  GatewayError,
+  RouteCandidate,
+} from "../domain/index.js";
 import type { GatewayContext } from "./lifecycle.js";
 
 /** Resolves a canonical request into deterministic, policy-eligible candidates. */
 export interface RouteResolver {
   /** Returns ordered candidates without exposing credentials or configuration DTOs. */
-  resolve(request: CanonicalRequest, context: GatewayContext): Promise<ReadonlyArray<RouteCandidate>>;
+  resolve(
+    request: CanonicalRequest,
+    context: GatewayContext,
+  ): Promise<ReadonlyArray<RouteCandidate>>;
 }
 
 /** Reorders candidates according to one injected deterministic policy. */
 export interface SelectionStrategy {
   /** Returns a selected readonly ordering without mutating the input. */
-  select(candidates: ReadonlyArray<RouteCandidate>): ReadonlyArray<RouteCandidate>;
+  select(
+    candidates: ReadonlyArray<RouteCandidate>,
+  ): ReadonlyArray<RouteCandidate>;
 }
 
 /** Alias retained for strategy implementations selecting credential-safe targets. */
@@ -19,7 +29,9 @@ export type CredentialSelectionStrategy = SelectionStrategy;
 /** Selects candidates according to a named credential policy. */
 export interface CredentialSelector {
   /** Returns a deterministic readonly candidate ordering. */
-  select(candidates: ReadonlyArray<RouteCandidate>): ReadonlyArray<RouteCandidate>;
+  select(
+    candidates: ReadonlyArray<RouteCandidate>,
+  ): ReadonlyArray<RouteCandidate>;
 }
 
 /** Bounded asynchronous candidate traversal owned by the caller. */

@@ -8,8 +8,17 @@ import type {
   JsonValue,
 } from "../domain/index.js";
 import type { ProviderDispatchPort } from "../ports/dispatch.js";
-import type { EgressTranslationAdapter, IngressTranslationAdapter, RawIngressInput } from "../ports/translation.js";
-import type { GatewayPlugin, HookName, HookResult } from "./lifecycle.js";
+import type {
+  EgressTranslationAdapter,
+  IngressTranslationAdapter,
+  RawIngressInput,
+} from "../ports/translation.js";
+import type {
+  GatewayPlugin,
+  GatewayCommand,
+  HookName,
+  HookResult,
+} from "./lifecycle.js";
 
 /** Re-exports credential state ownership from the Ports layer. */
 export type { CredentialState, CredentialStatePort } from "../ports/index.js";
@@ -17,9 +26,13 @@ export type { CredentialState, CredentialStatePort } from "../ports/index.js";
 /** Creates protocol translation ports for an injected protocol namespace. */
 export interface ProtocolAdapterFactory {
   /** Creates an ingress adapter for a canonical source protocol. */
-  createIngress(protocol: CanonicalRequest["source"]["protocol"]): IngressTranslationAdapter;
+  createIngress(
+    protocol: CanonicalRequest["source"]["protocol"],
+  ): IngressTranslationAdapter;
   /** Creates an egress adapter for a canonical source protocol. */
-  createEgress(protocol: CanonicalRequest["source"]["protocol"]): EgressTranslationAdapter;
+  createEgress(
+    protocol: CanonicalRequest["source"]["protocol"],
+  ): EgressTranslationAdapter;
 }
 
 /** Creates provider dispatch ports without exposing SDK implementations. */
@@ -56,20 +69,13 @@ export interface TraceRecordBuilder {
   build(): Record<string, JsonValue>;
 }
 
+export type { GatewayCommand } from "./lifecycle.js";
 /** Application facade consumed by outer transports and black-box callers. */
 export interface GatewayApplication {
   /** Handles one raw ingress input and returns a response or safe gateway error. */
   handle(input: RawIngressInput): Promise<CanonicalResponse | GatewayError>;
   /** Streams bounded canonical chunks for one raw ingress input. */
   stream(input: RawIngressInput): AsyncIterable<CanonicalChunk>;
-}
-
-/** Cancellable lifecycle command with optional caller-owned undo cleanup. */
-export interface GatewayCommand<T = unknown> {
-  /** Executes once while observing the supplied cancellation signal. */
-  execute(signal: AbortSignal): Promise<T>;
-  /** Undoes command-owned effects; the caller owns invocation timing. */
-  undo?(): Promise<void>;
 }
 
 /** Applies an exhaustive operation to every canonical content-block variant. */
@@ -83,8 +89,6 @@ export interface ChunkVisitor<T> {
   /** Visits one discriminated canonical stream chunk. */
   visit(chunk: CanonicalChunk): T;
 }
-
-
 
 /** Plugin specialized to upstream outcomes and errors for cooldown updates. */
 export interface CooldownPlugin extends GatewayPlugin {
@@ -106,14 +110,18 @@ export interface AdapterRegistry {
   /** Looks up an ingress adapter by route path. */
   ingress(path: string): IngressTranslationAdapter;
   /** Looks up an egress adapter by canonical source protocol. */
-  egress(protocol: CanonicalRequest["source"]["protocol"]): EgressTranslationAdapter;
+  egress(
+    protocol: CanonicalRequest["source"]["protocol"],
+  ): EgressTranslationAdapter;
 }
 
 /** Alias retaining the provider factory role at the adapter boundary. */
 export type ProviderAdapterFactory = ProviderFactory;
 
 /** Cancellable command associated with one plugin lifecycle hook. */
-export interface HookCommand<T = unknown> extends GatewayCommand<HookResult<T>> {
+export interface HookCommand<T = unknown> extends GatewayCommand<
+  HookResult<T>
+> {
   /** Plugin owning this command. */
   readonly pluginId: string;
   /** Hook represented by this command. */
@@ -129,7 +137,6 @@ export interface TraceRecord extends Record<string, JsonValue> {
   /** Lifecycle phase represented by this record. */
   phase: HookName;
 }
-
 
 /** Proxy that guards and forwards provider dispatch operations. */
 export interface GuardedDispatchProxy extends ProviderDispatchDecorator {}
@@ -147,4 +154,3 @@ export interface RetryBudgetDecorator extends ProviderDispatchDecorator {}
 export interface CostAuditDecorator extends ProviderDispatchDecorator {}
 /** Decorator role for redacting trace observations. */
 export interface RedactingTraceDecorator extends ProviderDispatchDecorator {}
-

@@ -16,6 +16,8 @@ export interface RawIngressInput {
   headers: Record<string, string>;
   /** Untrusted protocol body awaiting validation. */
   body: unknown;
+  /** Optional caller-owned cancellation signal linked to the application scope. */
+  readonly signal?: AbortSignal;
   /** Optional externally supplied request identity. */
   requestId?: string;
 }
@@ -39,7 +41,10 @@ export interface IngressTranslationAdapter {
   /** Checks whether this adapter can parse a path/body pair. */
   canTranslate(path: string, body: unknown): boolean;
   /** Produces a validated canonical request without outer transport types. */
-  translate(input: RawIngressInput, context: TranslationContext): CanonicalRequest;
+  translate(
+    input: RawIngressInput,
+    context: TranslationContext,
+  ): CanonicalRequest;
 }
 
 /** Converts canonical output and errors into one protocol’s egress values. */
@@ -47,7 +52,10 @@ export interface EgressTranslationAdapter {
   /** Protocol namespace encoded by this adapter. */
   readonly protocol: CanonicalRequest["source"]["protocol"];
   /** Encodes a complete canonical response. */
-  encodeResponse(response: CanonicalResponse, context: TranslationContext): EgressValue;
+  encodeResponse(
+    response: CanonicalResponse,
+    context: TranslationContext,
+  ): EgressValue;
   /** Encodes one bounded canonical stream chunk. */
   encodeChunk(chunk: CanonicalChunk, context: TranslationContext): EgressValue;
   /** Encodes a safe canonical gateway error. */
