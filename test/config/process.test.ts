@@ -301,6 +301,82 @@ test.concurrent("process: complete sample boots, probes, reports readiness, exit
   assertNoSecretLeak({ stdout, stderr, code: null, signal: null }, Object.values(env));
 });
 
+test.concurrent("process: client ingress catalogs and operations metrics are live", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aptus-process-http-"));
+  writeFileSync(
+    join(dir, "aptus.yaml"),
+    completeYaml({
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
+    }),
+  );
+  const env = seededEnv("http");
+  const child = spawn(
+    process.execPath,
+    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
+    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  const exited = once(child, "exit").then(([code, signal]) => ({ code, signal }));
+  const redact = (text: string): string =>
+    Object.values(env).reduce((acc, secret) => acc.split(secret).join("***"), text);
+  try {
+    await waitFor(() => /^aptus ready: /m.test(stdout), "ready line");
+    const match = /aptus ready: operations http:\/\/[^:]+:(\d+), client http:\/\/[^:]+:(\d+)/.exec(stdout);
+    assert.ok(match, "ready line matched");
+    const operationsPort = Number(match[1]);
+    const clientPort = Number(match[2]);
+
+    const catalog = await fetch(`http://127.0.0.1:${clientPort}/v1/models`, {
+      headers: { authorization: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+    });
+    assert.equal(catalog.status, 200);
+    const catalogBody = (await catalog.json()) as { data: Array<{ id: string }> };
+    assert.deepEqual(
+      catalogBody.data.map((entry) => entry.id),
+      ["claude-main", "gpt-main", "reliable-chat"],
+    );
+
+    const rejected = await fetch(`http://127.0.0.1:${clientPort}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      body: '{"model":"gpt-main","model":"gpt-main"}',
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.headers.get("x-aptus-request-id"), null);
+
+    const unavailable = await fetch(`http://127.0.0.1:${clientPort}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      body: '{"model":"gpt-main"}',
+    });
+    assert.equal(unavailable.status, 503);
+    assert.match(
+      unavailable.headers.get("x-aptus-request-id") ?? "",
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+
+    const metrics = await fetch(`http://127.0.0.1:${operationsPort}/metrics`);
+    assert.equal(metrics.status, 200);
+    assert.match(await metrics.text(), /aptus_operations_requests_total\{endpoint="metrics"}/);
+    child.kill("SIGTERM");
+    const exit = await exited;
+    assert.equal(exit.code, 0, `stdout: ${redact(stdout)}\nstderr: ${redact(stderr)}`);
+  } catch (error) {
+    throw new Error(`${String(error)}\nstdout: ${redact(stdout)}\nstderr: ${redact(stderr)}`, { cause: error });
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    assertNoSecretLeak({ stdout, stderr, code: null, signal: null }, Object.values(env));
+  }
+});
+
 test.concurrent("process: config path resolution precedence (--config > APTUS_CONFIG > ./aptus.yaml)", async () => {
   const env = seededEnv("path-res");
 
@@ -316,13 +392,15 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": `  port: ${operationsPortA}`,
     }),
   );
-  const childA = spawn(
-    process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", configA],
-    { cwd: dirA, env: mergedEnv({ ...env, APTUS_CONFIG: "/nonexistent/aptus.yaml" }), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const childA = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", configA], {
+    cwd: dirA,
+    env: mergedEnv({ ...env, APTUS_CONFIG: "/nonexistent/aptus.yaml" }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdoutA = "";
-  childA.stdout?.on("data", (chunk: Buffer) => { stdoutA += chunk.toString(); });
+  childA.stdout?.on("data", (chunk: Buffer) => {
+    stdoutA += chunk.toString();
+  });
   const exitedA = once(childA, "exit").then(([code, signal]) => ({ code, signal }));
   try {
     await waitFor(() => /^aptus ready: /m.test(stdoutA), "ready line A");
@@ -345,13 +423,15 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": `  port: ${operationsPortB}`,
     }),
   );
-  const childB = spawn(
-    process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI],
-    { cwd: dirB, env: mergedEnv({ ...env, APTUS_CONFIG: configB }), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const childB = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI], {
+    cwd: dirB,
+    env: mergedEnv({ ...env, APTUS_CONFIG: configB }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdoutB = "";
-  childB.stdout?.on("data", (chunk: Buffer) => { stdoutB += chunk.toString(); });
+  childB.stdout?.on("data", (chunk: Buffer) => {
+    stdoutB += chunk.toString();
+  });
   const exitedB = once(childB, "exit").then(([code, signal]) => ({ code, signal }));
   try {
     await waitFor(() => /^aptus ready: /m.test(stdoutB), "ready line B");
@@ -373,13 +453,15 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": `  port: ${operationsPortC}`,
     }),
   );
-  const childC = spawn(
-    process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI],
-    { cwd: dirC, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const childC = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI], {
+    cwd: dirC,
+    env: mergedEnv(env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdoutC = "";
-  childC.stdout?.on("data", (chunk: Buffer) => { stdoutC += chunk.toString(); });
+  childC.stdout?.on("data", (chunk: Buffer) => {
+    stdoutC += chunk.toString();
+  });
   const exitedC = once(childC, "exit").then(([code, signal]) => ({ code, signal }));
   try {
     await waitFor(() => /^aptus ready: /m.test(stdoutC), "ready line C");
@@ -394,7 +476,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
   const dirD = mkdtempSync(join(tmpdir(), "aptus-process-path-d-"));
   const resultD = await spawnCli([], env, dirD);
   assert.equal(resultD.code, 78);
-  assert.match(stripDepWarnings(resultD.stderr), /^CONFIG_FILE_READ  cannot read config file/);
+  assert.match(stripDepWarnings(resultD.stderr), /^CONFIG_FILE_READ {2}cannot read config file/);
 });
 
 test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
@@ -415,7 +497,9 @@ test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
   const exited = once(child, "exit").then(([code, signal]) => ({ code, signal }));
 
   try {
@@ -448,7 +532,9 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
   const exited = once(child, "exit").then(([code, signal]) => ({ code, signal }));
 
   let socket: net.Socket | undefined;
@@ -508,7 +594,9 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
   const exited = once(child, "exit").then(([code, signal]) => ({ code, signal }));
 
   let socket: net.Socket | undefined;
@@ -540,4 +628,3 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
 });
-

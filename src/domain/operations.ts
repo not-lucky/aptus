@@ -1,7 +1,12 @@
 import type { HeaderMap, JsonObject, Protocol } from "./contracts.js";
 import type { AptusRequestId } from "./request-id.js";
 
-/** The canonical 13-member failure category set. */
+/**
+ * The canonical 13-member failure category set.
+ *
+ * Provides a protocol-neutral taxonomy for classifying request, authentication,
+ * routing, upstream provider, and transport errors.
+ */
 export type IrFailureCategory =
   | "invalid_request"
   | "authentication"
@@ -17,33 +22,65 @@ export type IrFailureCategory =
   | "unsupported_capability"
   | "stream_interrupted";
 
-/** A client-safe normalized failure. */
+/**
+ * A client-safe normalized failure containing classified category, safe messages, and retry metadata.
+ */
 export interface NormalizedFailure {
-  /** Stable category that selects status and policy. */
+  /**
+   * Stable failure category that determines HTTP status code and routing/retry policies.
+   */
   readonly category: IrFailureCategory;
-  /** Redacted bounded human-readable message. */
+
+  /**
+   * Bounded, redacted human-readable error description safe for client return.
+   */
   readonly message: string;
-  /** At most one upstream or Aptus code/type string. */
+
+  /**
+   * Optional upstream or Aptus-specific error code/type identifier.
+   */
   readonly code?: string;
-  /** Capability ID for `unsupported_capability`; omitted otherwise. */
+
+  /**
+   * Specific capability identifier when {@link category} is `"unsupported_capability"`; omitted otherwise.
+   */
   readonly capability?: string;
-  /** Normalized retry delay in whole seconds when safe. */
+
+  /**
+   * Normalized retry delay in whole seconds when safely extractable from upstream response headers.
+   */
   readonly retryAfterSeconds?: number;
-  /** True only when same-Candidate safety rules can still permit a retry. */
+
+  /**
+   * Whether candidate routing or gateway policy permits retrying this failure on the same candidate.
+   */
   readonly retryable: boolean;
 }
 
-/** A protocol-native encoded expected failure. */
+/**
+ * A protocol-native encoded expected failure ready for HTTP serialization.
+ */
 export interface EncodedFailure {
-  /** Target status from the exact failure map. */
+  /**
+   * HTTP status code determined by protocol and failure category mapping.
+   */
   readonly status: number;
-  /** Target content headers plus Aptus request ID and optional Retry-After. */
+
+  /**
+   * Response headers containing `content-type`, `x-aptus-request-id`, and optional `retry-after`.
+   */
   readonly headers: HeaderMap;
-  /** UTF-8 target-native error envelope. */
+
+  /**
+   * UTF-8 encoded protocol-native error envelope payload.
+   */
   readonly body: Uint8Array;
 }
 
-/** A Trace stage identity whose sequence number is assigned by the session. */
+/**
+ * An ordered trace stage identity corresponding to a discrete point in request lifecycle.
+ * Sequence numbers are assigned sequentially by the TraceSession.
+ */
 export type TraceStage =
   | "client_request"
   | "authentication"
@@ -64,94 +101,182 @@ export type TraceStage =
   | "cancellation"
   | "trace_failure";
 
-/** Exactly one terminal Trace result. */
+/**
+ * The final terminal outcome of a request recorded in `999_terminal.json`.
+ */
 export type TraceTerminal =
   | {
+      /** Successful completion with HTTP status and optional token usage / cost estimates. */
       readonly kind: "complete";
       readonly status: number;
       readonly usage?: JsonObject;
       readonly estimatedCostUsd?: string;
     }
-  | { readonly kind: "failed"; readonly failure: NormalizedFailure }
-  | { readonly kind: "cancelled"; readonly by: "client" | "shutdown" }
-  | { readonly kind: "dry_run" }
-  | { readonly kind: "incomplete"; readonly reason: "trace_write_failed" | "process_exit" | "shutdown_abort" };
+  | {
+      /** Request terminated with an expected domain failure. */
+      readonly kind: "failed";
+      readonly failure: NormalizedFailure;
+    }
+  | {
+      /** Request cancelled by client disconnect or graceful shutdown. */
+      readonly kind: "cancelled";
+      readonly by: "client" | "shutdown";
+    }
+  | {
+      /** Request was executed in dry-run mode without upstream dispatch. */
+      readonly kind: "dry_run";
+    }
+  | {
+      /** Trace aborted prematurely due to write failure, process crash, or shutdown timeout. */
+      readonly kind: "incomplete";
+      readonly reason: "trace_write_failed" | "process_exit" | "shutdown_abort";
+    };
 
-/** Immutable Trace manifest. */
+/**
+ * Immutable manifest file (`000_manifest.json`) written at the start of every trace session.
+ */
 export interface TraceManifest {
-  /** Trace schema version. */
+  /**
+   * Trace schema version. Currently pinned to `1`.
+   */
   readonly schemaVersion: 1;
-  /** Aptus request identity. */
+
+  /**
+   * The unique Aptus request identifier.
+   */
   readonly aptusRequestId: AptusRequestId;
-  /** RFC 3339 start time. */
+
+  /**
+   * RFC 3339 formatted local start timestamp.
+   */
   readonly startedAt: string;
-  /** Client Protocol. */
+
+  /**
+   * Protocol used by the incoming client create request.
+   */
   readonly sourceProtocol: Protocol;
-  /** Frozen config revision digest. */
+
+  /**
+   * SHA-256 digest of the canonical redacted configuration active when the request started.
+   */
   readonly configRevision: string;
-  /** Credential-only parsed-field redaction policy. */
+
+  /**
+   * Applied secret redaction policy identifier.
+   */
   readonly redaction: "credentials-and-resolved-secrets";
-  /** Warning that general payload data is protected plaintext. */
+
+  /**
+   * Storage protection indicator noting payload confidentiality is enforced by OS file permissions (0700/0600).
+   */
   readonly payloadProtection: "filesystem-permissions-only";
 }
 
-/** Result of one retention pass. */
+/**
+ * Statistical summary of a trace retention cleanup execution.
+ */
 export interface RetentionResult {
-  /** Completed Trace directories deleted for age. */
+  /**
+   * Number of completed trace directories deleted because they exceeded maximum retention age.
+   */
   readonly deletedForAge: number;
-  /** Completed Trace directories deleted for byte limit. */
+
+  /**
+   * Number of completed trace directories deleted because total trace disk usage exceeded byte limits.
+   */
   readonly deletedForSize: number;
-  /** Active or incomplete directories skipped. */
+
+  /**
+   * Number of active or incomplete trace directories skipped during retention sweep.
+   */
   readonly skipped: number;
-  /** Bytes of completed traces after cleanup. */
+
+  /**
+   * Total disk size in bytes of remaining completed traces after cleanup.
+   */
   readonly remainingBytes: number;
 }
 
-/** Operations health payload. */
+/**
+ * Health check JSON payload returned by `/health/live`, `/health/ready`, and `/health`.
+ */
 export interface HealthPayload {
-  /** `ok` for ready/live, `degraded` for not-ready readiness responses. */
+  /**
+   * Process health status: `"ok"` when operational/live, `"degraded"` when draining or trace subsystem failed.
+   */
   readonly status: "ok" | "degraded";
-  /** Frozen redacted config revision. */
+
+  /**
+   * SHA-256 digest of the running redacted configuration.
+   */
   readonly configRevision: string;
-  /** File Trace subsystem readiness. */
+
+  /**
+   * File trace subsystem readiness. `false` if startup probe failed or runtime write degradation occurred.
+   */
   readonly traceReady: boolean;
-  /** Number of configured providers with at least one enabled key. */
+
+  /**
+   * Number of configured providers that currently have at least one enabled API key.
+   */
   readonly enabledProviderCount: number;
 }
 
-/** Input to a target-native expected-failure encoder. */
+/**
+ * Input arguments for encoding an expected domain failure into a protocol-native response.
+ */
 export interface ErrorEncodingInput {
-  /** Client Protocol that owns the error envelope. */
+  /**
+   * The client protocol that owns the error response envelope shape.
+   */
   readonly protocol: Protocol;
-  /** Aptus request identity exposed in a response header. */
+
+  /**
+   * The Aptus request ID to include in the `x-aptus-request-id` header and Anthropic envelope.
+   */
   readonly aptusRequestId: AptusRequestId;
-  /** Client-safe normalized failure. */
+
+  /**
+   * The normalized domain failure to encode.
+   */
   readonly failure: NormalizedFailure;
 }
 
-/** Encodes expected failures without foreign provider envelopes. */
+/**
+ * Encoder contract for serializing normalized domain failures into protocol-native envelopes.
+ */
 export interface ErrorEncoder {
-  /** Encodes one target-native error.
-   * @param input Target protocol, request identity, and normalized failure.
-   * @returns Exact status, safe headers, and UTF-8 body.
+  /**
+   * Encodes a normalized domain failure into target protocol error envelope bytes and headers.
+   *
+   * @param input - The target protocol, request ID, and failure description.
+   * @returns An {@link EncodedFailure} with exact HTTP status, safe headers, and JSON body.
    */
   encode(input: ErrorEncodingInput): EncodedFailure;
 }
 
-/** Runs retention over completed Trace directories. */
+/**
+ * Subsystem contract for sweeping expired or oversized completed trace directories.
+ */
 export interface TraceRetention {
-  /** Deletes eligible completed traces.
-   * @param nowMs Wall-clock Unix time in milliseconds.
-   * @returns Counts and completed-Trace bytes after cleanup.
-   * @throws Only for local filesystem I/O; the scheduler catches it and degrades Trace readiness.
+  /**
+   * Executes a single retention pass over the configured trace storage root.
+   *
+   * @param nowMs - Current wall-clock Unix time in milliseconds.
+   * @returns A promise resolving to the cleanup statistics.
+   * @throws Local filesystem I/O errors, which degrade trace readiness.
    */
   run(nowMs: number): Promise<RetentionResult>;
 }
 
-/** Builds the current operations health payload without provider network I/O. */
+/**
+ * Reporter contract for querying the current process-local health state without network I/O.
+ */
 export interface HealthReporter {
-  /** Reads process-local readiness facts.
-   * @returns A secret-free immutable health payload.
+  /**
+   * Reads current readiness facts.
+   *
+   * @returns An immutable, secret-free {@link HealthPayload}.
    */
   current(): HealthPayload;
 }

@@ -6,6 +6,9 @@ import { type Runtime, startRuntime } from "./run.js";
 const argv = process.argv.slice(2);
 const env = process.env;
 
+/**
+ * Emits startup errors to standard error and terminates the process with EX_CONFIG (exit code 78).
+ */
 function fail(errorLines: readonly string[]): never {
   for (const line of errorLines) {
     process.stderr.write(`${line}\n`);
@@ -13,6 +16,13 @@ function fail(errorLines: readonly string[]): never {
   process.exit(78);
 }
 
+/**
+ * Main CLI entry point:
+ * 1. Resolves config path from CLI flags / env / default.
+ * 2. Loads and verifies configuration through fail-closed pipeline.
+ * 3. Starts runtime listeners.
+ * 4. Installs SIGINT and SIGTERM lifecycle signal handlers.
+ */
 async function main(): Promise<void> {
   const pathResult = resolveConfigPath(argv, env);
   if (!pathResult.ok) {
@@ -35,10 +45,19 @@ async function main(): Promise<void> {
   );
 }
 
-/** Signals are registered only after both listeners are bound. */
+/**
+ * Registers OS signal listeners (`SIGTERM` and `SIGINT`) for graceful shutdown management.
+ *
+ * Behavior:
+ * - First signal: Initiates graceful shutdown (`runtime.shutdown.run()`), allowing in-flight requests to finish within the drain window.
+ * - Second signal: Triggers immediate abort (`runtime.shutdown.abort()`), cancelling in-flight work immediately.
+ *
+ * @param runtime - Active runtime instance with shutdown coordinator.
+ */
 export function installSignalHandlers(runtime: Runtime): void {
   let shuttingDown = false;
   const onSignal = (): void => {
+    // If signal received while already shutting down, force immediate abort.
     if (shuttingDown) {
       runtime.shutdown.abort();
       return;

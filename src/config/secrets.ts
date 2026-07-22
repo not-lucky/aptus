@@ -1,30 +1,52 @@
 import { type Document, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
 import { jsonPointer, type StartupError, startupError } from "./errors.js";
 
-/** One resolved environment reference: its path segments and the env name. */
+/**
+ * Internal record of a discovered secret environment reference.
+ */
 interface ResolvedSecret {
+  /** RFC 6901 JSON pointer segments locating the secret field. */
   readonly segments: readonly (string | number)[];
+  /** Name of the referenced environment variable (e.g., `"OPENAI_API_KEY"`). */
   readonly envName: string;
 }
 
+/**
+ * Result of secret discovery and environment resolution.
+ */
 export type ResolveSecretsResult =
-  | { readonly ok: true; readonly raw: unknown; readonly references: Map<string, string> }
-  | { readonly ok: false; readonly errors: readonly StartupError[] };
+  | {
+      readonly ok: true;
+      /** Javascript object representation of the parsed YAML with resolved secrets overlaid. */
+      readonly raw: unknown;
+      /** Map of secret JSON pointer paths to their referenced environment variable names. */
+      readonly references: Map<string, string>;
+    }
+  | {
+      readonly ok: false;
+      /** Validation and resolution errors encountered. */
+      readonly errors: readonly StartupError[];
+    };
 
+/** Matches an exact `${ENV_VAR_NAME}` pattern with a valid identifier. */
 const SECRET_REFERENCE_PATTERN = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
-/** Any `${NAME}` occurrence outside a declared secret field. */
+
+/** Matches any `${NAME}` substring, used to detect illegal interpolation in non-secret scalar values. */
 const INTERPOLATION_PATTERN = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/;
 
 /**
- * Resolve every declared secret field (`/auth/clientKeys/<i>/secret` and
- * `/providers/<i>/keys/<j>/secret`) from the process environment. A declared
- * secret must be exactly `\` with `ENV_NAME` matching
- * `[A-Za-z_][A-Za-z0-9_]*` and a non-empty environment value. `${...}` in any
- * other string scalar is rejected; mapping keys are never checked.
+ * Scans the parsed YAML AST to resolve declared secret fields and enforce strict secret grammar:
  *
- * On success, `raw` is the scalar-coerced YAML value tree with each resolved
- * value overlaid at its path, and `references` maps each secret's JSON pointer
- * to its environment variable name.
+ * Rules:
+ * 1. Only declared secret fields (`/auth/clientKeys/<i>/secret` and `/providers/<i>/keys/<j>/secret`) may contain `${ENV_NAME}`.
+ * 2. In declared secret fields, the value must be an exact `${ENV_NAME}` token (no partial interpolation, whitespace, or prefix/suffix).
+ * 3. The referenced environment variable must exist and be non-empty.
+ * 4. `${...}` interpolation patterns in any non-secret scalar string are strictly rejected (`CONFIG_INTERPOLATION_FORBIDDEN`).
+ * 5. Mapping keys are never evaluated for secret grammar or interpolation.
+ *
+ * @param document - The parsed YAML AST document.
+ * @param env - Environment variable map.
+ * @returns {@link ResolveSecretsResult} containing the overlaid raw data tree and references map, or errors.
  */
 export function resolveSecrets(
   document: Document.Parsed,
@@ -37,8 +59,10 @@ export function resolveSecrets(
     return { ok: false, errors };
   }
 
+  // Convert YAML AST to plain JS objects.
   const raw = document.toJS();
   const references = new Map<string, string>();
+  // Overlay actual resolved secret values into the raw object tree and record their env variable names.
   for (const entry of resolved) {
     setPath(raw, entry.segments, env[entry.envName]);
     references.set(jsonPointer(entry.segments), entry.envName);
@@ -46,6 +70,9 @@ export function resolveSecrets(
   return { ok: true, raw, references };
 }
 
+/**
+ * Recursive visitor traversing YAML AST nodes to locate secret fields and validate against illegal interpolation.
+ */
 function walkSecrets(
   node: YamlNode | null,
   path: readonly (string | number)[],
@@ -76,6 +103,7 @@ function walkSecrets(
   }
 
   const value = node.value;
+  // If this AST node is located at a declared secret path:
   if (isSecretPath(path)) {
     if (typeof value !== "string") {
       errors.push(
@@ -105,6 +133,7 @@ function walkSecrets(
       resolved.push({ segments: path, envName });
       return;
     }
+    // Check if the secret value looks like an invalid environment reference (e.g. invalid chars).
     if (value.startsWith("${") && value.endsWith("}")) {
       errors.push(
         startupError(
@@ -115,6 +144,7 @@ function walkSecrets(
       );
       return;
     }
+    // Plain literal string or other non-exact pattern in secret field.
     errors.push(
       startupError(
         "CONFIG_SECRET_LITERAL",
@@ -125,6 +155,7 @@ function walkSecrets(
     );
     return;
   }
+  // If not a declared secret field, ensure no ${...} interpolation pattern is present in scalar strings.
   if (typeof value === "string" && INTERPOLATION_PATTERN.test(value)) {
     errors.push(
       startupError(
@@ -136,6 +167,11 @@ function walkSecrets(
   }
 }
 
+/**
+ * Checks whether a given path corresponds to a declared secret field:
+ * - `/auth/clientKeys/<i>/secret` (length 4)
+ * - `/providers/<i>/keys/<j>/secret` (length 5)
+ */
 function isSecretPath(path: readonly (string | number)[]): boolean {
   return (
     (path.length === 4 &&
@@ -152,7 +188,9 @@ function isSecretPath(path: readonly (string | number)[]): boolean {
   );
 }
 
-/** Overlays `value` at `segments` inside a plain YAML-derived tree. */
+/**
+ * Overlays a value at `segments` inside a plain YAML-derived JavaScript object/array tree.
+ */
 function setPath(target: unknown, segments: readonly (string | number)[], value: unknown): void {
   let current = target as Record<string | number, unknown>;
   const last = segments.length - 1;

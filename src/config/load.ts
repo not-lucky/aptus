@@ -10,19 +10,32 @@ import { resolveSecrets } from "./secrets.js";
 import type { AptusConfig } from "./types.js";
 import { validateCrossReferences } from "./validate.js";
 
+/**
+ * Result of a successful configuration load and verification.
+ */
 export interface LoadedConfig {
-  /** Deep-frozen resolved config snapshot. */
+  /** Deep-frozen resolved configuration snapshot. */
   readonly config: AptusConfig;
-  /** `sha256:` digest over the canonical redacted config JSON. */
+  /** `sha256:` digest computed over the canonical redacted configuration JSON. */
   readonly revision: string;
 }
 
-/** Resolve the config path: `--config <path>`, then `APTUS_CONFIG`, then `./aptus.yaml`. */
+/**
+ * Resolves the configuration file path using strict precedence:
+ * 1. CLI flag `--config <path>`
+ * 2. Environment variable `APTUS_CONFIG`
+ * 3. Default fallback `./aptus.yaml`
+ *
+ * @param argv - Process CLI argument list.
+ * @param env - Process environment variable dictionary.
+ * @returns Result containing the resolved configuration path or startup errors for invalid arguments.
+ */
 export function resolveConfigPath(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
 ): Result<string, readonly StartupError[]> {
   const firstFlag = argv.indexOf("--config");
+  // Check for duplicate --config flags.
   if (firstFlag !== -1 && argv.indexOf("--config", firstFlag + 1) !== -1) {
     return { ok: false, error: [startupError("CONFIG_CLI_ARGUMENT", "", "--config must be provided at most once")] };
   }
@@ -44,18 +57,25 @@ export function resolveConfigPath(
 }
 
 /**
- * Read the selected file once, then run the strict startup pipeline in order:
- * one YAML document with aliases, merge keys, non-string keys, and custom tags
- * rejected; exact secret resolution at declared secret fields; strict Zod
- * validation; cross-reference and policy validation; the Trace startup probe
- * when tracing is enabled; and finally deep-freeze plus a SHA-256 revision
- * over the canonical redacted representation (resolved secret values replaced
- * by their environment variable names).
+ * Executes the complete fail-closed configuration loading and validation pipeline:
+ *
+ * 1. File reading: Read YAML file into memory.
+ * 2. YAML syntax & AST rules: Exactly 1 document; reject aliases, merge keys (`<<`), non-string keys, and custom tags.
+ * 3. Secret resolution: Resolve declared `${ENV_NAME}` references against environment variables.
+ * 4. Structural validation: Validate shapes, defaults, and bounds with Zod schema.
+ * 5. Semantic & policy validation: Verify cross-references, URL normalization, and namespace uniqueness.
+ * 6. Filesystem probe: Verify trace storage root permissions and writeability when tracing is enabled.
+ * 7. Revision & freeze: Compute deterministic SHA-256 revision over redacted config and deep-freeze the object.
+ *
+ * @param path - Path to the YAML configuration file.
+ * @param env - Environment variable dictionary (defaults to `process.env`).
+ * @returns Promise resolving to {@link LoadedConfig} on success, or a sorted array of {@link StartupError} on failure.
  */
 export async function loadConfig(
   path: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<Result<LoadedConfig, readonly StartupError[]>> {
+  // Stage 1: Read configuration file.
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -63,6 +83,7 @@ export async function loadConfig(
     return { ok: false, error: [startupError("CONFIG_FILE_READ", "", `cannot read config file "${path}"`)] };
   }
 
+  // Stage 2: Parse YAML document and check AST constraints.
   const documents = parseAllDocuments(text, { keepSourceTokens: true, merge: false, uniqueKeys: true, schema: "core" });
   const document = documents[0];
   if (documents.length !== 1 || document === undefined) {
@@ -90,7 +111,7 @@ export async function loadConfig(
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 3: exact secret resolution at declared secret paths only.
+  // Stage 3: Exact secret resolution at declared secret paths only.
   const secretResult = resolveSecrets(document, env);
   if (!secretResult.ok) {
     errors.push(...secretResult.errors);
@@ -103,7 +124,7 @@ export async function loadConfig(
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 4: strict structural validation with defaults.
+  // Stage 4: Strict structural validation with defaults.
   const parsed = aptusConfigSchema.safeParse(raw);
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
@@ -120,7 +141,7 @@ export async function loadConfig(
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 5: cross-reference and policy validation (normalizes baseUrl in place).
+  // Stage 5: Cross-reference and policy validation (normalizes baseUrl in place).
   errors.push(...validateCrossReferences(parsed.data));
   if (errors.length > 0) {
     return { ok: false, error: sortStartupErrors(errors) };
@@ -135,7 +156,7 @@ export async function loadConfig(
     }
   }
 
-  // Stage 7: redacted revision over a clone with env names at secret paths, then freeze.
+  // Stage 7: Redacted revision over a clone with env names at secret paths, then freeze.
   const redacted = structuredClone(parsed.data);
   for (const [pointer, envName] of secretResult.references) {
     setPath(redacted, segmentsFromPointer(pointer), envName);
@@ -148,9 +169,17 @@ export async function loadConfig(
 }
 
 /**
- * Deterministic canonical JSON: sorted object keys, no whitespace, and no
- * undefined values. Resolved secret values are never present in the input to
- * this function; the caller overlays environment variable names first.
+ * Serializes a value into deterministic canonical JSON format:
+ * - Object keys sorted lexicographically
+ * - No whitespace
+ * - Non-finite numbers coerced to `null`
+ *
+ * @param value - Value to serialize into canonical JSON string.
+ * @returns Deterministic JSON string.
+ *
+ * @remarks
+ * Resolved secret values are never passed directly to this function; the caller overlays
+ * environment variable names first to ensure secret material is excluded from config digests.
  */
 export function canonicalJson(value: unknown): string {
   if (value === null || value === undefined) {
@@ -172,6 +201,13 @@ export function canonicalJson(value: unknown): string {
   return `{${entries.map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(",")}}`;
 }
 
+/**
+ * Recursively freezes an object and all nested properties using `Object.freeze()`.
+ *
+ * @typeParam T - Object type to freeze.
+ * @param value - Object or primitive to freeze.
+ * @returns Deeply frozen immutable reference to `value`.
+ */
 export function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== "object") {
     return value;
@@ -183,7 +219,9 @@ export function deepFreeze<T>(value: T): T {
   return value;
 }
 
-/** Safe bounded message for one Zod issue; never embeds received values. */
+/**
+ * Produces a safe, bounded human error message for a Zod issue without reflecting raw input values.
+ */
 function safeSchemaMessage(issue: $ZodIssue): string {
   switch (issue.code) {
     case "invalid_type":
@@ -211,6 +249,13 @@ function safeSchemaMessage(issue: $ZodIssue): string {
   }
 }
 
+/**
+ * Traverses a YAML AST node tree to detect forbidden constructs:
+ * - YAML anchors / aliases (`*alias`)
+ * - YAML merge keys (`<<`)
+ * - Non-string mapping keys
+ * - Non-standard / custom YAML tags
+ */
 function collectYamlViolations(
   node: YamlNode | null,
   path: readonly (string | number)[],
@@ -222,6 +267,10 @@ function collectYamlViolations(
   if (node instanceof Alias) {
     errors.push(startupError("CONFIG_YAML_ALIAS", jsonPointer(path), "YAML aliases are not allowed"));
     return;
+  }
+  // Check for custom YAML type tags (only standard 2002 core tags allowed).
+  if (node.tag !== undefined && node.tag !== null && !node.tag.startsWith("tag:yaml.org,2002:")) {
+    errors.push(startupError("CONFIG_YAML_CUSTOM_TAG", jsonPointer(path), "YAML custom tags are not allowed"));
   }
   if (node instanceof YAMLMap) {
     for (const pair of node.items) {
@@ -248,12 +297,11 @@ function collectYamlViolations(
     });
     return;
   }
-  if (node.tag !== undefined && node.tag !== null && !node.tag.startsWith("tag:yaml.org,2002:")) {
-    errors.push(startupError("CONFIG_YAML_CUSTOM_TAG", jsonPointer(path), "YAML custom tags are not allowed"));
-  }
 }
 
-/** Path of the deepest YAML node whose source range contains `offset`. */
+/**
+ * Finds the deepest path in the YAML AST whose source character range encloses `offset`.
+ */
 function deepestPath(
   node: YamlNode | null,
   offset: number,
@@ -285,7 +333,9 @@ function deepestPath(
   return deepest;
 }
 
-/** Numeric pointer segments stay strings; array and object indexing accepts both. */
+/**
+ * Parses an RFC 6901 JSON pointer string into unescaped path segments.
+ */
 function segmentsFromPointer(pointer: string): readonly string[] {
   if (pointer === "") {
     return [];
@@ -296,7 +346,9 @@ function segmentsFromPointer(pointer: string): readonly string[] {
     .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"));
 }
 
-/** Overlays `value` at `segments` inside a plain object/array tree. */
+/**
+ * Sets a value at a specified path in a mutable object/array tree.
+ */
 function setPath(target: unknown, segments: readonly (string | number)[], value: unknown): void {
   let current = target as Record<string | number, unknown>;
   const last = segments.length - 1;
@@ -306,6 +358,9 @@ function setPath(target: unknown, segments: readonly (string | number)[], value:
   current[segments[last] as string | number] = value;
 }
 
+/**
+ * Computes a hex-encoded SHA-256 digest of the provided string.
+ */
 function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }

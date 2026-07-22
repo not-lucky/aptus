@@ -1,194 +1,390 @@
 import type { IrFailureCategory, NormalizedFailure, TraceStage, TraceTerminal } from "./operations.js";
 import type { AptusRequestId } from "./request-id.js";
 
-/** A JSON scalar, array, or object value. */
+/**
+ * A JSON primitive scalar, array, or object value.
+ */
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
 
-/** A JSON object with no prototype-dependent behavior. */
+/**
+ * A JSON object with no prototype-dependent behavior.
+ */
 export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
-/** A case-insensitive HTTP header map with lower-case keys and joined safe values. */
+/**
+ * An immutable HTTP header map with lower-case header names and sanitized string values.
+ */
 export type HeaderMap = Readonly<Record<string, string>>;
 
-/** One of the three client and provider create protocols. */
+/**
+ * Supported client ingress and upstream provider protocol types.
+ */
 export type Protocol = "openai-chat" | "openai-responses" | "anthropic-messages";
 
-/** A result for an expected domain failure.
- * @typeParam T Successful value type.
- * @typeParam E Expected failure type.
+/**
+ * Discriminated union representing either a successful calculation or an expected domain failure.
+ *
+ * @typeParam T - Successful value payload type.
+ * @typeParam E - Domain failure type.
  */
 export type Result<T, E> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: E };
 
-/** An accepted client request passed from HTTP to the Gateway. */
+/**
+ * An accepted, validated client create request passed from HTTP ingress to the Gateway orchestrator.
+ */
 export interface GatewayRequest {
-  /** UUID created after ingress admission. */
+  /**
+   * Unique UUID assigned after admission.
+   */
   readonly aptusRequestId: AptusRequestId;
-  /** Protocol selected by the mounted endpoint. */
+
+  /**
+   * Client protocol corresponding to the mounted endpoint.
+   */
   readonly protocol: Protocol;
-  /** Canonical endpoint metric label, without the optional `/v1` prefix. */
+
+  /**
+   * Canonical endpoint metric label without prefix (e.g., `"/chat/completions"`).
+   */
   readonly endpoint: "/chat/completions" | "/responses" | "/messages";
-  /** Lower-case filtered client headers. */
+
+  /**
+   * Filtered, lower-case client headers with hop-by-hop and auth credentials removed.
+   */
   readonly headers: HeaderMap;
-  /** Duplicate-free parsed request object. */
+
+  /**
+   * Parsed, duplicate-free JSON request payload.
+   */
   readonly body: JsonObject;
-  /** Authenticated client-key name, never its secret. */
+
+  /**
+   * Authenticated client key name (never the secret).
+   */
   readonly clientKeyName: string;
-  /** Signal composed from disconnect, request deadline, and shutdown. */
+
+  /**
+   * Composite abort signal (combines client disconnect, timeout deadline, and shutdown signals).
+   */
   readonly signal: AbortSignal;
 }
 
-/** The selected dry-run candidate. */
+/**
+ * The selected candidate provider and key metadata for a dry-run evaluation.
+ */
 export interface DryRunCandidate {
-  /** Configured provider name. */
+  /**
+   * Name of the configured provider.
+   */
   readonly provider: string;
-  /** Upstream provider model ID. */
+
+  /**
+   * Upstream model ID to be requested from the provider.
+   */
   readonly model: string;
-  /** Selected configured provider-key name, never its secret. */
+
+  /**
+   * Selected provider key name (safe for diagnostic output, never the secret).
+   */
   readonly key: string;
 }
 
-/** A prepared dry-run provider request. */
+/**
+ * A fully prepared upstream request inspection object generated during dry-run.
+ */
 export interface DryRunProviderRequest {
-  /** Create requests always use POST. */
+  /**
+   * Create requests always use HTTP POST.
+   */
   readonly method: "POST";
-  /** Final same-origin provider URL. */
+
+  /**
+   * Resolved provider target URL.
+   */
   readonly url: string;
-  /** Redacted final headers. */
+
+  /**
+   * Outbound provider headers with sensitive secrets redacted.
+   */
   readonly headers: HeaderMap;
-  /** Final merged native or translated request object. */
+
+  /**
+   * Fully mutated or translated JSON request body.
+   */
   readonly body: JsonObject;
 }
 
-/** The successful dry-run response contract. */
+/**
+ * Response payload returned when executing a dry-run create request.
+ */
 export interface DryRunResult {
-  /** Constant success marker. */
+  /**
+   * Constant success marker.
+   */
   readonly dryRun: true;
-  /** Aptus request identity. */
+
+  /**
+   * Unique request identifier.
+   */
   readonly aptusRequestId: AptusRequestId;
-  /** Client Protocol. */
+
+  /**
+   * Protocol of the incoming client request.
+   */
   readonly sourceProtocol: Protocol;
-  /** selected Provider Protocol. */
+
+  /**
+   * Protocol of the target candidate provider.
+   */
   readonly targetProtocol: Protocol;
-  /** Canonical Public Model or Route name. */
+
+  /**
+   * Canonical public model or route name.
+   */
   readonly publicName: string;
-  /** Selected Candidate and provider key name. */
+
+  /**
+   * Selected candidate provider, model, and key identifier.
+   */
   readonly candidate: DryRunCandidate;
-  /** Ordered JSON Pointers changed by defaults, extra body, overrides, or model replacement. */
+
+  /**
+   * Ordered list of JSON Pointers mutated by defaults, extraBody, overrides, or model substitution.
+   */
   readonly mutations: readonly string[];
-  /** Result of Candidate preflight. */
+
+  /**
+   * Result of candidate capability preflight checks.
+   */
   readonly preflight: { readonly ok: true } | { readonly ok: false; readonly failure: NormalizedFailure };
-  /** Provider request that would be sent. */
+
+  /**
+   * Inspection payload of the provider request that would have been dispatched.
+   */
   readonly providerRequest: DryRunProviderRequest;
 }
 
-/** A Gateway result returned to the HTTP owner. */
+/**
+ * Terminal result returned by the Gateway orchestrator to the HTTP layer.
+ */
 export type GatewayResult =
-  | { readonly kind: "complete"; readonly status: number; readonly headers: HeaderMap; readonly body: Uint8Array }
   | {
+      /** Complete non-streaming response body. */
+      readonly kind: "complete";
+      readonly status: number;
+      readonly headers: HeaderMap;
+      readonly body: Uint8Array;
+    }
+  | {
+      /** Streaming SSE response with backpressured ReadableStream. */
       readonly kind: "stream";
       readonly status: number;
       readonly headers: HeaderMap;
       readonly body: ReadableStream<Uint8Array>;
     }
   | {
+      /** Dry-run inspection response. */
       readonly kind: "dry_run";
       readonly status: 200;
       readonly contentType: "application/vnd.aptus.dry-run+json";
       readonly body: DryRunResult;
     }
-  | { readonly kind: "failure"; readonly failure: NormalizedFailure };
+  | {
+      /** Normalized domain failure. */
+      readonly kind: "failure";
+      readonly failure: NormalizedFailure;
+    };
 
-/** Orchestrates one accepted request behind one response-owner result. */
+/**
+ * Gateway execution orchestrator for admitted client requests.
+ */
 export interface Gateway {
-  /** Executes authorization-independent routing and dispatch.
-   * @param request Validated request and shared cancellation signal.
-   * @returns One complete body, owned stream, dry-run result, or expected failure.
-   * @remarks It never writes to an Express response. It checks `request.signal` during each wait and dispatch.
+  /**
+   * Executes routing, key lease acquisition, candidate preflight, mutation, and upstream dispatch.
+   *
+   * @param request - Admitted and validated client request.
+   * @returns A promise resolving to a {@link GatewayResult}.
+   *
+   * @remarks
+   * The Gateway is decoupled from Express response management. It checks `request.signal`
+   * at every scheduling boundary and yields back to the HTTP layer for actual client response writing.
    */
   execute(request: GatewayRequest): Promise<GatewayResult>;
 }
 
-/** Input for native provider request preparation. */
+/**
+ * Input arguments for preparing a same-protocol provider request.
+ */
 export interface NativePreparationInput {
-  /** Candidate protocol and provider identity. */
+  /**
+   * Protocol for the target provider.
+   */
   readonly protocol: Protocol;
-  /** API-root base URL without its one trailing slash. */
+
+  /**
+   * Normalized base API URL without trailing slash.
+   */
   readonly baseUrl: string;
-  /** Upstream provider model ID. */
+
+  /**
+   * Upstream model ID to substitute into the request payload.
+   */
   readonly upstreamModel: string;
-  /** Duplicate-free client JSON object. */
+
+  /**
+   * Parsed, duplicate-free client JSON body.
+   */
   readonly clientBody: JsonObject;
-  /** Filtered end-to-end client headers. */
+
+  /**
+   * Filtered end-to-end client headers.
+   */
   readonly clientHeaders: HeaderMap;
-  /** Provider static headers with no authentication header. */
+
+  /**
+   * Configured static provider headers (without authentication).
+   */
   readonly providerHeaders: HeaderMap;
-  /** Provider secret for this Attempt. */
+
+  /**
+   * Resolved provider secret for the acquired key lease.
+   */
   readonly providerSecret: string;
-  /** Ordered provider-native mutation inputs. */
+
+  /**
+   * Configured native mutations (defaults, extraBody, overrides).
+   */
   readonly mutations: NativeMutations;
 }
 
-/** Provider-native mutation maps applied in defaults, extraBody, then overrides order. */
+/**
+ * Native request mutations applied in deterministic order: defaults -> extraBody -> overrides -> model replacement.
+ */
 export interface NativeMutations {
-  /** Values inserted only at absent object paths. */
+  /**
+   * Key-value pairs applied only when the key is absent in the client payload.
+   */
   readonly defaults: JsonObject;
-  /** Provider extension values merged after defaults. */
+
+  /**
+   * Provider extension values deeply merged after defaults.
+   */
   readonly extraBody: JsonObject;
-  /** Values that replace or insert request values. */
+
+  /**
+   * Values that override or insert fields in the final payload.
+   */
   readonly overrides: JsonObject;
 }
 
-/** One fully prepared upstream request whose body belongs to the dispatcher after dispatch starts. */
+/**
+ * Fully prepared upstream provider request ready for network dispatch.
+ */
 export interface PreparedProviderRequest {
-  /** Configured provider name for bounded telemetry. */
+  /**
+   * Configured provider name for metrics and traces.
+   */
   readonly provider: string;
-  /** Provider Protocol. */
+
+  /**
+   * Target provider protocol.
+   */
   readonly protocol: Protocol;
-  /** POST create URL. */
+
+  /**
+   * Absolute target URL for the POST create request.
+   */
   readonly url: string;
-  /** Filtered headers with selected provider authentication. */
+
+  /**
+   * Filtered outbound headers containing provider authentication.
+   */
   readonly headers: HeaderMap;
-  /** UTF-8 serialized JSON body. */
+
+  /**
+   * UTF-8 encoded serialized JSON payload.
+   */
   readonly body: Uint8Array;
-  /** True when the client requested SSE. */
+
+  /**
+   * Whether streaming SSE response mode was requested.
+   */
   readonly stream: boolean;
-  /** Absolute monotonic deadline in milliseconds. */
+
+  /**
+   * Absolute monotonic request deadline in milliseconds.
+   */
   readonly deadlineMs: number;
-  /** Stream idle limit reset by every received byte. */
+
+  /**
+   * Maximum stream idle duration in milliseconds between incoming bytes.
+   */
   readonly streamIdleMs: number;
 }
 
-/** The immutable response head used before any body is exposed. */
+/**
+ * HTTP status and headers received from upstream before body consumption.
+ */
 export interface ProviderResponseHead {
-  /** Provider HTTP status. */
+  /**
+   * Upstream HTTP status code.
+   */
   readonly status: number;
-  /** Filtered lower-case headers. */
+
+  /**
+   * Filtered lower-case response headers from provider.
+   */
   readonly headers: HeaderMap;
 }
 
-/** A dispatcher response. The caller must consume or cancel `body` exactly once. */
+/**
+ * Complete upstream dispatcher response.
+ *
+ * @remarks
+ * The consumer must consume or cancel {@link body} exactly once to prevent connection leaks.
+ */
 export interface ProviderResponse extends ProviderResponseHead {
-  /** Provider bytes with backpressure. */
+  /**
+   * Backpressured byte stream of the response body.
+   */
   readonly body: ReadableStream<Uint8Array>;
-  /** Final URL after allowed same-origin redirects. */
+
+  /**
+   * Final URL after following allowed same-origin redirects.
+   */
   readonly finalUrl: string;
 }
 
-/** Normalized facts from a pre-body provider response or transport outcome. */
+/**
+ * Normalized observation extracted from an upstream attempt response head or transport failure.
+ */
 export interface AttemptObservation {
-  /** Stable failure category, or `success`. */
+  /**
+   * Stable result category or `"success"`.
+   */
   readonly result: "success" | IrFailureCategory | "client_cancelled";
-  /** Explicit HTTP status when one exists. */
+
+  /**
+   * Observed HTTP status code, if response head was received.
+   */
   readonly status?: number;
-  /** Parsed Retry-After or provider reset delay in milliseconds. */
+
+  /**
+   * Parsed `Retry-After` delay in milliseconds.
+   */
   readonly retryDelayMs?: number;
-  /** True only before any provider response body byte is exposed to the client. */
+
+  /**
+   * `true` only if no response body bytes have been written to the downstream client.
+   */
   readonly beforeClientBytes: boolean;
 }
 
-/** One immutable routing lifecycle event observed by logs, metrics, and Trace. */
+/**
+ * Immutable lifecycle event emitted during routing and dispatch for telemetry observation.
+ */
 export type LifecycleEvent =
   | {
       readonly type: "request_ingress";
@@ -232,143 +428,226 @@ export type LifecycleEvent =
       readonly result: "complete" | "failed" | "cancelled" | "dry_run";
     };
 
-/** Receives immutable lifecycle facts without routing authority. */
+/**
+ * Observer interface for recording routing lifecycle events in metrics, logs, and traces.
+ */
 export interface LifecycleObserver {
-  /** Observes one ordered lifecycle event.
-   * @param event Immutable event with bounded routing facts.
-   * @returns Nothing; observation is non-blocking for routing.
-   * @remarks Implementations queue or record failures. They cannot mutate Gateway state or fail a client request.
+  /**
+   * Receives an immutable routing lifecycle event.
+   *
+   * @param event - The emitted lifecycle event.
+   * @remarks Observation is synchronous/non-blocking and cannot alter routing decisions or fail requests.
    */
   observe(event: LifecycleEvent): void;
 }
 
-/** Protocol-specific native behavior. */
+/**
+ * Protocol adapter interface defining protocol-specific serialization, classification, and catalog building.
+ */
 export interface ProtocolAdapter {
-  /** The one protocol implemented by this adapter. */
+  /**
+   * Protocol identifier handled by this adapter.
+   */
   readonly protocol: Protocol;
-  /** Exact path appended to the provider API root. */
+
+  /**
+   * Exact relative path appended to provider API base URL for create requests.
+   */
   readonly createPath: "/chat/completions" | "/responses" | "/v1/messages";
-  /** Reads a public model or route name.
-   * @param body Parsed request object.
-   * @returns The requested public name or `invalid_request`.
+
+  /**
+   * Extracts the public model or route name requested in the client JSON body.
+   *
+   * @param body - Parsed client request payload.
+   * @returns Result containing the model string or an invalid_request failure.
    */
   readPublicModel(body: JsonObject): Result<string, NormalizedFailure>;
-  /** Prepares a same-protocol provider request.
-   * @param input Candidate, header, key, and mutation inputs.
-   * @returns A dispatch request or an expected preflight failure.
-   * @remarks Unknown native fields and array order remain. JSON whitespace and object-key order can change.
+
+  /**
+   * Prepares a native upstream provider request applying configured mutations.
+   *
+   * @param input - Mutation, header, secret, and model configuration inputs.
+   * @returns Result containing the prepared request or a preflight failure.
    */
   prepareNative(input: NativePreparationInput): Result<PreparedProviderRequest, NormalizedFailure>;
-  /** Classifies a provider response head.
-   * @param response Provider status and filtered headers.
-   * @returns A bounded Attempt observation.
+
+  /**
+   * Classifies an upstream response head into a normalized attempt observation.
+   *
+   * @param response - Response status and filtered headers.
+   * @returns An {@link AttemptObservation} indicating outcome and retry metadata.
    */
   classify(response: ProviderResponseHead): AttemptObservation;
-  /** Builds the configured local model-list envelope.
-   * @param input Sorted authorized canonical catalog entries.
-   * @returns A protocol-native list object.
+
+  /**
+   * Constructs a protocol-native model catalog list envelope.
+   *
+   * @param input - Sorted authorized catalog entries.
+   * @returns Protocol-native list envelope JSON object.
    */
   buildModelList(input: ModelListInput): JsonObject;
 }
 
-/** A local configured model-list entry. */
+/**
+ * A single entry in the local model catalog.
+ */
 export interface ModelListEntry {
-  /** Canonical Public Model or Route name. */
+  /**
+   * Canonical public model or route identifier.
+   */
   readonly id: string;
-  /** Explicit catalog metadata for the selected envelope. */
+
+  /**
+   * Protocol-specific catalog metadata fields.
+   */
   readonly metadata: JsonObject;
 }
 
-/** Input to one protocol model-list builder. */
+/**
+ * Input parameters for building a protocol-specific model catalog list.
+ */
 export interface ModelListInput {
-  /** Lexicographically sorted, authorized canonical entries. */
+  /**
+   * Lexicographically sorted, authorized model list entries.
+   */
   readonly entries: readonly ModelListEntry[];
 }
 
-/** Owns network dispatch and response-body resource transfer. */
+/**
+ * HTTP transport dispatcher for sending prepared requests to upstream providers.
+ */
 export interface ProviderDispatcher {
-  /** Dispatches one prepared request.
-   * @param request Request whose body ownership transfers for this call.
-   * @param signal Composed request cancellation signal.
-   * @returns A response whose body must be consumed or canceled once.
-   * @throws Only for transport, timeout, abort, redirect-policy, or local I/O failures.
+  /**
+   * Executes network dispatch for a prepared request with timeout and redirect policies.
+   *
+   * @param request - Prepared request payload and headers.
+   * @param signal - Abort signal for request cancellation.
+   * @returns Promise resolving to the upstream response.
+   * @throws Transport, timeout, abort, redirect violation, or socket errors.
    */
   dispatch(request: PreparedProviderRequest, signal: AbortSignal): Promise<ProviderResponse>;
 }
 
-/** A provider-key lease. */
+/**
+ * A leased provider API key credential with generation tracking.
+ */
 export interface KeyLease {
-  /** Configured provider name. */
+  /**
+   * Name of the provider owning this key.
+   */
   readonly provider: string;
-  /** Stable key name safe for traces, not the secret. */
+
+  /**
+   * Unique name of the key within its key pool (safe for telemetry).
+   */
   readonly keyName: string;
-  /** Secret used only to prepare the provider request. */
+
+  /**
+   * Secret value used to prepare authorization headers.
+   */
   readonly secret: string;
-  /** Opaque lease generation that prevents stale observations. */
+
+  /**
+   * Lease generation counter preventing stale observations from updating key health.
+   */
   readonly generation: number;
 }
 
-/** Result of a non-blocking key acquisition. */
+/**
+ * Result of a non-blocking key acquisition attempt.
+ */
 export type KeyAcquireResult =
   | { readonly kind: "acquired"; readonly lease: KeyLease }
   | { readonly kind: "wait"; readonly untilMs: number }
   | { readonly kind: "unavailable" };
 
-/** Maintains process-local selection and adaptive key health. */
+/**
+ * Key pool managing key selection strategy and adaptive cooldown health states.
+ */
 export interface KeyPool {
-  /** Acquires an available key without waiting.
-   * @param nowMs Monotonic current time.
-   * @returns A lease, earliest availability time, or permanent unavailability.
+  /**
+   * Non-blocking attempt to acquire an enabled, available key lease.
+   *
+   * @param nowMs - Current monotonic time in milliseconds.
+   * @returns Acquisition outcome: acquired lease, wait timestamp, or permanently unavailable.
    */
   acquire(nowMs: number): KeyAcquireResult;
-  /** Applies one completed observation to key health.
-   * @param lease Lease used by the Attempt.
-   * @param observation Normalized Attempt result.
-   * @param nowMs Monotonic observation time.
-   * @remarks Stale lease generations have no effect.
+
+  /**
+   * Records an attempt outcome to update adaptive health cooldowns for the leased key.
+   *
+   * @param lease - The leased key used for the attempt.
+   * @param observation - Classified attempt observation.
+   * @param nowMs - Monotonic timestamp of the observation.
    */
   observe(lease: KeyLease, observation: AttemptObservation, nowMs: number): void;
 }
 
-/** Starts one protected Trace. */
+/**
+ * Recorder interface for initiating request trace recording sessions.
+ */
 export interface TraceRecorder {
-  /** Opens a request Trace.
-   * @param context Immutable Trace identity and config revision.
-   * @returns A serial Trace Session or a no-op/degraded session.
-   * @throws Only when the configured policy makes startup probing fatal; runtime failures are recorded as degraded state.
+  /**
+   * Opens a new trace recording session for an admitted request.
+   *
+   * @param context - Immutable trace metadata and request identifiers.
+   * @returns A promise resolving to an active {@link TraceSession}.
    */
   start(context: TraceContext): Promise<TraceSession>;
 }
 
-/** Immutable Trace identity. */
+/**
+ * Immutable metadata identifying a trace session.
+ */
 export interface TraceContext {
-  /** Aptus request identity. */
+  /**
+   * Unique request identifier.
+   */
   readonly aptusRequestId: AptusRequestId;
-  /** ISO-local directory timestamp. */
+
+  /**
+   * ISO-local timestamp formatted for directory naming.
+   */
   readonly startedAtLocal: string;
-  /** Frozen config revision digest. */
+
+  /**
+   * SHA-256 digest of the running configuration.
+   */
   readonly configRevision: string;
-  /** Client Protocol. */
+
+  /**
+   * Client protocol for the trace manifest.
+   */
   readonly sourceProtocol: Protocol;
 }
 
-/** An ordered per-request Trace writer. */
+/**
+ * Active per-request trace recording session for atomic stage logging.
+ */
 export interface TraceSession {
-  /** Records a parsed stage atomically.
-   * @param stage Stable stage identity.
-   * @param value JSON value after field-aware secret redaction.
-   * @returns Completion after fsync and atomic rename.
+  /**
+   * Records a structured JSON trace stage with secret redaction.
+   *
+   * @param stage - Lifecycle stage identifier.
+   * @param value - JSON payload to record.
+   * @returns Promise resolving when the stage file is fsynced and atomically renamed.
    */
   recordJson(stage: TraceStage, value: JsonValue): Promise<void>;
-  /** Records exact native or translated bytes atomically.
-   * @param stage Stable stage identity.
-   * @param bytes Bytes that are not content-scanned.
-   * @returns Completion after fsync and atomic rename.
+
+  /**
+   * Records raw payload bytes (SSE stream chunks or binary payloads) without text redaction.
+   *
+   * @param stage - Lifecycle stage identifier.
+   * @param bytes - Byte buffer to record.
+   * @returns Promise resolving when the file is fsynced and atomically renamed.
    */
   recordBytes(stage: TraceStage, bytes: Uint8Array): Promise<void>;
-  /** Writes exactly one terminal marker and closes the session.
-   * @param result Complete, failed, cancelled, dry-run, shutdown, or trace-incomplete result.
-   * @returns Completion after resources close.
+
+  /**
+   * Writes the final terminal marker file (`999_terminal.json`) and closes session resources.
+   *
+   * @param result - Terminal execution outcome.
+   * @returns Promise resolving when terminal state is finalized.
    */
   finish(result: TraceTerminal): Promise<void>;
 }

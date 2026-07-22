@@ -544,6 +544,21 @@ test("YAML violations: document count, parse, merge key, non-string key, custom 
     errorLines(customTag.error).includes("CONFIG_YAML_CUSTOM_TAG /server/port YAML custom tags are not allowed"),
   );
 
+  const customMapTag = await loadConfig(writeText("server: !customMap\n  port: 8080\n"), {});
+  assert(!customMapTag.ok);
+  assert.ok(
+    errorLines(customMapTag.error).includes("CONFIG_YAML_CUSTOM_TAG /server YAML custom tags are not allowed"),
+  );
+
+  const customSeqTag = await loadConfig(
+    writeText('auth:\n  clientKeys: !customSeq\n    - name: client\n      secret: "${APTUS_CLIENT_PRIMARY}"\n'),
+    {},
+  );
+  assert(!customSeqTag.ok);
+  assert.ok(
+    errorLines(customSeqTag.error).includes("CONFIG_YAML_CUSTOM_TAG /auth/clientKeys YAML custom tags are not allowed"),
+  );
+
   const alias = await loadConfig(writeText("server:\n  host: &h 127.0.0.1\n  port: 8080\nother: *h\n"), {});
   assert(!alias.ok);
   assert.ok(errorLines(alias.error).includes("CONFIG_YAML_ALIAS /other YAML aliases are not allowed"));

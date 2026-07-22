@@ -4,251 +4,477 @@ import type { DecimalUsdPerMillion, PricingConfig } from "../domain/pricing.js";
 
 export type { DecimalUsdPerMillion, PricingConfig };
 
-/** A resolved secret. It can be read only by bootstrap and request preparation. */
+/**
+ * Nominal type representing an environment-resolved secret string.
+ *
+ * Resolved strictly during startup configuration loading and never exposed in telemetry, logs, or error responses.
+ */
 export type SecretString = string & { readonly __secret: unique symbol };
 
-/** A CIDR used to trust proxy forwarding headers. */
+/**
+ * An IPv4 CIDR notation string (e.g., `"10.0.0.0/8"`, `"192.168.1.0/24"`) used to evaluate trusted reverse proxy peers.
+ */
 export type Cidr = string;
 
-/** Client listener and lifecycle limits. */
+/**
+ * Configuration options for the client ingress HTTP listener and connection lifecycle limits.
+ */
 export interface ServerConfig {
-  /** Bind host. Default `0.0.0.0`. */
+  /**
+   * Host address to bind the client HTTP listener to. Defaults to `"0.0.0.0"`.
+   */
   readonly host: string;
-  /** Bind TCP port. Default `8080`. */
+
+  /**
+   * TCP port to bind the client HTTP listener to. Defaults to `8080`.
+   */
   readonly port: number;
-  /** Maximum identity-encoded request body. Default 32 MiB. */
+
+  /**
+   * Maximum allowed request body size in bytes for identity-encoded JSON payloads. Defaults to `33554432` (32 MiB).
+   */
   readonly bodyLimitBytes: number;
-  /** Process-local accepted request limit. Default `1000`. */
+
+  /**
+   * Maximum concurrent in-flight requests admitted by the process before returning HTTP 429. Defaults to `1000`.
+   */
   readonly maxInFlight: number;
-  /** Total request deadline, including waits and body relay. Default 600000 ms. */
+
+  /**
+   * Total request deadline in milliseconds including queueing, candidate selection, retries, and body transfer. Defaults to `600000` (10 minutes).
+   */
   readonly requestDeadlineMs: number;
-  /** Maximum interval between upstream stream bytes. Default 60000 ms. */
+
+  /**
+   * Maximum allowed idle duration in milliseconds between incoming upstream stream chunks before aborting. Defaults to `60000` (1 minute).
+   */
   readonly streamIdleMs: number;
-  /** Graceful shutdown drain limit. Default 30000 ms. */
+
+  /**
+   * Graceful shutdown timeout in milliseconds allowed for in-flight requests to complete during process drain. Defaults to `30000` (30 seconds).
+   */
   readonly shutdownDrainMs: number;
-  /** Proxy CIDRs whose forwarding headers Aptus accepts. Default empty. */
+
+  /**
+   * List of IPv4 CIDRs whose `X-Forwarded-*` / `Forwarded` client headers are trusted. Defaults to empty `[]`.
+   */
   readonly trustedProxyCidrs: readonly Cidr[];
 }
 
-/** Unauthenticated operations listener. */
+/**
+ * Configuration options for the unauthenticated operations/observability HTTP listener.
+ */
 export interface OperationsConfig {
-  /** Bind host. Default `127.0.0.1`. */
+  /**
+   * Host address to bind the operations HTTP listener to. Defaults to `"127.0.0.1"`.
+   */
   readonly host: string;
-  /** Bind TCP port. Default `9090`. */
+
+  /**
+   * TCP port to bind the operations HTTP listener to. Defaults to `9090`.
+   */
   readonly port: number;
 }
 
-/** One authenticated client identity. */
+/**
+ * Authenticated client key configuration.
+ */
 export interface ClientKeyConfig {
-  /** Unique safe name used in logs, never the credential. */
+  /**
+   * Unique, safe identification name for the client key used in metrics and logs (never the secret).
+   */
   readonly name: string;
-  /** Secret resolved from an exact environment reference. */
+
+  /**
+   * Secret resolved from environment variable reference `${ENV_NAME}`.
+   */
   readonly secret: SecretString;
-  /** Allowed canonical names and aliases. Omission means all public names. */
+
+  /**
+   * Optional whitelist of public model names and route names accessible by this key.
+   * When omitted or undefined, all public models and routes are authorized.
+   */
   readonly allow?: readonly string[];
 }
 
-/** Client authentication configuration. */
+/**
+ * Client authentication and authorization configuration section.
+ */
 export interface AuthConfig {
-  /** Non-empty client keys with unique names and resolved secrets. */
+  /**
+   * List of non-empty configured client credentials with unique names and distinct secrets.
+   */
   readonly clientKeys: readonly ClientKeyConfig[];
 }
 
-/** Provider key selection algorithm. */
+/**
+ * Key lease acquisition strategy within a provider's key pool.
+ *
+ * - `"fill-first"`: Always selects the first available non-cooldown enabled key.
+ * - `"round-robin"`: Rotates sequentially across available non-cooldown enabled keys.
+ */
 export type KeyStrategy = "fill-first" | "round-robin";
 
-/** One named provider credential. */
+/**
+ * Named provider API key credential configuration.
+ */
 export interface ProviderKeyConfig {
-  /** Name unique within its Key Pool. */
+  /**
+   * Unique name of the key within its provider Key Pool.
+   */
   readonly name: string;
-  /** Environment-resolved provider secret. */
+
+  /**
+   * Resolved provider secret string from environment variable reference.
+   */
   readonly secret: SecretString;
-  /** Whether routing can acquire this key. Default `true`. */
+
+  /**
+   * Whether this key is currently enabled for candidate acquisition. Defaults to `true`.
+   */
   readonly enabled: boolean;
 }
 
-/** One protocol-specific provider and Key Pool. */
+/**
+ * Upstream provider service and key pool configuration.
+ */
 export interface ProviderConfig {
-  /** Name unique across providers. */
+  /**
+   * Unique provider identifier.
+   */
   readonly name: string;
-  /** Exactly one Provider Protocol. */
+
+  /**
+   * Upstream protocol expected by this provider.
+   */
   readonly protocol: Protocol;
-  /** HTTP or HTTPS API root with no user-info, query, fragment, or trailing slash after normalization. */
+
+  /**
+   * Normalized base API URL (e.g., `"https://api.openai.com/v1"`), without trailing slash or query parameters.
+   */
   readonly baseUrl: string;
-  /** Provider-native static end-to-end headers with lower-case unique names. */
+
+  /**
+   * Static HTTP headers attached to all outbound requests to this provider.
+   */
   readonly headers: HeaderMap;
-  /** Ordered non-empty provider keys. Duplicate resolved secrets within this array are fatal. */
+
+  /**
+   * List of provider API keys configured for this provider.
+   */
   readonly keys: readonly ProviderKeyConfig[];
-  /** Key selection strategy. */
+
+  /**
+   * Key selection algorithm used when acquiring keys for this provider.
+   */
   readonly keyStrategy: KeyStrategy;
 }
 
-/** OpenAI local catalog metadata. */
+/**
+ * Metadata fields for OpenAI model catalog representations.
+ */
 export interface OpenAiCatalogMetadata {
-  /** Unix creation time in seconds. */
+  /**
+   * Unix timestamp in seconds when the model was created.
+   */
   readonly created: number;
-  /** Organization owner string. */
+
+  /**
+   * Organization or vendor owning the model.
+   */
   readonly ownedBy: string;
 }
 
-/** Nullable Anthropic model capability indicators. */
+/**
+ * Optional capability flags for Anthropic model catalog representation.
+ */
 export interface AnthropicCapabilities {
-  /** Batch support, or null when not asserted. */
+  /** Batch inference support flag. */
   readonly batch: boolean | null;
-  /** Citation support, or null when not asserted. */
+  /** Document citation support flag. */
   readonly citations: boolean | null;
-  /** Code-execution support, or null when not asserted. */
+  /** Code execution tool support flag. */
   readonly codeExecution: boolean | null;
-  /** Image input support, or null when not asserted. */
+  /** Vision / image input support flag. */
   readonly imageInput: boolean | null;
-  /** PDF input support, or null when not asserted. */
+  /** PDF input support flag. */
   readonly pdfInput: boolean | null;
-  /** Structured-output support, or null when not asserted. */
+  /** Structured output / JSON schema support flag. */
   readonly structuredOutput: boolean | null;
-  /** Thinking support, or null when not asserted. */
+  /** Extended thinking / reasoning support flag. */
   readonly thinking: boolean | null;
 }
 
-/** Anthropic local catalog metadata. */
+/**
+ * Metadata fields for Anthropic model catalog representations.
+ */
 export interface AnthropicCatalogMetadata {
-  /** RFC 3339 creation timestamp. */
+  /**
+   * RFC 3339 formatted creation timestamp with timezone offset.
+   */
   readonly createdAt: string;
-  /** Client-visible display name. */
+
+  /**
+   * Human-readable display name for the model.
+   */
   readonly displayName: string;
-  /** Informational capabilities. They never gate dispatch. */
+
+  /**
+   * Informational capability flags.
+   */
   readonly capabilities: AnthropicCapabilities | null;
-  /** Informational input-token limit, or null. */
+
+  /**
+   * Maximum input context tokens supported, or `null`.
+   */
   readonly maxInputTokens: number | null;
-  /** Informational output-token limit, or null. */
+
+  /**
+   * Maximum output completion tokens supported, or `null`.
+   */
   readonly maxOutputTokens: number | null;
 }
 
-/** Metadata needed to build both supported local catalog envelopes. */
+/**
+ * Multi-protocol catalog metadata attached to models and routes.
+ */
 export interface CatalogMetadata {
-  /** OpenAI envelope fields. */
+  /** Metadata returned when catalog is queried via OpenAI-compatible endpoints (`/v1/models` with Bearer auth). */
   readonly openai: OpenAiCatalogMetadata;
-  /** Anthropic envelope fields. */
+
+  /** Metadata returned when catalog is queried via Anthropic-compatible endpoints (`/v1/models` with `x-api-key`). */
   readonly anthropic: AnthropicCatalogMetadata;
 }
 
-/** One canonical Public Model. */
+/**
+ * Public model configuration mapping a client-visible model name to a provider model ID.
+ */
 export interface ModelConfig {
-  /** Canonical public name in the global namespace. */
+  /**
+   * Canonical public model name.
+   */
   readonly name: string;
-  /** Unique input-only aliases. */
+
+  /**
+   * List of unique input-only aliases resolving to this model.
+   */
   readonly aliases: readonly string[];
-  /** Referenced Provider name. */
+
+  /**
+   * Name of the configured provider that serves this model.
+   */
   readonly provider: string;
-  /** Provider-native model ID. */
+
+  /**
+   * Upstream model ID expected by the target provider.
+   */
   readonly upstreamModel: string;
-  /** Absent-only native defaults. */
+
+  /**
+   * JSON payload default values inserted only if absent in client request.
+   */
   readonly defaults: JsonObject;
-  /** Provider-native extension merge. */
+
+  /**
+   * Provider-native extension fields merged after defaults.
+   */
   readonly extraBody: JsonObject;
-  /** Final replacing native merge. */
+
+  /**
+   * Values that override or replace client request fields.
+   */
   readonly overrides: JsonObject;
-  /** Required local catalog metadata. */
+
+  /**
+   * Protocol catalog metadata for this model.
+   */
   readonly catalog: CatalogMetadata;
-  /** Optional estimated-cost inputs. */
+
+  /**
+   * Unit pricing per million tokens for cost estimation, or `null` if pricing is unconfigured.
+   */
   readonly pricing: PricingConfig | null;
 }
 
-/** One ordered fallback Route. */
+/**
+ * Fallback route configuration directing traffic across an ordered list of candidate models.
+ */
 export interface RouteConfig {
-  /** Canonical public name in the global namespace. */
+  /**
+   * Canonical public route name.
+   */
   readonly name: string;
-  /** Unique input-only aliases. */
+
+  /**
+   * List of unique input-only aliases resolving to this route.
+   */
   readonly aliases: readonly string[];
-  /** Non-empty ordered canonical Public Model references. */
+
+  /**
+   * Ordered non-empty list of canonical model names tried as candidates.
+   */
   readonly candidates: readonly string[];
-  /** Categories that permit up to two same-Candidate retries. Empty disables retry. */
+
+  /**
+   * Failure categories that permit same-candidate retries (up to 2 retries).
+   */
   readonly retryOn: readonly IrFailureCategory[];
-  /** Categories that permit the next Candidate. Empty disables fallback. */
+
+  /**
+   * Failure categories that trigger fallback to the next candidate model in {@link candidates}.
+   */
   readonly fallbackOn: readonly IrFailureCategory[];
-  /** Required route-owned local catalog metadata. */
+
+  /**
+   * Protocol catalog metadata for this route.
+   */
   readonly catalog: CatalogMetadata;
 }
 
-/** Adaptive process-local Key Pool timing. */
+/**
+ * Adaptive Key Pool timing parameters and cooldown intervals.
+ */
 export interface KeyPoolConfig {
-  /** Exactly two positive cooldown rungs. Defaults to `[250, 1000]`. */
+  /**
+   * Two positive cooldown step durations in milliseconds `[step1Ms, step2Ms]`. Defaults to `[250, 1000]`.
+   */
   readonly failureCooldownMs: readonly [number, number];
-  /** Delay used when a 429 has no usable provider delay. Default 1000 ms. */
+
+  /**
+   * Fallback cooldown duration in milliseconds when a 429 response lacks a `Retry-After` header. Defaults to `1000`.
+   */
   readonly rateLimitFallbackMs: number;
-  /** Maximum base retry delay. Default 30000 ms. */
+
+  /**
+   * Maximum allowed retry delay in milliseconds capped for adaptive health. Defaults to `30000`.
+   */
   readonly maxRetryAfterMs: number;
-  /** Uniform added jitter ratio in `[0, 1]`. Default `0.25`. */
+
+  /**
+   * Uniform random jitter ratio in `[0, 1]` added to retry delays. Defaults to `0.25`.
+   */
   readonly jitterRatio: number;
 }
 
-/** Routing runtime settings. */
+/**
+ * Gateway routing subsystem configuration.
+ */
 export interface RoutingConfig {
-  /** Adaptive key settings. */
+  /**
+   * Key pool adaptive timing settings.
+   */
   readonly keyPool: KeyPoolConfig;
 }
 
-/** Completed-Trace retention settings. */
+/**
+ * Configuration for completed trace storage retention and automatic pruning.
+ */
 export interface TraceRetentionConfig {
-  /** Maximum completed Trace age. Default seven days. */
+  /**
+   * Maximum age of completed traces in milliseconds before deletion. Defaults to `604800000` (7 days).
+   */
   readonly maxAgeMs: number;
-  /** Maximum total completed Trace bytes. Default one GiB. */
+
+  /**
+   * Maximum total disk space in bytes for completed traces before oldest traces are pruned. Defaults to `1073741824` (1 GiB).
+   */
   readonly maxBytes: number;
-  /** Cleanup timer interval. Default one hour. */
+
+  /**
+   * Cleanup timer execution interval in milliseconds. Defaults to `3600000` (1 hour).
+   */
   readonly cleanupIntervalMs: number;
 }
 
-/** Full-payload file tracing settings. */
+/**
+ * Full-payload filesystem tracing configuration.
+ */
 export interface TracingConfig {
-  /** Enables Trace creation. Default `true`. */
+  /**
+   * Whether trace recording is enabled. Defaults to `true`.
+   */
   readonly enabled: boolean;
-  /** Trace root path. Default `./traces`. */
+
+  /**
+   * Local filesystem root directory where request traces are stored with 0700 permissions. Defaults to `"./traces"`.
+   */
   readonly root: string;
-  /** Bounded completed-Trace retention. */
+
+  /**
+   * Trace retention and disk space limits.
+   */
   readonly retention: TraceRetentionConfig;
 }
 
-/** LogTape settings. */
+/**
+ * Structured logging configuration options.
+ */
 export interface LoggingConfig {
-  /** Enables structured logs. Default `true`. */
+  /**
+   * Whether structured LogTape logging is enabled. Defaults to `true`.
+   */
   readonly enabled: boolean;
-  /** Minimum LogTape level. Default `info`. */
+
+  /**
+   * Minimum log level threshold to emit. Defaults to `"info"`.
+   */
   readonly level: "debug" | "info" | "warning" | "error";
 }
 
-/** Prometheus export settings. */
+/**
+ * Prometheus metrics exporter configuration options.
+ */
 export interface MetricsConfig {
-  /** Enables metric collection and `/metrics`. Default `true`. */
+  /**
+   * Whether Prometheus metrics collection and `/metrics` endpoint are enabled. Defaults to `true`.
+   */
   readonly enabled: boolean;
 }
 
-/** Global dry-run behavior. */
+/**
+ * Global dry-run configuration.
+ */
 export interface DryRunConfig {
-  /** Makes all accepted create requests run without dispatch. Default `false`. */
+  /**
+   * When `true`, forces all admitted create requests to execute candidate selection and preparation without network dispatch. Defaults to `false`.
+   */
   readonly enabled: boolean;
 }
 
-/** The deeply frozen startup config snapshot. */
+/**
+ * The deep-frozen, immutable application configuration snapshot validated at startup.
+ */
 export interface AptusConfig {
-  /** Client listener and lifecycle limits. */
+  /** Client listener and connection lifecycle limits. */
   readonly server: ServerConfig;
-  /** Operations listener. */
+
+  /** Operations and health check listener settings. */
   readonly operations: OperationsConfig;
-  /** Client keys. */
+
+  /** Client authentication identities and allowlists. */
   readonly auth: AuthConfig;
-  /** Providers with distinct protocol-specific Key Pools. */
+
+  /** Upstream providers and their protocol-specific key pools. */
   readonly providers: readonly ProviderConfig[];
-  /** Canonical Public Models. */
+
+  /** Canonical public models. */
   readonly models: readonly ModelConfig[];
-  /** Canonical Routes. */
+
+  /** Canonical fallback routes. */
   readonly routes: readonly RouteConfig[];
-  /** Routing and key timing. */
+
+  /** Routing and adaptive key health settings. */
   readonly routing: RoutingConfig;
-  /** Trace settings. */
+
+  /** Filesystem payload tracing settings. */
   readonly tracing: TracingConfig;
-  /** Log settings. */
+
+  /** Structured logging settings. */
   readonly logging: LoggingConfig;
-  /** Metric settings. */
+
+  /** Prometheus metrics settings. */
   readonly metrics: MetricsConfig;
-  /** Dry-run settings. */
+
+  /** Dry-run execution settings. */
   readonly dryRun: DryRunConfig;
 }

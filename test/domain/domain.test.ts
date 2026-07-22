@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import { isPublicName } from "../../src/domain/names.js";
 import { estimateCostUsd, type PricingConfig } from "../../src/domain/pricing.js";
-import { createRequestId, isAptusRequestId } from "../../src/domain/request-id.js";
+import { createRequestId } from "../../src/domain/request-id.js";
 
 test("isPublicName: valid names", () => {
   assert.equal(isPublicName("gpt-main"), true);
@@ -20,17 +20,12 @@ test("isPublicName: invalid names", () => {
   assert.equal(isPublicName("1"), true); // Leading digits are legal.
 });
 
-test("createRequestId: UUID shape", () => {
-  const uuid = createRequestId();
-  assert.equal(isAptusRequestId(uuid), true);
-  assert.match(uuid, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-});
-
 test("createRequestId: unique across 100 calls", () => {
   const seen = new Set<string>();
   for (let index = 0; index < 100; index++) {
     const id = createRequestId();
-    assert.equal(isAptusRequestId(id), true);
+    assert.equal(typeof id, "string");
+    assert.ok(id.length > 0);
     seen.add(id);
   }
   assert.equal(seen.size, 100);

@@ -3,8 +3,16 @@ import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.js";
 import { PUBLIC_NAME_PATTERN } from "../domain/names.js";
 import type { AptusConfig, SecretString } from "./types.js";
 
+/** Validates canonical names (1-128 chars, alphanumeric start, dots, underscores, dashes). */
 const nameSchema = z.string().regex(PUBLIC_NAME_PATTERN);
+
+/** Positive integer validator (> 0). */
 const positiveInt = z.number().int().positive();
+
+/**
+ * Recursive schema for arbitrary JSON values.
+ * Uses `z.lazy()` to handle nested arrays and records without infinite recursion during type synthesis.
+ */
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.null(),
@@ -15,11 +23,22 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.record(z.string(), jsonValueSchema).readonly(),
   ]),
 );
+
+/** Schema validating a plain JSON object record. */
 const jsonObjectSchema: z.ZodType<JsonObject> = z.record(z.string(), jsonValueSchema).readonly();
+
+/**
+ * Validates an HTTP header dictionary.
+ * Keys must be valid lower-case HTTP token characters; values must be strings.
+ */
 const headerMapSchema: z.ZodType<HeaderMap> = z
   .record(z.string().regex(/^[a-z0-9!#$%&'*+.^_`|~-]+$/), z.string())
   .readonly();
+
+/** Custom validator for non-empty secret strings. */
 const secretSchema = z.custom<SecretString>((value) => typeof value === "string" && value.length > 0);
+
+/** Canonical 13-member failure category enum schema. */
 const failureCategorySchema = z.enum([
   "invalid_request",
   "authentication",
@@ -35,6 +54,8 @@ const failureCategorySchema = z.enum([
   "unsupported_capability",
   "stream_interrupted",
 ]);
+
+/** Schema for multi-protocol model catalog metadata. */
 const catalogSchema = z
   .object({
     openai: z.object({ created: z.number().int().nonnegative(), ownedBy: z.string().min(1) }).strict(),
@@ -60,6 +81,8 @@ const catalogSchema = z
       .strict(),
   })
   .strict();
+
+/** Schema for unit pricing rates in USD per million tokens. */
 const pricingSchema = z
   .object({
     inputUsdPerMillionTokens: z.string().regex(/^\d+(?:\.\d+)?$/),
@@ -76,21 +99,20 @@ const pricingSchema = z
   .strict();
 
 /**
- * Strict structural schema for the resolved config.
+ * Strict structural Zod schema for validating the resolved startup configuration.
  *
- * When `tracing.enabled` is true (the default), the startup probe in
- * `loadConfig` verifies the Trace root after this schema and the
- * cross-reference checks succeed.
+ * Enforces strict object shapes (`.strict()`), default values, port bounds, positive limits,
+ * and URI formats.
  *
- * @remarks Cross-reference, duplicate-secret, URL, forbidden-header, namespace, and
- * deep-freeze checks run after this schema.
+ * @remarks
+ * Structural validation occurs after secret resolution and before cross-reference semantic checks.
  */
 export const aptusConfigSchema: z.ZodType<AptusConfig, unknown> = z
   .object({
     server: z
       .object({
         host: z.string().min(1).default("0.0.0.0"),
-        port: positiveInt.max(65535).default(8080),
+        port: z.number().int().min(0).max(65535).default(8080),
         bodyLimitBytes: positiveInt.default(33_554_432),
         maxInFlight: positiveInt.default(1000),
         requestDeadlineMs: positiveInt.default(600_000),
@@ -100,7 +122,7 @@ export const aptusConfigSchema: z.ZodType<AptusConfig, unknown> = z
       })
       .strict(),
     operations: z
-      .object({ host: z.string().min(1).default("127.0.0.1"), port: positiveInt.max(65535).default(9090) })
+      .object({ host: z.string().min(1).default("127.0.0.1"), port: z.number().int().min(0).max(65535).default(9090) })
       .strict(),
     auth: z
       .object({
