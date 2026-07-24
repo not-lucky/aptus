@@ -2,6 +2,9 @@ export type {
   HookName,
   HookResult,
   GatewayContext,
+  DispatchCommitmentState,
+  GatewayAuthenticationResult,
+  GatewayAuthenticationCapability,
   GatewayPlugin,
   HookManager,
   HookTimeoutConfiguration,
@@ -10,6 +13,23 @@ export type {
   GatewayExchange,
   GatewayExchangeFactory,
 } from "./lifecycle.js";
+export type {
+  DispatchBudgetBlockReason,
+  DispatchCostEstimate,
+  ProviderDispatchCompositionOptions,
+} from "./dispatch.js";
+export {
+  BoundedCandidateIterator,
+  DispatchBudgetLedger,
+  DISPATCH_STATE_KEYS,
+  DispatchBudgetStateError,
+  TimeoutDispatchDecorator,
+  RetryBudgetDispatchDecorator,
+  CostAuditDispatchDecorator,
+  RedactingTraceDispatchDecorator,
+  DefaultGuardedDispatchProxy,
+  composeProviderDispatch,
+} from "./dispatch.js";
 export type {
   RouteResolver,
   SelectionStrategy,
@@ -24,6 +44,20 @@ export type {
   Weighted,
   LeastConnections,
 } from "./routing.js";
+export type {
+  CredentialSelectionStrategyName,
+  CredentialSelectionSupport,
+  CredentialSelectionPolicyErrorCode,
+  CredentialSelectorFactory,
+} from "./selection.js";
+export {
+  CredentialSelectionPolicyError,
+  FillFirstSelector,
+  RoundRobinSelector,
+  WeightedRoundRobinSelector,
+  LeastConnectionsSelector,
+  createCredentialSelector,
+} from "./selection.js";
 export type {
   ProtocolAdapterFactory,
   ProviderFactory,

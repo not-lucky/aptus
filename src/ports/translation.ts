@@ -16,6 +16,8 @@ export interface RawIngressInput {
   headers: Record<string, string>;
   /** Untrusted protocol body awaiting validation. */
   body: unknown;
+  /** Optional outer-boundary authorization value; never copied into canonical data. */
+  readonly authorization?: string;
   /** Optional caller-owned cancellation signal linked to the application scope. */
   readonly signal?: AbortSignal;
   /** Optional externally supplied request identity. */

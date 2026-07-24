@@ -640,6 +640,8 @@ function isolatedContext(context: GatewayContext): GatewayContext {
     request: structuredClone(context.request),
     requestId: context.requestId,
     signal: context.signal,
+    commitment: context.commitment,
+    auth: context.auth,
     state,
     getState<T>(key: string): T | undefined {
       return state.get(key) as T | undefined;

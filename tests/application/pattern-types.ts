@@ -158,12 +158,22 @@ const app: GatewayApplication = {
 };
 const state: CredentialStatePort = {
   state: (): CredentialState => "active",
-  transition: (_id, _next) => undefined,
+  snapshot: () => ({ state: "active", penaltyCount: 0 }),
+  eligible: () => true,
+  hasEligible: () => true,
+  counts: () => ({ active: 1, cooldown: 0, critical_failure: 0, suspended: 0 }),
+  failure: () => ({ state: "active", delayMs: 0, retryable: false }),
+  success: () => undefined,
+  quarantine: () => undefined,
+  reset: () => undefined,
+  probe: () => undefined,
 };
 const context: GatewayContext = {
   request,
   requestId: "req",
   signal: new AbortController().signal,
+  commitment: { isCommitted: () => false },
+  auth: { authenticate: async () => undefined },
   state: new Map(),
   getState: () => undefined,
   setState: () => undefined,
@@ -175,6 +185,7 @@ const exchange: GatewayExchange = {
     yield {} as CanonicalChunk;
   },
   runEgress: async (value) => value,
+  commitEgress: () => undefined,
   close: async () => undefined,
 };
 const exchanges: GatewayExchangeFactory = { open: () => exchange };
@@ -270,16 +281,16 @@ void [
 
 const input: RawIngressInput = { path: "/v1/custom", headers: {}, body: {} };
 void input;
-// @ts-expect-error facade must not return an SDK/HTTP object
 const badApp: GatewayApplication = {
+  // @ts-expect-error facade must not return an SDK/HTTP object
   handle: async () => ({ sdkResponse: true }),
   stream: async function* () {
     yield {} as CanonicalChunk;
   },
 };
 void badApp;
-// @ts-expect-error dispatch must return a canonical response, not an SDK/HTTP object
 const badDispatch: ProviderDispatchPort = {
+  // @ts-expect-error dispatch must return a canonical response, not an SDK/HTTP object
   dispatch: async () => ({ sdkResponse: true }),
   stream: async function* () {
     yield {} as CanonicalChunk;

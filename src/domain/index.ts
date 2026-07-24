@@ -110,3 +110,4 @@ export {
   isContinuableFinishReason,
   deriveResponseStatus,
 } from "./mapping.js";
+export { isSafeCanonicalResponse } from "./response-validation.js";

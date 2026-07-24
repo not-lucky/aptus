@@ -155,7 +155,7 @@ describe("loadConfiguration", () => {
       ).toBe(path === "schema.ts" || path === "loader.ts");
       expect(
         source.includes("../domain/") || source.includes("../application/"),
-      ).toBe(false);
+      ).toBe(path === "route-resolver.ts" || path === "dispatch-policy.ts");
     }
   });
 });

@@ -16,4 +16,6 @@ export interface RouteCandidate {
   capabilities: ReadonlySet<string>;
   /** Pre-dispatch cost estimate in US dollars. */
   estimatedCostUsd: number;
+  /** Optional deterministic pre-dispatch latency estimate in milliseconds. */
+  estimatedLatencyMs?: number;
 }

@@ -92,7 +92,15 @@ const health: HealthPort<{ healthy: true }> = {
 };
 const state: CredentialStatePort = {
   state: (_id): CredentialState => "active",
-  transition: (_id, _next) => undefined,
+  snapshot: (_id) => ({ state: "active", penaltyCount: 0 }),
+  eligible: (_id) => true,
+  hasEligible: () => true,
+  counts: () => ({ active: 1, cooldown: 0, critical_failure: 0, suspended: 0 }),
+  failure: (_id, _outcome) => ({ state: "active", delayMs: 0, retryable: false }),
+  success: (_id) => undefined,
+  quarantine: (_id, _audit) => undefined,
+  reset: (_id, _audit) => undefined,
+  probe: (_id) => undefined,
 };
 
 const dispatch: ProviderDispatchPort = {
@@ -141,7 +149,7 @@ void [
 candidate.capabilities.add("tools");
 // @ts-expect-error readonly transport signal is required
 void clock.sleep(1, new Event("abort"));
-// @ts-expect-error credential states are a closed union
-state.transition("credential", "ready");
+// @ts-expect-error credential failure kinds are a closed union
+state.failure("credential", { kind: "ready" });
 // @ts-expect-error trusted routing headers are readonly
 context.trustedRoutingHeaders["x-route"] = "changed";

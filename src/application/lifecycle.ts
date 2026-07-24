@@ -34,6 +34,12 @@ export interface GatewayCommand<T = unknown> {
   undo?(): Promise<void>;
 }
 
+/** Monotonic request-local state indicating that egress bytes are committed. */
+export interface DispatchCommitmentState {
+  /** Returns whether a writer has synchronously committed egress bytes. */
+  isCommitted(): boolean;
+}
+
 /** Request-scoped canonical exchange including the adapter-owned egress boundary. */
 export interface GatewayExchange {
   /** Runs canonical non-stream processing. */
@@ -42,6 +48,8 @@ export interface GatewayExchange {
   stream(): AsyncIterable<CanonicalChunk>;
   /** Runs the egress hook over one encoded adapter value. */
   runEgress(value: EgressValue): Promise<EgressValue | GatewayError>;
+  /** Commits the prepared egress value and releases its stream gate. */
+  commitEgress(): void;
   /** Finalizes the exchange and all request-owned resources. */
   close(): Promise<void>;
 }
@@ -59,6 +67,35 @@ export type HookResult<T> =
   | { kind: "shortCircuit"; value: T }
   | { kind: "abort"; error: GatewayError };
 
+/** Safe authentication result exposed to request-scoped policy plugins. */
+export interface GatewayAuthenticationResult {
+  /** Stable safe client identity. */
+  readonly clientId: string;
+  /** Model aliases this client may route. */
+  readonly allowedModelAliases: ReadonlySet<string>;
+  /** Authenticated request and daily budget limits. */
+  readonly limits: {
+    /** Maximum requests per minute. */
+    readonly rpm: number;
+    /** Maximum tokens per minute. */
+    readonly tpm: number;
+    /** Maximum tokens per day. */
+    readonly dailyTokens: number;
+    /** Maximum daily cost in US dollars. */
+    readonly dailyCostUsd: number;
+  };
+  /** Whether this client is restricted to dry-run execution. */
+  readonly dryRun: boolean;
+}
+
+/** Injected capability that authenticates only at the outer boundary. */
+export interface GatewayAuthenticationCapability {
+  /** Resolves an outer authorization value into safe client policy data. */
+  authenticate(
+    authorization: string | undefined,
+    signal: AbortSignal,
+  ): Promise<GatewayAuthenticationResult | undefined>;
+}
 /** Request-local immutable snapshot plus namespaced mutable plugin state. */
 export interface GatewayContext {
   /** Canonical request snapshot for the current stage. */
@@ -67,6 +104,12 @@ export interface GatewayContext {
   readonly requestId: string;
   /** Cancellation signal owned by the request orchestrator. */
   readonly signal: AbortSignal;
+  /** Monotonic commitment state for the adapter egress boundary. */
+  readonly commitment: DispatchCommitmentState;
+  /** Outer-boundary authorization view; never part of canonical request or state. */
+  readonly authorization?: string;
+  /** Safe authentication capability injected by the application boundary. */
+  readonly auth: GatewayAuthenticationCapability;
   /** Sole shared mutable plugin-state mechanism for this request. */
   readonly state: Map<string, unknown>;
   /** Reads a typed namespaced state value. */

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { DefaultGatewayApplication } from "../../src/application/index.js";
+import {
+  ConfiguredRouteResolver,
+  GatewayConfigSchema,
+} from "../../src/config/index.js";
 import type {
   GatewayPlugin,
   HookManager,
@@ -25,6 +29,7 @@ import type {
   ProviderDispatchPort,
   RawIngressInput,
 } from "../../src/ports/index.js";
+import type { CredentialStatePort } from "../../src/ports/index.js";
 
 const requestId = "req-lifecycle";
 const candidate: RouteCandidate = {
@@ -106,6 +111,18 @@ function registry(plugins: ReadonlyArray<GatewayPlugin>): HookManager {
   const registrations: PluginRegistration[] = [
     { plugin: plugin("authentication"), enabled: true },
     ...plugins.map((value) => ({ plugin: value, enabled: true })),
+    {
+      plugin: plugin("cost-audit-fixture", ["beforeUpstreamDispatch"], {
+        beforeUpstreamDispatch: (context, value) => {
+          context.setState("dispatch:cost-estimate", {
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            cost: response.cost,
+          });
+          return { kind: "continue", value };
+        },
+      }),
+      enabled: true,
+    },
   ];
   return new PluginRegistry(registrations);
 }
@@ -118,6 +135,31 @@ function clock(): ClockPort {
       ),
   };
 }
+const dispatchPolicy = {
+  snapshot: () => ({
+    defaultDryRun: false,
+    resolve: () => ({
+      attemptBudget: { maxAttempts: 1, maxLatencyMs: 1000, maxCostUsd: 1_000_000 },
+      statusPolicy: { retryable: [], nonRetryable: [] },
+      providerTimeoutMs: 1000,
+      streamIdleTimeoutMs: 1000,
+      contextTokens: 1000,
+    }),
+  }),
+};
+const fixtureCredentials: CredentialStatePort = {
+  state: () => "active",
+  snapshot: () => ({ state: "active", penaltyCount: 0 }),
+  eligible: () => true,
+  hasEligible: () => true,
+  counts: () => ({ active: 1, cooldown: 0, critical_failure: 0, suspended: 0 }),
+  failure: () => ({ state: "active", delayMs: 0, retryable: false }),
+  success: () => undefined,
+  quarantine: () => undefined,
+  reset: () => undefined,
+  probe: () => undefined,
+};
+const trace = { record: async () => undefined };
 function setup(
   dispatch: ProviderDispatchPort,
   hooks: HookManager,
@@ -149,6 +191,10 @@ function setup(
     clock: clock(),
     requestIds: () => requestId,
     hookTimeouts,
+    auth: { authenticate: async () => undefined },
+    dispatchPolicies: dispatchPolicy,
+    credentials: fixtureCredentials,
+    trace,
   });
   return {
     app,
@@ -233,6 +279,7 @@ describe("DefaultGatewayApplication lifecycle", () => {
     const canonical = await exchange.handle();
     expect(canonical).toBe(response);
     const encoded = await exchange.runEgress("encoded-response");
+    exchange.commitEgress();
     expect(encoded).toBe("encoded-response");
     expect(events.at(-1)).toBe("onEgressTranslate");
     await exchange.close();
@@ -265,6 +312,7 @@ describe("DefaultGatewayApplication lifecycle", () => {
     expect((await stream.next()).value?.type).toBe("response_start");
     expect(reads).toBe(1);
     expect(await exchange.runEgress("encoded-chunk")).toBe("encoded-chunk");
+    exchange.commitEgress();
     expect((await stream.next()).value?.type).toBe("text_delta");
     expect(reads).toBe(2);
     await stream.return?.();
@@ -303,6 +351,10 @@ describe("DefaultGatewayApplication lifecycle", () => {
       clock: clock(),
       requestIds: () => requestId,
       hookTimeouts,
+      auth: { authenticate: async () => undefined },
+      dispatchPolicies: dispatchPolicy,
+      credentials: fixtureCredentials,
+      trace,
     });
     const result = await invalidApp.handle(bad);
     expect(result).toMatchObject({
@@ -313,5 +365,143 @@ describe("DefaultGatewayApplication lifecycle", () => {
     });
     expect(JSON.stringify(result)).not.toContain("fixture-secret");
     expect(lookedUp).toBe(false);
+  });
+  it("preserves concrete route exhaustion without opening an upstream", async () => {
+    let providerCreates = 0;
+    let dispatches = 0;
+    let errors = 0;
+    const configured = GatewayConfigSchema.parse({
+      server: {
+        port: 11248,
+        cors: { origins: ["https://console.example.com"] },
+        bodyTimeoutMs: 1000,
+        requestTimeoutMs: 2000,
+        streamIdleTimeoutMs: 1000,
+        logLevel: "info",
+        trace: { enabled: false, destination: "stdout" },
+        metrics: { enabled: true, path: "/metrics" },
+        health: { path: "/health", upstreamCheck: true },
+        defaultDryRun: false,
+      },
+      clients: [{
+        id: "client-one",
+        tokenHashRef: "env:CLIENT_HASH",
+        limits: { rpm: 1, tpm: 1, dailyTokens: 1, dailyCostUsd: 1 },
+        allowedModelAliases: ["test"],
+      }],
+      providers: [{
+        id: "provider-one",
+        protocol: "custom",
+        baseUrl: "https://provider.example.com",
+        timeoutMs: 1,
+        customHeaders: {},
+        credentials: [{ id: "credential-one", secretRef: "env:KEY", weight: 1 }],
+        credentialSelection: "fill-first",
+      }],
+      models: [{
+        alias: "test",
+        targets: [{
+          providerId: "provider-one",
+          physicalModel: "physical",
+          pricesPerMillionUsd: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          capabilities: [],
+          contextTokens: 100,
+        }],
+      }],
+      routes: [{
+        id: "route-one",
+        modelAliases: ["test"],
+        orderedCandidates: [{ providerId: "provider-one", modelAlias: "test", weight: 1 }],
+        requiredCapabilities: [],
+        conditions: [],
+        fallbackGroups: [],
+        attemptBudget: { maxAttempts: 1, maxLatencyMs: 100, maxCostUsd: 1 },
+        statusPolicy: { retryable: [], nonRetryable: [] },
+      }],
+      plugins: [{
+        id: "authentication", version: "1.0.0", enabled: true,
+        hooks: ["onIngressReceived"], priority: 1,
+      }],
+    });
+    const credentials: CredentialStatePort = {
+      state: () => "suspended",
+      snapshot: () => ({ state: "suspended", penaltyCount: 0 }),
+      eligible: () => false,
+      hasEligible: () => false,
+      counts: () => ({ active: 0, cooldown: 0, critical_failure: 0, suspended: 1 }),
+      failure: () => { throw new Error("read-only credential fixture"); },
+      success: () => { throw new Error("read-only credential fixture"); },
+      quarantine: () => { throw new Error("read-only credential fixture"); },
+      reset: () => { throw new Error("read-only credential fixture"); },
+      probe: () => { throw new Error("read-only credential fixture"); },
+    };
+    const routes = new ConfiguredRouteResolver({
+      configuration: { snapshot: () => configured },
+      credentials,
+      estimate: () => ({ inputTokens: 1, outputTokens: 0, totalTokens: 1 }),
+      estimateLatencyMs: () => 1,
+    });
+    const hooks = registry([
+      plugin("errors", ["onError"], {
+        onError: (_context, error) => {
+          errors += 1;
+          return { kind: "continue", value: error };
+        },
+      }),
+    ]);
+    const ingress = {
+      protocol: "custom" as const,
+      paths: new Set(["/v1/custom"]),
+      canTranslate: () => true,
+      translate: () => request,
+    };
+    const app = new DefaultGatewayApplication({
+      adapters: {
+        ingress: () => ingress,
+        egress: () => ({
+          protocol: "custom" as const,
+          encodeResponse: () => "response",
+          encodeChunk: () => "chunk",
+          encodeError: () => "error",
+        }),
+      },
+      hooks,
+      routes,
+      providers: {
+        create: () => {
+          providerCreates += 1;
+          return {
+            dispatch: async () => {
+              dispatches += 1;
+              return response;
+            },
+            stream: async function* () { yield chunks[0]!; },
+          };
+        },
+      },
+      dispatchPolicies: dispatchPolicy,
+      credentials,
+      trace,
+      clock: clock(),
+      requestIds: () => requestId,
+      hookTimeouts,
+      auth: { authenticate: async () => undefined },
+    });
+    const result = await app.handle({
+      path: "/v1/custom", headers: {}, body: {}, requestId,
+    });
+    expect(result).toEqual({
+      category: "routing",
+      code: "route_exhausted",
+      message: "no eligible route candidate",
+      status: 503,
+      retryable: true,
+      requestId,
+    });
+    expect({ providerCreates, dispatches, errors }).toEqual({
+      providerCreates: 0,
+      dispatches: 0,
+      errors: 1,
+    });
   });
 });

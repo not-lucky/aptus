@@ -1,21 +1,15 @@
 import type { GatewayConfig } from "./schema.js";
-import type { ClockPort, HealthPort, RouteConfigPort } from "../ports/index.js";
-import type { CredentialState } from "../ports/credentials.js";
+import type {
+  ClockPort,
+  CredentialCounts,
+  CredentialStatePort,
+  HealthPort,
+  RouteConfigPort,
+} from "../ports/index.js";
 
 /** Readiness status vocabulary exposed by the health capability. */
 export type ReadinessStatus = "healthy" | "not_ready";
 
-/** Secret-free aggregate credential lifecycle counts. */
-export interface CredentialCounts extends Record<CredentialState, number> {
-  /** Number of active credentials. */
-  readonly active: number;
-  /** Number of cooling-down credentials. */
-  readonly cooldown: number;
-  /** Number of credentials with critical failures. */
-  readonly critical_failure: number;
-  /** Number of suspended credentials. */
-  readonly suspended: number;
-}
 
 /** Immutable, safe liveness and readiness snapshot. */
 export interface ReadinessSnapshot {
@@ -91,8 +85,11 @@ export class ConfigurationCoordinator
     requiredUpstreamProviders: new Set<string>(),
   };
 
-  /** Creates a coordinator using the supplied process clock. */
-  constructor(private readonly clock: ClockPort) {}
+  /** Creates a coordinator using the clock and optional authoritative credential source. */
+  constructor(
+    private readonly clock: ClockPort,
+    private readonly credentialState?: CredentialStatePort,
+  ) {}
 
   /** Deep-freezes and atomically publishes a validated configuration snapshot. */
   publishValidated(config: GatewayConfig): void {
@@ -146,18 +143,31 @@ export class ConfigurationCoordinator
     if (!this.config) throw new ConfigurationUnavailableError();
     return this.config;
   }
-
   /** Returns a cancellation-aware safe readiness snapshot without probing upstreams. */
   async check(signal: AbortSignal): Promise<ReadinessSnapshot> {
     if (signal.aborted) throw signal.reason;
     const configValid = this.config !== undefined;
+    const credentialCounts =
+      this.credentialState?.counts() ?? this.operational.credentials;
+    const eligibleCredential =
+      this.credentialState === undefined
+        ? this.operational.eligibleCredential
+        : credentialCounts.active > 0;
+    const credentials = freezeDeep({
+      active: credentialCounts.active,
+      cooldown: credentialCounts.cooldown,
+      critical_failure: credentialCounts.critical_failure,
+      suspended: credentialCounts.suspended,
+    });
+    if (!Object.values(credentials).every(validCount))
+      throw new TypeError("credential counts must be finite non-negative integers");
     const requiredUpstreamsReady = [
       ...this.operational.requiredUpstreamProviders,
     ].every((provider) => this.operational.upstreamChecks[provider] === "ok");
     const ready =
       configValid &&
       this.operational.pluginsRegistered &&
-      this.operational.eligibleCredential &&
+      eligibleCredential &&
       requiredUpstreamsReady;
     return freezeDeep({
       status: ready ? "healthy" : "not_ready",
@@ -166,7 +176,7 @@ export class ConfigurationCoordinator
       port: 11248,
       configValid,
       pluginsRegistered: this.operational.pluginsRegistered,
-      credentials: this.operational.credentials,
+      credentials,
       upstreamChecks: this.operational.upstreamChecks,
       checkedAt: new Date(this.clock.now()).toISOString(),
     });

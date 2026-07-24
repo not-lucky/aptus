@@ -7,9 +7,15 @@ export {
   ConfigurationUnavailableError,
 } from "./readiness.js";
 export type {
-  CredentialCounts,
   OperationalReadinessState,
   ReadinessSnapshot,
   ReadinessStatus,
 } from "./readiness.js";
 export { createConfiguredPluginRegistry } from "./plugin-registration.js";
+export { ConfiguredRouteResolver } from "./route-resolver.js";
+export type { ConfiguredRouteResolverOptions } from "./route-resolver.js";
+export {
+  ConfiguredDispatchPolicyPort,
+  DispatchPolicyResolutionError,
+} from "./dispatch-policy.js";
+export type { ConfiguredDispatchPolicyPortOptions } from "./dispatch-policy.js";

@@ -21,6 +21,8 @@ function context(
     request,
     requestId: "request-1",
     signal,
+    commitment: { isCommitted: () => false },
+    auth: { authenticate: async () => undefined },
     state,
     getState<T>(key: string): T | undefined {
       return state.get(key) as T | undefined;
@@ -451,12 +453,14 @@ describe("PluginRegistry execution", () => {
 
   it("overlaps consecutive observers and isolates values and request-local state", async () => {
     let reached = 0;
+    const observedAuthorization: Array<string | undefined> = [];
     const barrier = Promise.withResolvers<void>();
     const observer = (id: string) =>
       registration(
         plugin(id, {
           hooks: ["onIngressReceived"],
           onIngressReceived: ingress(async (hookContext, value) => {
+            observedAuthorization.push(hookContext.authorization);
             reached += 1;
             hookContext.setState(`${id}:key`, "private");
             if (
@@ -491,7 +495,7 @@ describe("PluginRegistry execution", () => {
       ),
     ]);
     const liveValue = { marker: "live" };
-    const running = registry.run("onIngressReceived", context(), liveValue);
+    const running = registry.run("onIngressReceived", { ...context(), authorization: "Bearer observer-secret" }, liveValue);
     await vi.waitFor(() => expect(reached).toBe(2));
     barrier.resolve();
     await expect(running).resolves.toEqual({
@@ -500,6 +504,7 @@ describe("PluginRegistry execution", () => {
     });
     expect(liveValue).toEqual({ marker: "live" });
     expect(observedState).toEqual([undefined, undefined]);
+    expect(observedAuthorization).toEqual([undefined, undefined]);
   });
 
   it.each(["isolate", "abort"] as const)(

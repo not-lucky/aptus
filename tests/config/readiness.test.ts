@@ -14,7 +14,11 @@ import {
   PluginRegistrationError,
   type PluginResource,
 } from "../../src/plugins/index.js";
-import type { ClockPort } from "../../src/ports/index.js";
+import {
+  CredentialStateMachine,
+  type ClockPort,
+  type CredentialAuditRecord,
+} from "../../src/ports/index.js";
 
 const clock: ClockPort = {
   now: () => 1_700_000_000_000,
@@ -165,6 +169,56 @@ describe("ConfigurationCoordinator", () => {
     expect((await coordinator.check(new AbortController().signal)).ready).toBe(
       false,
     );
+  });
+
+  it("uses authoritative aggregate state without exposing credential details", async () => {
+    const records: CredentialAuditRecord[] = [];
+    const state = new CredentialStateMachine(
+      ["credential-secret-a", "credential-secret-b"],
+      {
+        clock,
+        random: () => 0.5,
+        audit: { record: (record) => records.push(record) },
+      },
+    );
+    state.failure("credential-secret-a", { kind: "timeout" });
+    state.failure("credential-secret-b", { kind: "unauthorized", status: 401 });
+    const coordinator = new ConfigurationCoordinator(clock, state);
+    coordinator.publishValidated(freshConfig());
+    coordinator.setOperationalState({
+      ...operational,
+      credentials: { active: 999, cooldown: 999, critical_failure: 999, suspended: 999 },
+      eligibleCredential: true,
+    });
+    const [first, second] = await Promise.all([
+      coordinator.check(new AbortController().signal),
+      coordinator.check(new AbortController().signal),
+    ]);
+    for (const snapshot of [first, second]) {
+      expect(snapshot).toMatchObject({
+        live: true,
+        ready: false,
+        status: "not_ready",
+        credentials: {
+          active: 0,
+          cooldown: 1,
+          critical_failure: 1,
+          suspended: 0,
+        },
+      });
+      expect(Object.keys(snapshot.credentials).sort()).toEqual([
+        "active",
+        "cooldown",
+        "critical_failure",
+        "suspended",
+      ]);
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(snapshot.credentials)).toBe(true);
+      expect(JSON.stringify(snapshot)).not.toMatch(
+        /credential-secret|secretRef|tokenHash|https?:\/\//i,
+      );
+    }
+    expect(records).toEqual([]);
   });
 
   it("propagates cancellation and preserves atomic A then B snapshots", async () => {

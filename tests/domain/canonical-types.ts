@@ -405,16 +405,16 @@ request.messages.push({
   role: "user",
   content: [{ type: "text", text: "next" }],
 });
-// @ts-expect-error argumentsJson must be a string, never an object.
 const invalidArguments: ContentBlock = {
   type: "tool_call",
   toolCallId: "call",
   name: "tool",
+  // @ts-expect-error argumentsJson must be a string, never an object.
   argumentsJson: {},
 };
-// @ts-expect-error roles are a closed canonical union.
 const invalidRole: CanonicalRequest = {
   ...request,
+  // @ts-expect-error roles are a closed canonical union.
   messages: [{ role: "admin", content: [] }],
 };
 // @ts-expect-error response status is closed.
