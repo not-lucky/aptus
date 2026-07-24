@@ -5,6 +5,7 @@ import type { AptusConfig } from "../config/types.js";
 import type { Gateway, GatewayResult, HeaderMap, Protocol, ProtocolAdapter } from "../domain/contracts.js";
 import type { ErrorEncoder, NormalizedFailure } from "../domain/operations.js";
 import { type AptusRequestId, createRequestId } from "../domain/request-id.js";
+import { authorizePublicName, createNameIndex, type NameIndex } from "../routing/resolution.js";
 import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.js";
 import { type AuthPurpose, authenticateClient } from "./auth.js";
 import { authorizedCatalogEntries } from "./catalog.js";
@@ -16,13 +17,25 @@ import {
 } from "./error-encoder.js";
 import { admitJsonObject } from "./ingress.js";
 import type { RequestCancellationRegistry } from "./request-cancellation.js";
-import { authorizePublicName, createNameIndex, type NameIndex } from "./resolution.js";
 
 /** Bounded client endpoint identifiers for metrics observation. */
 export type ClientEndpoint = "chat_completions" | "responses" | "messages" | "models";
 
 /** Lifecycle outcome of a client request for telemetry. */
-export type ClientOutcome = "accepted" | "rejected" | "complete" | "failed";
+export type ClientOutcome = "accepted" | "rejected" | "complete" | "failed" | "cancelled";
+
+/**
+ * Narrow HTTP-side telemetry observer, structurally decoupled from the
+ * observability module. It records `aptus_http_requests_total` outcomes.
+ */
+export interface HttpRequestObserver {
+  observeRequest(fields: {
+    readonly endpointProtocol: Protocol;
+    readonly endpoint: ClientEndpoint;
+    readonly outcome: ClientOutcome;
+    readonly stream: boolean;
+  }): void;
+}
 
 /**
  * Initialization options for constructing the authenticated client Express application.
@@ -39,7 +52,7 @@ export interface ClientAppOptions {
   /** Optional concurrency limiter (defaults to server config `maxInFlight`). */
   readonly limiter?: AdmissionLimiter;
   /** Optional metrics observer for client endpoint outcomes. */
-  readonly observer?: { observe(endpoint: ClientEndpoint, outcome: ClientOutcome): void };
+  readonly observer?: HttpRequestObserver;
   /** Optional cancellation registry for managing active request abort signals during shutdown. */
   readonly cancellations?: RequestCancellationRegistry;
 }
@@ -142,6 +155,10 @@ function createController(
     let aptusRequestId: AptusRequestId | undefined;
     let release: (() => void) | undefined;
     let unregisterCancellation: (() => void) | undefined;
+    // Narrow telemetry helper recording `aptus_http_requests_total` outcomes.
+    const observeOutcome = (outcome: ClientOutcome, stream = false): void => {
+      options.observer?.observeRequest({ endpointProtocol: protocol, endpoint: label, outcome, stream });
+    };
     try {
       // 1. Client authentication: Validate Bearer token or x-api-key before reading body or taking lease.
       const authentication = authenticateClient(
@@ -151,18 +168,15 @@ function createController(
         request.rawHeaders,
       );
       if (authentication === undefined) {
-        options.observer?.observe(label, "rejected");
-        writeEncoded(
-          response,
-          encodeUnidentifiedFailure(protocol, authenticationFailure()),
-        );
+        observeOutcome("rejected");
+        writeEncoded(response, encodeUnidentifiedFailure(protocol, authenticationFailure()));
         return;
       }
 
       // 2. Concurrency lease: Reject with 429 if maxInFlight limit is exceeded.
       release = limiter.tryAcquire();
       if (release === undefined) {
-        options.observer?.observe(label, "rejected");
+        observeOutcome("rejected");
         writeEncoded(response, encodeUnidentifiedFailure(protocol, rateLimitFailure()));
         return;
       }
@@ -188,12 +202,12 @@ function createController(
         } else if (!response.destroyed) {
           response.destroy();
         }
-        options.observer?.observe(label, "failed");
+        observeOutcome(deadlineExpired ? "failed" : "cancelled");
         return;
       }
       const admission = admissionRace.value;
       if (!admission.ok) {
-        options.observer?.observe(label, "rejected");
+        observeOutcome("rejected");
         writeEncoded(response, encodeUnidentifiedFailure(protocol, { ...admission.failure, retryable: false }));
         return;
       }
@@ -202,17 +216,17 @@ function createController(
       const publicName = options.adapters[protocol].readPublicModel(admission.body);
       if (!publicName.ok) {
         writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: publicName.error }));
-        options.observer?.observe(label, "failed");
+        observeOutcome("failed");
         return;
       }
       if (authorizePublicName(nameIndex, authentication.name, publicName.value) === undefined) {
         writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: notFoundFailure() }));
-        options.observer?.observe(label, "failed");
+        observeOutcome("failed");
         return;
       }
 
       // 5. Gateway execution: Dispatch request through domain gateway.
-      options.observer?.observe(label, "accepted");
+      observeOutcome("accepted", admission.body.stream === true);
       const gatewayResult = await raceWithAbort(
         options.gateway.execute({
           aptusRequestId,
@@ -231,7 +245,7 @@ function createController(
         } else if (!response.destroyed) {
           response.destroy();
         }
-        options.observer?.observe(label, "failed");
+        observeOutcome(deadlineExpired ? "failed" : "cancelled");
         return;
       }
 
@@ -250,10 +264,13 @@ function createController(
         } else if (!response.destroyed) {
           response.destroy();
         }
-        options.observer?.observe(label, "failed");
+        observeOutcome(deadlineExpired ? "failed" : "cancelled");
         return;
       }
-      options.observer?.observe(label, gatewayResult.value.kind === "failure" ? "failed" : "complete");
+      observeOutcome(
+        gatewayResult.value.kind === "failure" ? "failed" : "complete",
+        gatewayResult.value.kind === "stream",
+      );
     } catch {
       if (!response.headersSent && !response.destroyed) {
         if (deadlineExpired && aptusRequestId !== undefined) {
@@ -266,8 +283,12 @@ function createController(
               : encodeInternalFailure(protocol, aptusRequestId),
           );
         }
+      } else if (!response.destroyed) {
+        // A stream read rejection after headers were sent must close the client
+        // connection (no forged success terminator) instead of leaving it open.
+        response.destroy();
       }
-      options.observer?.observe(label, "failed");
+      observeOutcome("failed");
     } finally {
       clearTimeout(deadline);
       request.off("aborted", requestAborted);
@@ -294,7 +315,12 @@ function catalogController(
     );
     const aptusRequestId = createRequestId();
     if (authentication === undefined) {
-      options.observer?.observe("models", "rejected");
+      options.observer?.observeRequest({
+        endpointProtocol: "openai-chat",
+        endpoint: "models",
+        outcome: "rejected",
+        stream: false,
+      });
       writeEncoded(
         response,
         options.errorEncoder.encode({ protocol: "openai-chat", aptusRequestId, failure: authenticationFailure() }),
@@ -306,7 +332,12 @@ function catalogController(
     const body = options.adapters[protocol].buildModelList({
       entries: authorizedCatalogEntries(options.config, nameIndex, authentication.name, protocol),
     });
-    options.observer?.observe("models", "complete");
+    options.observer?.observeRequest({
+      endpointProtocol: protocol,
+      endpoint: "models",
+      outcome: "complete",
+      stream: false,
+    });
     response.set("x-aptus-request-id", aptusRequestId).type("application/json").status(200).send(JSON.stringify(body));
   };
 }

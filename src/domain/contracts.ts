@@ -257,6 +257,16 @@ export interface NativePreparationInput {
    * Configured native mutations (defaults, extraBody, overrides).
    */
   readonly mutations: NativeMutations;
+
+  /**
+   * Absolute monotonic request deadline in milliseconds.
+   */
+  readonly deadlineMs: number;
+
+  /**
+   * Stream idle limit reset by every received byte.
+   */
+  readonly streamIdleMs: number;
 }
 
 /**

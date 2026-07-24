@@ -6,6 +6,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "vitest";
+import { createChatOrigin } from "../helpers/chat-origin.js";
 import { completeYaml } from "./yaml.js";
 
 const REPO = resolve(import.meta.dirname, "..", "..");
@@ -303,11 +304,19 @@ test.concurrent("process: complete sample boots, probes, reports readiness, exit
 
 test.concurrent("process: client ingress catalogs and operations metrics are live", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aptus-process-http-"));
+  // Point the Chat provider at a deterministic loopback origin so the create
+  // request exercises the real native dispatch path without external network.
+  const origin = await createChatOrigin();
+  origin.enqueue({
+    status: 503,
+    body: '{"error":{"message":"upstream unavailable","type":"api_error","param":null,"code":null}}',
+  });
   writeFileSync(
     join(dir, "aptus.yaml"),
     completeYaml({
       "  port: 8080": "  port: 0",
       "  port: 9090": "  port: 0",
+      "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${origin.baseUrl}`,
     }),
   );
   const env = seededEnv("http");
@@ -372,6 +381,7 @@ test.concurrent("process: client ingress catalogs and operations metrics are liv
   } catch (error) {
     throw new Error(`${String(error)}\nstdout: ${redact(stdout)}\nstderr: ${redact(stderr)}`, { cause: error });
   } finally {
+    await origin.close();
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     assertNoSecretLeak({ stdout, stderr, code: null, signal: null }, Object.values(env));
   }

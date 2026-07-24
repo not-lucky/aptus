@@ -7,7 +7,8 @@ import type { Gateway, GatewayRequest, GatewayResult } from "../../src/domain/co
 import { createClientApp } from "../../src/http/client-app.js";
 import { createErrorEncoder } from "../../src/http/error-encoder.js";
 import { createOperationsApp } from "../../src/http/operations-app.js";
-import { createProtocolAdapters } from "../../src/http/protocol-adapters.js";
+import { createMetricsRegistry } from "../../src/observability/metrics.js";
+import { createProtocolAdapters } from "../../src/providers/adapters.js";
 
 const config = configuration();
 
@@ -491,19 +492,25 @@ test("stream relay cancels the owned stream when the client disconnects", async 
 
 test("operations metrics honor enablement and bounded endpoint labels", async () => {
   const state = { draining: false, traceReady: true };
-  await withApp(createOperationsApp({ config, revision: "sha256:test", state }), async (port) => {
-    await request(port, "/health/live", {});
-    await request(port, "/health", {});
-    const metrics = await request(port, "/metrics", {});
-    assert.equal(metrics.status, 200);
-    assert.match(metrics.body, /endpoint="health_live"/);
-    assert.match(metrics.body, /endpoint="health_ready"/);
-    assert.match(metrics.body, /endpoint="metrics"/);
-  });
+  await withApp(
+    createOperationsApp({ config, revision: "sha256:test", state, metrics: createMetricsRegistry() }),
+    async (port) => {
+      await request(port, "/health/live", {});
+      await request(port, "/health", {});
+      const metrics = await request(port, "/metrics", {});
+      assert.equal(metrics.status, 200);
+      assert.match(metrics.body, /endpoint="health_live"/);
+      assert.match(metrics.body, /endpoint="health_ready"/);
+      assert.match(metrics.body, /endpoint="metrics"/);
+    },
+  );
   const disabled = { ...config, metrics: { enabled: false } };
-  await withApp(createOperationsApp({ config: disabled, revision: "sha256:test", state }), async (port) => {
-    assert.equal((await request(port, "/metrics", {})).status, 404);
-  });
+  await withApp(
+    createOperationsApp({ config: disabled, revision: "sha256:test", state, metrics: createMetricsRegistry() }),
+    async (port) => {
+      assert.equal((await request(port, "/metrics", {})).status, 404);
+    },
+  );
 });
 
 function complete(): GatewayResult {

@@ -1,7 +1,7 @@
 import express from "express";
 import type { AptusConfig } from "../config/types.js";
 import type { HealthPayload } from "../domain/operations.js";
-import { createOperationsObserver } from "./operations-observer.js";
+import type { MetricsRegistry } from "../observability/metrics.js";
 
 /**
  * Mutable process-local runtime state shared across HTTP listeners and shutdown handlers.
@@ -28,6 +28,8 @@ export interface OperationsAppOptions {
   revision: string;
   /** Shared runtime state reference. */
   state: RuntimeState;
+  /** The single Prometheus metrics registry rendered by `/metrics`. */
+  metrics: MetricsRegistry;
 }
 
 /**
@@ -43,8 +45,7 @@ export interface OperationsAppOptions {
  * @returns Configured Express application.
  */
 export function createOperationsApp(options: OperationsAppOptions): express.Express {
-  const observer = createOperationsObserver();
-  const { config, revision, state } = options;
+  const { config, revision, state, metrics } = options;
 
   // Count providers with at least one enabled key.
   const enabledProviderCount = config.providers.filter((provider) => provider.keys.some((key) => key.enabled)).length;
@@ -61,28 +62,28 @@ export function createOperationsApp(options: OperationsAppOptions): express.Expr
 
   const app = express();
 
-  app.get("/metrics", (_req, res) => {
+  app.get("/metrics", async (_req, res) => {
     if (!config.metrics.enabled) {
       res.status(404).end();
       return;
     }
-    observer.observe("metrics");
-    res.type("text/plain; version=0.0.4; charset=utf-8").send(observer.renderMetrics());
+    metrics.operations("metrics");
+    res.type("text/plain; version=0.0.4; charset=utf-8").send(await metrics.render());
   });
 
   app.get("/health/live", (_req, res) => {
-    observer.observe("health_live");
+    metrics.operations("health_live");
     res.json(payload("ok"));
   });
 
   app.get("/health/ready", (_req, res) => {
-    observer.observe("health_ready");
+    metrics.operations("health_ready");
     const isReady = ready();
     res.status(isReady ? 200 : 503).json(payload(isReady ? "ok" : "degraded"));
   });
 
   app.get("/health", (_req, res) => {
-    observer.observe("health_ready");
+    metrics.operations("health_ready");
     const isReady = ready();
     res.status(isReady ? 200 : 503).json(payload(isReady ? "ok" : "degraded"));
   });
