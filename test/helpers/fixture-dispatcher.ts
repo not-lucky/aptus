@@ -106,6 +106,10 @@ function buildStream(item: FixtureResponse, signal: AbortSignal): ReadableStream
         return;
       }
       // Emit scripted chunks first, then close, hold open, or error.
+      if (item.streamError !== undefined && index >= (item.streamError.afterChunks ?? chunks.length)) {
+        controller.error(taggedStreamError(item.streamError.kind, "stream error"));
+        return;
+      }
       if (index < chunks.length) {
         const delayMs = delays[index] ?? 0;
         const chunk = chunks[index];
@@ -127,11 +131,7 @@ function buildStream(item: FixtureResponse, signal: AbortSignal): ReadableStream
         controller.error(taggedStreamError("abort", "aborted"));
         return;
       }
-      if (item.streamError !== undefined && index >= (item.streamError.afterChunks ?? 0)) {
-        controller.error(taggedStreamError(item.streamError.kind, "stream error"));
-      } else {
-        controller.close();
-      }
+      controller.close();
     },
   });
 }

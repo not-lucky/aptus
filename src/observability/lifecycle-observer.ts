@@ -1,5 +1,5 @@
 import type { Logger } from "@logtape/logtape";
-import type { JsonObject, LifecycleEvent, LifecycleObserver, Protocol } from "../domain/contracts.js";
+import type { JsonValue, LifecycleEvent, LifecycleObserver, Protocol } from "../domain/contracts.js";
 import type { IrFailureCategory } from "../domain/operations.js";
 import type { MetricsRegistry } from "./metrics.js";
 
@@ -119,8 +119,8 @@ export interface CompletedFields {
   readonly attempts: number;
   readonly stream: boolean;
   readonly durationMs: number;
-  readonly firstByteMs: number;
-  readonly usage?: JsonObject;
+  readonly firstByteMs?: number;
+  readonly usage?: JsonValue;
   readonly estimatedCostUsd?: string;
 }
 
@@ -323,14 +323,16 @@ export function createLifecycleObserver(options: LifecycleObserverOptions): Life
           fields.stream,
           fields.durationMs / 1000,
         );
-        metrics.httpFirstByte(
-          fields.endpointProtocol,
-          fields.targetProtocol,
-          fields.provider,
-          fields.canonicalPublicName,
-          fields.stream,
-          fields.firstByteMs / 1000,
-        );
+        if (fields.firstByteMs !== undefined) {
+          metrics.httpFirstByte(
+            fields.endpointProtocol,
+            fields.targetProtocol,
+            fields.provider,
+            fields.canonicalPublicName,
+            fields.stream,
+            fields.firstByteMs / 1000,
+          );
+        }
       }
     },
 

@@ -496,11 +496,13 @@ test("operations metrics honor enablement and bounded endpoint labels", async ()
     createOperationsApp({ config, revision: "sha256:test", state, metrics: createMetricsRegistry() }),
     async (port) => {
       await request(port, "/health/live", {});
+      await request(port, "/health/ready", {});
       await request(port, "/health", {});
       const metrics = await request(port, "/metrics", {});
       assert.equal(metrics.status, 200);
       assert.match(metrics.body, /endpoint="health_live"/);
       assert.match(metrics.body, /endpoint="health_ready"/);
+      assert.match(metrics.body, /endpoint="health"/);
       assert.match(metrics.body, /endpoint="metrics"/);
     },
   );

@@ -6,6 +6,7 @@ import { test } from "vitest";
 import type { AptusRequestId } from "../../src/domain/request-id.js";
 import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.js";
 import { createNoopTraceRecorder } from "../../src/observability/trace/noop-recorder.js";
+import { createRedactor } from "../../src/observability/trace/redaction.js";
 
 const encoder = new TextEncoder();
 
@@ -132,4 +133,16 @@ test("no-op recorder resolves without creating any directory", async () => {
   await session.recordBytes("provider_stream", encoder.encode("x"));
   await session.finish({ kind: "complete", status: 200 });
   assert.equal(existsSync(join(root, "2026-08-15T00-00-00.000+0000_req-3")), false);
+});
+
+test("redactor preserves __proto__ as an own property without prototype pollution", () => {
+  const redactor = createRedactor(new Set(["secret-tok"]));
+  const input = JSON.parse('{"__proto__":{"polluted":true,"token":"secret-tok"},"a":1}');
+  const output = redactor.redactJson(input) as Record<string, unknown>;
+
+  assert.equal(Object.prototype.hasOwnProperty.call(output, "__proto__"), true);
+  const protoVal = (output as Record<string, any>)["__proto__"];
+  assert.equal(protoVal.polluted, true);
+  assert.equal(protoVal.token, "[REDACTED]");
+  assert.equal(({} as any).polluted, undefined);
 });

@@ -536,6 +536,16 @@ export interface ProviderDispatcher {
    * @throws Transport, timeout, abort, redirect violation, or socket errors.
    */
   dispatch(request: PreparedProviderRequest, signal: AbortSignal): Promise<ProviderResponse>;
+
+  /**
+   * Closes the underlying transport resources and pooled connections.
+   */
+  close?(): Promise<void>;
+
+  /**
+   * Forcibly destroys underlying transport resources and active sockets.
+   */
+  destroy?(): Promise<void>;
 }
 
 /**

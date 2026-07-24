@@ -31,6 +31,8 @@ export interface GracefulShutdownOptions {
   readonly onDraining: () => void;
   /** Callback triggered when the drain window expires to abort remaining in-flight requests. */
   readonly onAbortActive: () => void;
+  /** Optional callback invoked after all listeners close to release transport resources. */
+  readonly onShutdown?: () => Promise<void> | void;
 }
 
 /**
@@ -43,6 +45,7 @@ export interface GracefulShutdownOptions {
  * 4. Waits for in-flight requests on the client listener to complete normally.
  * 5. If `drainMs` expires before in-flight requests finish, triggers `onAbortActive()` and `closeAllConnections()`.
  * 6. Closes the operations listener last, ensuring health and metrics remain scrapable throughout the drain window.
+ * 7. Invokes `onShutdown()` to clean up background resources (e.g. Undici dispatcher).
  *
  * @param options - Shutdown parameters and server handles.
  * @returns A {@link GracefulShutdown} controller.
@@ -82,6 +85,8 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): Gracef
         finish();
         // Step 5: Close operations server last.
         await closeOperations(options.operations);
+        // Step 6: Invoke shutdown cleanup callback.
+        await options.onShutdown?.();
       })();
       return shutdownPromise;
     },

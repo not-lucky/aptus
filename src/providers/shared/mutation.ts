@@ -47,7 +47,7 @@ export function applyNativeMutations(
 
   // 1. defaults: insert absent-only leaves.
   forEachLeaf(mutations.defaults, (segments, value) => {
-    if (getPath(body, segments) === undefined) {
+    if (pathIsWritable(body, segments) && getPath(body, segments) === undefined) {
       setPath(body, segments, cloneJson(value));
       pointers.push(toPointer(segments));
     }
@@ -126,6 +126,20 @@ function cloneJson(value: JsonValue): JsonValue {
     return out;
   }
   return value;
+}
+
+/**
+ * `true` when every intermediate segment is absent or a plain object.
+ */
+function pathIsWritable(target: JsonObject, segments: readonly string[]): boolean {
+  let current: JsonValue | undefined = target;
+  for (const segment of segments.slice(0, -1)) {
+    if (!isPlainObject(current)) return false;
+    const next: JsonValue | undefined = current[segment];
+    if (next !== undefined && !isPlainObject(next)) return false;
+    current = next;
+  }
+  return true;
 }
 
 /**

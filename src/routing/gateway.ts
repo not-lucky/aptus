@@ -102,7 +102,7 @@ export interface GatewayObservability {
     attempts: number;
     stream: boolean;
     durationMs: number;
-    firstByteMs: number;
+    firstByteMs?: number;
     usage?: JsonValue;
     estimatedCostUsd?: string;
   }): void;
@@ -586,11 +586,11 @@ function relayStream(response: ProviderResponse, context: RelayContext): Gateway
         try {
           const chunk = await reader.read();
           if (firstByteMs === undefined) {
-            firstByteMs = performance.now();
+            firstByteMs = performance.now() - context.started;
             context.observer.firstByte({
               aptusRequestId: context.aptusRequestId,
               attemptNumber: context.attemptCount,
-              durationMs: firstByteMs - context.started,
+              durationMs: firstByteMs,
             });
           }
           if (chunk.done) {

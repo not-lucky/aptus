@@ -64,12 +64,13 @@ function redactValue(value: JsonValue, secrets: ReadonlySet<string>): JsonValue 
   if (typeof value === "string") return secrets.has(value) ? REDACTED : value;
   if (Array.isArray(value)) return value.map((child) => redactValue(child, secrets));
   if (value !== null && typeof value === "object") {
-    const out: Record<string, JsonValue> = {};
+    const out: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
     for (const [key, child] of Object.entries(value)) {
       // A credential-header keyed field is redacted even when the secret is
       // embedded in a scheme prefix (e.g. `Bearer <secret>`).
-      out[key] =
+      const redacted =
         CREDENTIAL_HEADERS.has(key.toLowerCase()) && typeof child === "string" ? REDACTED : redactValue(child, secrets);
+      Object.defineProperty(out, key, { value: redacted, enumerable: true, writable: true, configurable: true });
     }
     return out;
   }

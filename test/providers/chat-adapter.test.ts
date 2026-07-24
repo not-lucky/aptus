@@ -129,6 +129,27 @@ test("applyNativeMutations preserves unknown fields and array order and reports 
   assert.equal(clientBody.temperature, 1.5);
 });
 
+test("applyNativeMutations skips defaults when intermediate segment is a client scalar", () => {
+  const clientBody: JsonObject = {
+    model: "public-name",
+    a: 1,
+  };
+  const result = applyNativeMutations(
+    clientBody,
+    {
+      defaults: { a: { b: 2 }, c: { d: 3 } },
+      extraBody: {},
+      overrides: {},
+    },
+    "upstream-model",
+  );
+
+  const body = result.body as JsonObject;
+  assert.equal(body.a, 1);
+  assert.deepEqual(body.c, { d: 3 });
+  assert.deepEqual(result.mutations, ["/c/d", "/model"]);
+});
+
 test("classify maps the full Chat status table", () => {
   const cases: Array<[number, string]> = [
     [200, "success"],

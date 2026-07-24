@@ -162,7 +162,10 @@ test("abort cancels the provider body and errors the stream", async () => {
     assert.equal(first.done, false);
     controller.abort();
     await assert.rejects(reader.read(), (error: unknown) => streamErrorKind(error) === "abort");
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(origin.lastRequest()?.closedAtMs !== undefined, true);
+    const deadline = Date.now() + 1_000;
+    while (origin.lastRequest()?.closedAtMs === undefined) {
+      assert.ok(Date.now() < deadline, "origin socket did not close");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   });
 });

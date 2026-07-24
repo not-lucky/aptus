@@ -12,7 +12,13 @@ export const COMPLETE_CHAT_BODY = {
   choices: [
     {
       index: 0,
-      message: { role: "assistant", content: "hello from origin" },
+      message: {
+        role: "assistant",
+        content: "hello from origin",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "lookup", arguments: '{"q":"x"}' } },
+        ],
+      },
       finish_reason: "stop",
     },
   ],

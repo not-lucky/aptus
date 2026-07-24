@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, rename } from "node:fs/promises";
+import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonValue, TraceContext, TraceRecorder, TraceSession } from "../../domain/contracts.js";
 import type { TraceManifest, TraceStage, TraceTerminal } from "../../domain/operations.js";
@@ -177,12 +177,17 @@ async function atomicWrite(directory: string, filename: string, data: Uint8Array
   const temp = join(directory, `.aptus-${randomUUID()}.tmp`);
   const handle = await open(temp, "wx", 0o600);
   try {
-    await handle.writeFile(data);
-    await handle.sync();
-  } finally {
-    await handle.close();
+    try {
+      await handle.writeFile(data);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temp, join(directory, filename));
+  } catch (error) {
+    await unlink(temp).catch(() => undefined);
+    throw error;
   }
-  await rename(temp, join(directory, filename));
   await fsyncDirectory(directory);
 }
 

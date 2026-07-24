@@ -1,6 +1,5 @@
 import type { IncomingHttpHeaders } from "node:http";
-import type { Dispatcher } from "undici";
-import { request } from "undici";
+import { Agent, type Dispatcher, request } from "undici";
 import type { HeaderMap, ProviderDispatcher } from "../../domain/contracts.js";
 import { filterInboundHeaders } from "./headers.js";
 
@@ -66,6 +65,8 @@ const MAX_REDIRECT_HOPS = 3;
  * @returns A production dispatcher using `undici.request`.
  */
 export function createUndiciDispatcher(): ProviderDispatcher {
+  const agent = new Agent();
+
   return {
     async dispatch(prepared, signal) {
       const firstUrl = new URL(prepared.url);
@@ -102,6 +103,7 @@ export function createUndiciDispatcher(): ProviderDispatcher {
               headers: { ...prepared.headers },
               body: prepared.body,
               signal: composed.signal,
+              dispatcher: agent,
             });
           } catch (error) {
             throw classifyDispatchFailure(signal, deadlineMs, error);
@@ -112,7 +114,11 @@ export function createUndiciDispatcher(): ProviderDispatcher {
 
           if (REDIRECT_STATUSES.has(status) && location !== undefined) {
             // Drain the 3xx body exactly once before following the redirect.
-            await response.body.dump({ limit: 1024 * 1024, signal: composed.signal });
+            try {
+              await response.body.dump({ limit: 1024 * 1024, signal: composed.signal });
+            } catch (error) {
+              throw classifyDispatchFailure(signal, deadlineMs, error);
+            }
             const next = new URL(location, currentUrl);
             if (next.protocol !== originScheme || next.host !== originHost || effectivePort(next) !== originPort) {
               throw new DispatchError("redirect", "redirect must stay on the same scheme, host, and effective port");
@@ -140,6 +146,14 @@ export function createUndiciDispatcher(): ProviderDispatcher {
         clearTimeout(deadlineTimer);
         signal.removeEventListener("abort", onOuterAbort);
       }
+    },
+
+    async close() {
+      await agent.close();
+    },
+
+    async destroy() {
+      await agent.destroy();
     },
   };
 }

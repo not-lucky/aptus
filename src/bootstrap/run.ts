@@ -106,6 +106,7 @@ export async function startRuntime(
     "/operations",
   );
   if (!operations.ok) {
+    await dispatcher.close?.();
     return operations;
   }
 
@@ -127,6 +128,7 @@ export async function startRuntime(
   // Rollback operations listener if client listener fails to bind.
   if (!client.ok) {
     await operations.value.close();
+    await dispatcher.close?.();
     return client;
   }
 
@@ -144,6 +146,9 @@ export async function startRuntime(
           state.draining = true;
         },
         onAbortActive: () => cancellations.abortAll(),
+        onShutdown: async () => {
+          await dispatcher.close?.();
+        },
       }),
     },
   };
