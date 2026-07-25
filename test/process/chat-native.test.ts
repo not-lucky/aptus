@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "vitest";
 import { completeYaml } from "../config/yaml.js";
-import { COMPLETE_CHAT_BYTES, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.js";
+import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.js";
 import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.js";
 
 const REPO = resolve(import.meta.dirname, "..", "..");
@@ -112,7 +112,7 @@ test.concurrent("process: complete Chat native path applies mutation and relays 
       cli.clientPort,
       "/chat/completions",
       env.APTUS_CLIENT_PRIMARY as string,
-      '{"model":"gpt-main","messages":[{"role":"user","content":"hi"}],"unknown":[1,2]}',
+      JSON.stringify({ ...MINIMAL_CHAT_REQUEST, unknown: [1, 2] }),
     );
     assert.equal(response.status, 200);
     assert.match(response.headers.get("x-aptus-request-id") ?? "", /^[0-9a-f-]{36}$/i);
@@ -166,7 +166,7 @@ test.concurrent("process: SSE Chat relays a byte-identical stream preserving [DO
       cli.clientPort,
       "/chat/completions",
       env.APTUS_CLIENT_PRIMARY as string,
-      '{"model":"gpt-main","stream":true}',
+      JSON.stringify({ ...MINIMAL_CHAT_REQUEST, stream: true }),
     );
     assert.equal(response.status, 200);
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -198,7 +198,7 @@ test.concurrent("process: redirect loop is rejected as a provider failure withou
       cli.clientPort,
       "/chat/completions",
       env.APTUS_CLIENT_PRIMARY as string,
-      '{"model":"gpt-main"}',
+      JSON.stringify(MINIMAL_CHAT_REQUEST),
     );
     // A gateway-origin failure surfaces as a 502 provider failure.
     assert.equal(response.status, 502);
@@ -243,7 +243,7 @@ test.concurrent("process: client abort mid-stream cancels the provider body", as
         },
       );
       request.on("error", rejectTest);
-      request.end('{"model":"gpt-main","stream":true}');
+      request.end(JSON.stringify({ ...MINIMAL_CHAT_REQUEST, stream: true }));
     });
 
     // The origin observed the socket close from the cancellation.

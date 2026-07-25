@@ -1,4 +1,20 @@
+/**
+ * Pinned test fixtures for OpenAI Chat Completions.
+ *
+ * Grounded in official research snapshot `research/openai-chat-completions.md`
+ * (retrieved 2026-08-11).
+ */
+
 const encoder = new TextEncoder();
+
+/**
+ * Pinned minimal request body for OpenAI Chat Completions.
+ * Source snapshot: `research/openai-chat-completions.md` (retrieved 2026-08-11).
+ */
+export const MINIMAL_CHAT_REQUEST = {
+  model: "gpt-main",
+  messages: [{ role: "user", content: "hi" }],
+};
 
 /**
  * A pinned complete `chat.completion` response with `usage`, an unknown field,

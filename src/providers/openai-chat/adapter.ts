@@ -1,66 +1,23 @@
-import type {
-  AttemptObservation,
-  JsonObject,
-  ModelListInput,
-  NativePreparationInput,
-  PreparedProviderRequest,
-  ProtocolAdapter,
-  Result,
-} from "../../domain/contracts.js";
-import type { IrFailureCategory, NormalizedFailure } from "../../domain/operations.js";
-import { filterOutboundHeaders } from "../shared/headers.js";
-import { applyNativeMutations } from "../shared/mutation.js";
-
-const encoder = new TextEncoder();
+import type { AttemptObservation, JsonObject, ModelListInput, ProtocolAdapter } from "../../domain/contracts.js";
+import type { IrFailureCategory } from "../../domain/operations.js";
+import { parseRetryAfter } from "../shared/headers.js";
+import { createNativeAdapter } from "../shared/native.js";
 
 /**
  * Creates the OpenAI Chat Completions {@link ProtocolAdapter}.
  *
- * This adapter owns Chat native mutation, outbound authentication, response
- * classification, and the OpenAI model-list envelope. `prepareNative` records
- * the configured provider name as `""` (a placeholder); the Gateway replaces
- * it with the actual selected provider name, since a protocol adapter is
- * shared across every provider of that protocol.
+ * This adapter owns only Chat wire facts: the create path, Bearer auth, the
+ * Chat status table, and the OpenAI model-list envelope. Model reading,
+ * mutation, header filtering, and encoding are shared native behavior.
  *
  * @returns A fully implemented Chat adapter.
  */
 export function createChatAdapter(): ProtocolAdapter {
-  return {
+  return createNativeAdapter({
     protocol: "openai-chat",
     createPath: "/chat/completions",
-
-    readPublicModel(body: JsonObject): Result<string, NormalizedFailure> {
-      const model = body.model;
-      return typeof model === "string" && model.length > 0
-        ? { ok: true, value: model }
-        : { ok: false, error: invalidRequest("model is required") };
-    },
-
-    prepareNative(input: NativePreparationInput): Result<PreparedProviderRequest, NormalizedFailure> {
-      const { body } = applyNativeMutations(input.clientBody, input.mutations, input.upstreamModel);
-      const headers = filterOutboundHeaders(input.clientHeaders, input.providerHeaders, {
-        name: "authorization",
-        value: `Bearer ${input.providerSecret}`,
-      });
-      return {
-        ok: true,
-        value: {
-          provider: "",
-          protocol: input.protocol,
-          url: `${input.baseUrl}${this.createPath}`,
-          headers,
-          body: encoder.encode(JSON.stringify(body)),
-          stream: body.stream === true,
-          deadlineMs: input.deadlineMs,
-          streamIdleMs: input.streamIdleMs,
-        },
-      };
-    },
-
-    classify(response): AttemptObservation {
-      return classifyChat(response.status, response.headers["retry-after"]);
-    },
-
+    createAuth: (secret) => ({ name: "authorization", value: `Bearer ${secret}` }),
+    classify: classifyChat,
     buildModelList(input: ModelListInput): JsonObject {
       const data: readonly JsonObject[] = input.entries.map((entry) => ({
         ...entry.metadata,
@@ -69,7 +26,7 @@ export function createChatAdapter(): ProtocolAdapter {
       }));
       return { object: "list", data };
     },
-  };
+  });
 }
 
 /**
@@ -102,22 +59,4 @@ export function classifyChat(status: number, retryAfter?: string): AttemptObserv
                       ? "unavailable"
                       : undefined;
   return { result: category ?? "provider", status, beforeClientBytes: true };
-}
-
-/**
- * Parses a `Retry-After` header (delta-seconds or HTTP-date) into milliseconds.
- */
-function parseRetryAfter(value: string | undefined): number | undefined {
-  if (value === undefined || value === "") return undefined;
-  if (/^\d+$/.test(value.trim())) {
-    const seconds = Number.parseInt(value.trim(), 10);
-    return Number.isFinite(seconds) ? seconds * 1000 : undefined;
-  }
-  const date = Date.parse(value);
-  const delta = Number.isFinite(date) ? date - Date.now() : Number.NaN;
-  return Number.isFinite(delta) && delta > 0 ? Math.ceil(delta) : undefined;
-}
-
-function invalidRequest(message: string): NormalizedFailure {
-  return { category: "invalid_request", message, retryable: false };
 }

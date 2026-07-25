@@ -112,6 +112,39 @@ test("dispatcher rejects an already-expired deadline before dispatch", async () 
   });
 });
 
+test("dispatcher rejects request on pre-header disconnect", async () => {
+  await withOrigin(async (origin) => {
+    origin.enqueue({ status: 200, mode: "pre-header-disconnect" });
+    await assert.rejects(
+      dispatcher.dispatch(prepare(`${origin.baseUrl}/chat/completions`), new AbortController().signal),
+      (error: unknown) => dispatchErrorKind(error) === "transport",
+    );
+  });
+});
+
+test("dispatcher stream errors on post-header disconnect", async () => {
+  await withOrigin(async (origin) => {
+    origin.enqueue({
+      status: 200,
+      mode: "post-header-disconnect",
+      segments: [
+        { bytes: "data: chunk1\n\n", delayMs: 0 },
+        { bytes: "", delayMs: 50 },
+      ],
+    });
+    const response = await dispatcher.dispatch(
+      prepare(`${origin.baseUrl}/chat/completions`),
+      new AbortController().signal,
+    );
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const first = await reader.read();
+    assert.equal(first.done, false);
+    assert.equal(new TextDecoder().decode(first.value), "data: chunk1\n\n");
+    await assert.rejects(reader.read());
+  });
+});
+
 test("stream-idle timer resets on each received chunk", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({
@@ -128,6 +161,35 @@ test("stream-idle timer resets on each received chunk", async () => {
       new AbortController().signal,
     );
     assert.equal(new TextDecoder().decode(await readAll(response.body)), "data: a\n\ndata: b\n\ndata: [DONE]\n\n");
+  });
+});
+
+test("interleaved ping events reset stream-idle timer and keep stream alive", async () => {
+  await withOrigin(async (origin) => {
+    origin.enqueue({
+      status: 200,
+      mode: "sse",
+      segments: [
+        { bytes: 'event: message_start\ndata: {"type":"message_start"}\n\n', delayMs: 0 },
+        { bytes: 'event: ping\ndata: {"type":"ping"}\n\n', delayMs: 120 },
+        {
+          bytes:
+            'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n',
+          delayMs: 120,
+        },
+        { bytes: 'event: message_stop\ndata: {"type":"message_stop"}\n\n', delayMs: 120 },
+      ],
+    });
+    // Total duration is 360ms with chunks arriving every 120ms; streamIdleMs is 180ms.
+    // The interleaved ping at 120ms resets idle, allowing the text delta at 240ms to arrive.
+    const response = await dispatcher.dispatch(
+      prepare(`${origin.baseUrl}/v1/messages`, { streamIdleMs: 180 }),
+      new AbortController().signal,
+    );
+    const bytes = await readAll(response.body);
+    const text = new TextDecoder().decode(bytes);
+    assert.match(text, /event: ping/);
+    assert.match(text, /event: message_stop/);
   });
 });
 

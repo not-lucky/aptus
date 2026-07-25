@@ -98,3 +98,21 @@ export function filterInboundHeaders(headers: HeaderMap): HeaderMap {
   }
   return result;
 }
+
+/**
+ * Parses an RFC 7231 `Retry-After` header (either delta-seconds or HTTP-date)
+ * into a positive millisecond delay, or returns `undefined` if missing or unparseable.
+ *
+ * @param value - The raw header value, if present.
+ * @returns Millisecond delay in integer milliseconds if valid and positive; otherwise `undefined`.
+ */
+export function parseRetryAfter(value: string | undefined): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (/^\d+$/.test(value.trim())) {
+    const seconds = Number.parseInt(value.trim(), 10);
+    return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+  }
+  const date = Date.parse(value);
+  const delta = Number.isFinite(date) ? date - Date.now() : Number.NaN;
+  return Number.isFinite(delta) && delta > 0 ? Math.ceil(delta) : undefined;
+}
