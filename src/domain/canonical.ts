@@ -77,7 +77,7 @@ export interface ContentBlockBase {
 export type ContentBlock = ContentBlockBase &
   (
     | { type: "text"; text: string; citations?: Citation[] }
-    | { type: "refusal"; refusal: string }
+    | { type: "refusal"; refusal: string; citations?: Citation[] }
     | { type: "image_url"; url: string; detail?: "auto" | "low" | "high" }
     | { type: "image_base64"; mediaType: string; data: string }
     | {

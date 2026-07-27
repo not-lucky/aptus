@@ -17,6 +17,7 @@ import type {
   RouteConfigPort,
   SecretResolverPort,
   TracePort,
+  StreamResponseMetadata,
   TranslationContext,
 } from "../../src/ports/index.js";
 import type {
@@ -40,6 +41,15 @@ const context: TranslationContext = {
   signal,
   trustedRoutingHeaders: { "x-route": "route" },
 };
+const streamResponse: Readonly<StreamResponseMetadata> = Object.freeze({
+  responseId: "resp",
+  model: "model",
+  createdAt: "2026-07-21T12:00:00.000Z",
+});
+const streamContext: TranslationContext = Object.freeze({
+  ...context,
+  streamResponse,
+});
 const egressValue: EgressValue = "encoded";
 const jsonRecord: Record<string, JsonValue> = {
   requestId: context.requestId,

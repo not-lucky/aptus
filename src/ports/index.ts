@@ -1,7 +1,10 @@
+export { createStreamTranslationState } from "./translation.js";
 export type {
   EgressValue,
   RawIngressInput,
   TranslationContext,
+  StreamResponseMetadata,
+  StreamTranslationState,
   IngressTranslationAdapter,
   EgressTranslationAdapter,
 } from "./translation.js";

@@ -69,7 +69,6 @@ export interface TraceRecordBuilder {
   build(): Record<string, JsonValue>;
 }
 
-export type { GatewayCommand } from "./lifecycle.js";
 /** Application facade consumed by outer transports and black-box callers. */
 export interface GatewayApplication {
   /** Handles one raw ingress input and returns a response or safe gateway error. */

@@ -418,9 +418,23 @@ export function validateContentBlock(
       }
       break;
     }
-    case "refusal":
+    case "refusal": {
       requiredString(value, "refusal", path, issues);
+      const citations = value["citations"];
+      if (hasOwn(value, "citations")) {
+        if (!Array.isArray(citations))
+          issues.push({
+            code: "invalid_content_block",
+            path: `${path}.citations`,
+            message: "Expected a citation array.",
+          });
+        else
+          citations.forEach((citation, index) =>
+            validateCitation(citation, `${path}.citations[${index}]`, issues),
+          );
+      }
       break;
+    }
     case "image_url":
       validateUrlAt(value["url"], `${path}.url`, issues);
       optionalEnum(
