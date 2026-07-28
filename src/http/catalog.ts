@@ -1,6 +1,6 @@
-import type { AptusConfig, CatalogMetadata } from "../config/types.js";
-import type { JsonObject, ModelListEntry, Protocol } from "../domain/contracts.js";
-import type { NameIndex } from "../routing/resolution.js";
+import type { AptusConfig, CatalogMetadata } from "../config/types.ts";
+import type { JsonObject, ModelListEntry, Protocol } from "../domain/contracts.ts";
+import type { NameIndex } from "../routing/resolution.ts";
 
 /**
  * Returns a sorted list of canonical model and route catalog entries authorized for the specified client key.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { systemClock, systemRandomSource, systemSleeper } from "../../src/routing/timing.js";
-import { TestClock, TestRandomSource, TestSleeper } from "../helpers/test-timing.js";
+import { systemClock, systemRandomSource, systemSleeper } from "../../src/routing/timing.ts";
+import { TestClock, TestRandomSource, TestSleeper } from "../helpers/test-timing.ts";
 
 test("systemClock provides monotonic and wall-clock times", () => {
   const monotonic = systemClock.nowMonotonicMs();

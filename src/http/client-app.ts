@@ -1,22 +1,22 @@
 import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import express, { type Request, type Response } from "express";
-import type { AptusConfig } from "../config/types.js";
-import type { Gateway, GatewayResult, HeaderMap, Protocol, ProtocolAdapter } from "../domain/contracts.js";
-import type { ErrorEncoder, NormalizedFailure } from "../domain/operations.js";
-import { type AptusRequestId, createRequestId } from "../domain/request-id.js";
-import { authorizePublicName, createNameIndex, type NameIndex } from "../routing/resolution.js";
-import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.js";
-import { type AuthPurpose, authenticateClient } from "./auth.js";
-import { authorizedCatalogEntries } from "./catalog.js";
+import type { AptusConfig } from "../config/types.ts";
+import type { Gateway, GatewayResult, HeaderMap, Protocol, ProtocolAdapter } from "../domain/contracts.ts";
+import type { ErrorEncoder, NormalizedFailure } from "../domain/operations.ts";
+import { type AptusRequestId, createRequestId } from "../domain/request-id.ts";
+import { authorizePublicName, createNameIndex, type NameIndex } from "../routing/resolution.ts";
+import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.ts";
+import { type AuthPurpose, authenticateClient } from "./auth.ts";
+import { authorizedCatalogEntries } from "./catalog.ts";
 import {
   encodeInternalFailure,
   encodeUnidentifiedFailure,
   encodeUnidentifiedInternalFailure,
   filterResponseHeaders,
-} from "./error-encoder.js";
-import { admitJsonObject } from "./ingress.js";
-import type { RequestCancellationRegistry } from "./request-cancellation.js";
+} from "./error-encoder.ts";
+import { admitJsonObject } from "./ingress.ts";
+import type { RequestCancellationRegistry } from "./request-cancellation.ts";
 
 /** Bounded client endpoint identifiers for metrics observation. */
 export type ClientEndpoint = "chat_completions" | "responses" | "messages" | "models";

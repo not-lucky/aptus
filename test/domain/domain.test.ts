@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { isPublicName } from "../../src/domain/names.js";
-import { estimateCostUsd, type PricingConfig } from "../../src/domain/pricing.js";
-import { createRequestId } from "../../src/domain/request-id.js";
+import { isPublicName } from "../../src/domain/names.ts";
+import { estimateCostUsd, type PricingConfig } from "../../src/domain/pricing.ts";
+import { createRequestId } from "../../src/domain/request-id.ts";
 
 test("isPublicName: valid names", () => {
   assert.equal(isPublicName("gpt-main"), true);

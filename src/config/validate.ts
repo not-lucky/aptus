@@ -1,5 +1,5 @@
-import { jsonPointer, type StartupError, startupError } from "./errors.js";
-import type { AptusConfig } from "./types.js";
+import { jsonPointer, type StartupError, startupError } from "./errors.ts";
+import type { AptusConfig } from "./types.ts";
 
 /** Hop-by-hop and authentication-related headers that provider static headers must never set. */
 const FORBIDDEN_HEADERS = new Set([

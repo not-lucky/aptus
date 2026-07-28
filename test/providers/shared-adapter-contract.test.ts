@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "vitest";
-import type { JsonObject, NativePreparationInput, Protocol, ProtocolAdapter } from "../../src/domain/contracts.js";
-import { createMessagesAdapter } from "../../src/providers/anthropic-messages/adapter.js";
-import { createChatAdapter } from "../../src/providers/openai-chat/adapter.js";
-import { createResponsesAdapter } from "../../src/providers/openai-responses/adapter.js";
+import type { JsonObject, NativePreparationInput, Protocol, ProtocolAdapter } from "../../src/domain/contracts.ts";
+import { createMessagesAdapter } from "../../src/providers/anthropic-messages/adapter.ts";
+import { createChatAdapter } from "../../src/providers/openai-chat/adapter.ts";
+import { createResponsesAdapter } from "../../src/providers/openai-responses/adapter.ts";
 
 interface AdapterTestCase {
   readonly name: string;

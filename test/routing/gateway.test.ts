@@ -3,16 +3,16 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import type { AptusConfig, ProviderConfig, SecretString } from "../../src/config/types.js";
-import type { Gateway, GatewayRequest, JsonObject, LifecycleEvent } from "../../src/domain/contracts.js";
-import { createRequestId } from "../../src/domain/request-id.js";
-import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.js";
-import { createProtocolAdapters } from "../../src/providers/adapters.js";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.js";
-import { createGateway } from "../../src/routing/gateway.js";
-import { TestClock, TestRandomSource, TestSleeper } from "../helpers/test-timing.js";
-import { COMPLETE_CHAT_BYTES, ERROR_BYTES, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.js";
-import { createFixtureDispatcher, type FixtureDispatcher } from "../helpers/fixture-dispatcher.js";
+import type { AptusConfig, ProviderConfig, SecretString } from "../../src/config/types.ts";
+import type { Gateway, GatewayRequest, JsonObject, LifecycleEvent } from "../../src/domain/contracts.ts";
+import { createRequestId } from "../../src/domain/request-id.ts";
+import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.ts";
+import { createProtocolAdapters } from "../../src/providers/adapters.ts";
+import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import { createGateway } from "../../src/routing/gateway.ts";
+import { TestClock, TestRandomSource, TestSleeper } from "../helpers/test-timing.ts";
+import { COMPLETE_CHAT_BYTES, ERROR_BYTES, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
+import { createFixtureDispatcher, type FixtureDispatcher } from "../helpers/fixture-dispatcher.ts";
 
 function trackingObserver(): { observer: GatewayObservability; events: LifecycleEvent[]; logs: string[] } {
   const events: LifecycleEvent[] = [];

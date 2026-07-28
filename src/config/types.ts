@@ -1,6 +1,6 @@
-import type { HeaderMap, JsonObject, Protocol } from "../domain/contracts.js";
-import type { IrFailureCategory } from "../domain/operations.js";
-import type { DecimalUsdPerMillion, PricingConfig } from "../domain/pricing.js";
+import type { HeaderMap, JsonObject, Protocol } from "../domain/contracts.ts";
+import type { IrFailureCategory } from "../domain/operations.ts";
+import type { DecimalUsdPerMillion, PricingConfig } from "../domain/pricing.ts";
 
 export type { DecimalUsdPerMillion, PricingConfig };
 

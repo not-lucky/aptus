@@ -1,6 +1,6 @@
-import type { KeyPoolConfig } from "../config/types.js";
-import type { IrFailureCategory } from "../domain/operations.js";
-import type { RandomSource } from "./timing.js";
+import type { KeyPoolConfig } from "../config/types.ts";
+import type { IrFailureCategory } from "../domain/operations.ts";
+import type { RandomSource } from "./timing.ts";
 
 /**
  * Explicit HTTP statuses eligible for same-candidate retry (ADR 0004).

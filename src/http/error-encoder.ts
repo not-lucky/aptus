@@ -1,6 +1,6 @@
-import type { HeaderMap, Protocol } from "../domain/contracts.js";
-import type { EncodedFailure, ErrorEncoder, IrFailureCategory, NormalizedFailure } from "../domain/operations.js";
-import type { AptusRequestId } from "../domain/request-id.js";
+import type { HeaderMap, Protocol } from "../domain/contracts.ts";
+import type { EncodedFailure, ErrorEncoder, IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
+import type { AptusRequestId } from "../domain/request-id.ts";
 
 const encoder = new TextEncoder();
 

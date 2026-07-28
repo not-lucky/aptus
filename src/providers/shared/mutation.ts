@@ -1,4 +1,4 @@
-import type { JsonObject, JsonValue, NativeMutations } from "../../domain/contracts.js";
+import type { JsonObject, JsonValue, NativeMutations } from "../../domain/contracts.ts";
 
 /**
  * A mutable JSON object (the working copy the mutation pipeline writes into).

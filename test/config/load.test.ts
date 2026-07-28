@@ -3,9 +3,9 @@ import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { formatStartupError, type StartupError } from "../../src/config/errors.js";
-import { loadConfig } from "../../src/config/load.js";
-import { completeYaml } from "./yaml.js";
+import { formatStartupError, type StartupError } from "../../src/config/errors.ts";
+import { loadConfig } from "../../src/config/load.ts";
+import { completeYaml } from "./yaml.ts";
 
 /** Every environment variable referenced by the complete sample fixture. */
 const FULL_ENV: Record<string, string> = {

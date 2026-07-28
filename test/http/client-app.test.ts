@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import http from "node:http";
 import { test } from "vitest";
-import type { AptusConfig, SecretString } from "../../src/config/types.js";
-import type { Gateway, GatewayRequest, GatewayResult } from "../../src/domain/contracts.js";
-import { createClientApp } from "../../src/http/client-app.js";
-import { createErrorEncoder } from "../../src/http/error-encoder.js";
-import { createOperationsApp } from "../../src/http/operations-app.js";
-import { createMetricsRegistry } from "../../src/observability/metrics.js";
-import { createProtocolAdapters } from "../../src/providers/adapters.js";
+import type { AptusConfig, SecretString } from "../../src/config/types.ts";
+import type { Gateway, GatewayRequest, GatewayResult } from "../../src/domain/contracts.ts";
+import { createClientApp } from "../../src/http/client-app.ts";
+import { createErrorEncoder } from "../../src/http/error-encoder.ts";
+import { createOperationsApp } from "../../src/http/operations-app.ts";
+import { createMetricsRegistry } from "../../src/observability/metrics.ts";
+import { createProtocolAdapters } from "../../src/providers/adapters.ts";
 
 const config = configuration();
 

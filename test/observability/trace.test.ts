@@ -3,10 +3,10 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import type { AptusRequestId } from "../../src/domain/request-id.js";
-import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.js";
-import { createNoopTraceRecorder } from "../../src/observability/trace/noop-recorder.js";
-import { createRedactor } from "../../src/observability/trace/redaction.js";
+import type { AptusRequestId } from "../../src/domain/request-id.ts";
+import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.ts";
+import { createNoopTraceRecorder } from "../../src/observability/trace/noop-recorder.ts";
+import { createRedactor } from "../../src/observability/trace/redaction.ts";
 
 const encoder = new TextEncoder();
 

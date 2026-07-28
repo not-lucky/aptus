@@ -1,5 +1,5 @@
-import type { AttemptObservation, JsonValue, Protocol } from "../domain/contracts.js";
-import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.js";
+import type { AttemptObservation, JsonValue, Protocol } from "../domain/contracts.ts";
+import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
 
 /**
  * The routing failure vocabulary: constructors and projections for the

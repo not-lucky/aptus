@@ -1,4 +1,4 @@
-import type { Usage } from "./usage.js";
+import type { Usage } from "./usage.ts";
 
 /**
  * A non-negative decimal USD amount per one million tokens, represented as text to preserve exact precision.

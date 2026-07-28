@@ -3,15 +3,15 @@ import { readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.js";
+import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.ts";
 import {
   COMPLETE_MESSAGES_BYTES,
   ERROR_MESSAGES_BYTES,
   MINIMAL_MESSAGES_REQUEST,
   SSE_MESSAGES_BYTES,
   SSE_MESSAGES_POST200_ERROR_BYTES,
-} from "../helpers/messages-fixtures.js";
-import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.js";
+} from "../helpers/messages-fixtures.ts";
+import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",

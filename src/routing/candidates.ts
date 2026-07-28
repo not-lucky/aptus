@@ -1,6 +1,6 @@
-import type { ModelConfig, ProviderConfig, RouteConfig } from "../config/types.js";
-import type { KeyPool, NativeMutations } from "../domain/contracts.js";
-import type { IrFailureCategory } from "../domain/operations.js";
+import type { ModelConfig, ProviderConfig, RouteConfig } from "../config/types.ts";
+import type { KeyPool, NativeMutations } from "../domain/contracts.ts";
+import type { IrFailureCategory } from "../domain/operations.ts";
 
 /**
  * One resolved candidate (a model, its provider, and that provider's key pool)

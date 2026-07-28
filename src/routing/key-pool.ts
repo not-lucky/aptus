@@ -1,7 +1,7 @@
-import type { KeyPoolConfig, KeyStrategy, ProviderKeyConfig } from "../config/types.js";
-import type { AttemptObservation, KeyAcquireResult, KeyLease, KeyPool } from "../domain/contracts.js";
-import { calculateRetryDelay } from "./retry-policy.js";
-import { type RandomSource, systemRandomSource } from "./timing.js";
+import type { KeyPoolConfig, KeyStrategy, ProviderKeyConfig } from "../config/types.ts";
+import type { AttemptObservation, KeyAcquireResult, KeyLease, KeyPool } from "../domain/contracts.ts";
+import { calculateRetryDelay } from "./retry-policy.ts";
+import { type RandomSource, systemRandomSource } from "./timing.ts";
 
 /**
  * Mutable health and lease tracking state for a single provider key.

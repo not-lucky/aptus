@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { test } from "vitest";
-import { createGracefulShutdown } from "../../src/bootstrap/shutdown.js";
+import { createGracefulShutdown } from "../../src/bootstrap/shutdown.ts";
 
 interface MockServer {
   listening: boolean;

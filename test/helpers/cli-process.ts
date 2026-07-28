@@ -3,11 +3,10 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { completeYaml } from "../config/yaml.js";
+import { completeYaml } from "../config/yaml.ts";
 
 const REPO = resolve(import.meta.dirname, "..", "..");
 const CLI = join(REPO, "src", "bootstrap", "cli.ts");
-const TSX_CLI = join(REPO, "node_modules", "tsx", "dist", "cli.mjs");
 
 /**
  * One running Aptus CLI process with its parsed ready line.
@@ -84,11 +83,11 @@ export async function startAptusCli(options: StartCliOptions): Promise<RunningCl
   for (const name of options.envNames) delete merged[name];
   for (const [key, value] of Object.entries(env)) merged[key] = value;
 
-  const child = spawn(
-    process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: merged, stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+    cwd: dir,
+    env: merged,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   let output = "";
   child.stdout?.on("data", (chunk: Buffer) => {

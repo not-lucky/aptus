@@ -1,5 +1,5 @@
 import { configureSync, getConsoleSink, getLogger, type Logger, type Sink } from "@logtape/logtape";
-import type { LoggingConfig } from "../config/types.js";
+import type { LoggingConfig } from "../config/types.ts";
 
 /**
  * Configures the global LogTape configuration for the `"aptus"` category.

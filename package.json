@@ -36,7 +36,6 @@
     "@types/node": "24.13.3",
     "fast-check": "4.4.0",
     "skott": "0.35.11",
-    "tsx": "4.20.6",
     "typescript": "5.9.2",
     "vitest": "4.1.10"
   }

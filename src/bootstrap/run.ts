@@ -1,21 +1,21 @@
 import type express from "express";
-import { type StartupError, startupError } from "../config/errors.js";
-import type { AptusConfig } from "../config/types.js";
-import type { Result } from "../domain/contracts.js";
-import { createClientApp, type HttpRequestObserver } from "../http/client-app.js";
-import { createErrorEncoder } from "../http/error-encoder.js";
-import { type BoundListener, listen } from "../http/listeners.js";
-import { createOperationsApp, type RuntimeState } from "../http/operations-app.js";
-import { createRequestCancellationRegistry } from "../http/request-cancellation.js";
-import { createLifecycleObserver } from "../observability/lifecycle-observer.js";
-import { aptusLogger, configureLogging } from "../observability/logging.js";
-import { createMetricsRegistry } from "../observability/metrics.js";
-import { createFileTraceRecorder } from "../observability/trace/file-recorder.js";
-import { createNoopTraceRecorder } from "../observability/trace/noop-recorder.js";
-import { createProtocolAdapters } from "../providers/adapters.js";
-import { createUndiciDispatcher } from "../providers/shared/dispatcher.js";
-import { createGateway } from "../routing/gateway.js";
-import { createGracefulShutdown, type GracefulShutdown } from "./shutdown.js";
+import { type StartupError, startupError } from "../config/errors.ts";
+import type { AptusConfig } from "../config/types.ts";
+import type { Result } from "../domain/contracts.ts";
+import { createClientApp, type HttpRequestObserver } from "../http/client-app.ts";
+import { createErrorEncoder } from "../http/error-encoder.ts";
+import { type BoundListener, listen } from "../http/listeners.ts";
+import { createOperationsApp, type RuntimeState } from "../http/operations-app.ts";
+import { createRequestCancellationRegistry } from "../http/request-cancellation.ts";
+import { createLifecycleObserver } from "../observability/lifecycle-observer.ts";
+import { aptusLogger, configureLogging } from "../observability/logging.ts";
+import { createMetricsRegistry } from "../observability/metrics.ts";
+import { createFileTraceRecorder } from "../observability/trace/file-recorder.ts";
+import { createNoopTraceRecorder } from "../observability/trace/noop-recorder.ts";
+import { createProtocolAdapters } from "../providers/adapters.ts";
+import { createUndiciDispatcher } from "../providers/shared/dispatcher.ts";
+import { createGateway } from "../routing/gateway.ts";
+import { createGracefulShutdown, type GracefulShutdown } from "./shutdown.ts";
 
 /**
  * Running server runtime handle containing bound HTTP listeners and shutdown coordinator.

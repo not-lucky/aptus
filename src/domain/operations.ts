@@ -1,5 +1,5 @@
-import type { HeaderMap, JsonObject, Protocol } from "./contracts.js";
-import type { AptusRequestId } from "./request-id.js";
+import type { HeaderMap, JsonObject, Protocol } from "./contracts.ts";
+import type { AptusRequestId } from "./request-id.ts";
 
 /**
  * The canonical 13-member failure category set.

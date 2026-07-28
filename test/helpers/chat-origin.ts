@@ -4,7 +4,7 @@ import {
   type QueuedResponse,
   type RecordedRequest,
   type ResponseMode,
-} from "./provider-origin.js";
+} from "./provider-origin.ts";
 
 export type { ResponseMode, QueuedResponse, RecordedRequest };
 

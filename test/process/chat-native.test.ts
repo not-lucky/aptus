@@ -3,9 +3,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { test } from "vitest";
-import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.js";
-import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.js";
-import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.js";
+import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
+import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.ts";
+import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",

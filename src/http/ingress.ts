@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { TextDecoder } from "node:util";
-import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.js";
-import type { IrFailureCategory } from "../domain/operations.js";
+import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.ts";
+import type { IrFailureCategory } from "../domain/operations.ts";
 
 /**
  * Ingress admission failure description.

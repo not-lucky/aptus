@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import type { JsonObject } from "../../src/domain/contracts.js";
-import { applyNativeMutations } from "../../src/providers/shared/mutation.js";
+import type { JsonObject } from "../../src/domain/contracts.ts";
+import { applyNativeMutations } from "../../src/providers/shared/mutation.ts";
 
 test("applyNativeMutations preserves unknown fields and array order and reports ordered pointers", () => {
   const clientBody: JsonObject = {

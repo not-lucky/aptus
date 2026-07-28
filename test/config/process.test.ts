@@ -6,12 +6,11 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "vitest";
-import { createChatOrigin } from "../helpers/chat-origin.js";
-import { completeYaml } from "./yaml.js";
+import { createChatOrigin } from "../helpers/chat-origin.ts";
+import { completeYaml } from "./yaml.ts";
 
 const REPO = resolve(import.meta.dirname, "..", "..");
 const CLI = join(REPO, "src", "bootstrap", "cli.ts");
-const TSX_CLI = join(REPO, "node_modules", "tsx", "dist", "cli.mjs");
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
@@ -56,7 +55,7 @@ interface CliResult {
 
 function spawnCli(args: readonly string[], env: Record<string, string>, cwd: string): Promise<CliResult> {
   return new Promise((resolveResult, rejectResult) => {
-    const child = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI, ...args], {
+    const child = spawn(process.execPath, [CLI, ...args], {
       cwd,
       env: mergedEnv(env),
       stdio: ["ignore", "pipe", "pipe"],
@@ -235,7 +234,7 @@ test.concurrent("process: complete sample boots, probes, reports readiness, exit
   const env = seededEnv("boot");
   const child: ChildProcess = spawn(
     process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
+    [CLI, "--config", join(dir, "aptus.yaml")],
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
@@ -322,7 +321,7 @@ test.concurrent("process: client ingress catalogs and operations metrics are liv
   const env = seededEnv("http");
   const child = spawn(
     process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
+    [CLI, "--config", join(dir, "aptus.yaml")],
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
@@ -402,7 +401,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": `  port: ${operationsPortA}`,
     }),
   );
-  const childA = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", configA], {
+  const childA = spawn(process.execPath, [CLI, "--config", configA], {
     cwd: dirA,
     env: mergedEnv({ ...env, APTUS_CONFIG: "/nonexistent/aptus.yaml" }),
     stdio: ["ignore", "pipe", "pipe"],
@@ -433,7 +432,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": `  port: ${operationsPortB}`,
     }),
   );
-  const childB = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI], {
+  const childB = spawn(process.execPath, [CLI], {
     cwd: dirB,
     env: mergedEnv({ ...env, APTUS_CONFIG: configB }),
     stdio: ["ignore", "pipe", "pipe"],
@@ -463,7 +462,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": `  port: ${operationsPortC}`,
     }),
   );
-  const childC = spawn(process.execPath, ["--disable-warning=DEP0205", TSX_CLI, CLI], {
+  const childC = spawn(process.execPath, [CLI], {
     cwd: dirC,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
@@ -503,7 +502,7 @@ test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
   const env = seededEnv("sigint");
   const child = spawn(
     process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
+    [CLI, "--config", join(dir, "aptus.yaml")],
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
@@ -538,7 +537,7 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
   const env = seededEnv("drain");
   const child = spawn(
     process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
+    [CLI, "--config", join(dir, "aptus.yaml")],
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
@@ -551,11 +550,18 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
   try {
     await waitFor(() => /^aptus ready: /m.test(stdout), "ready line");
 
-    // Hold a partial HTTP request on client port
-    socket = net.connect(clientPort, "127.0.0.1", () => {
-      socket?.write(
-        'POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial',
-      );
+    // Hold a partial HTTP request on the client port. The connect and write
+    // must complete before SIGTERM, or the drain has nothing to hold and exits
+    // before the readiness assertions can observe it.
+    socket = net.connect(clientPort, "127.0.0.1");
+    await new Promise<void>((resolveConnect, rejectConnect) => {
+      socket?.once("connect", () => {
+        socket?.write(
+          'POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial',
+        );
+        resolveConnect();
+      });
+      socket?.once("error", rejectConnect);
     });
 
     child.kill("SIGTERM");
@@ -600,7 +606,7 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
   const env = seededEnv("abort");
   const child = spawn(
     process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
+    [CLI, "--config", join(dir, "aptus.yaml")],
     { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stdout = "";
@@ -613,10 +619,18 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
   try {
     await waitFor(() => /^aptus ready: /m.test(stdout), "ready line");
 
-    socket = net.connect(clientPort, "127.0.0.1", () => {
-      socket?.write(
-        'POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial',
-      );
+    // Hold a partial HTTP request on the client port. The connect and write
+    // must complete before SIGTERM, or the drain has nothing to hold and exits
+    // before the readiness assertions can observe it.
+    socket = net.connect(clientPort, "127.0.0.1");
+    await new Promise<void>((resolveConnect, rejectConnect) => {
+      socket?.once("connect", () => {
+        socket?.write(
+          'POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial',
+        );
+        resolveConnect();
+      });
+      socket?.once("error", rejectConnect);
     });
 
     child.kill("SIGTERM");

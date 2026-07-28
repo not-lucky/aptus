@@ -1,4 +1,4 @@
-import type { HeaderMap } from "../../domain/contracts.js";
+import type { HeaderMap } from "../../domain/contracts.ts";
 
 /**
  * Hop-by-hop and transport-framing header names defined by RFC 7230 §6.1.

@@ -3,8 +3,7 @@
  *
  * Implements architecture "Dependency rules": skott must reject
  * cycles, unused source files, and the documented forbidden import edges.
- * Runs on plain Node (type stripping): skott's dependency `digraph-js` does
- * not load under tsx's module loader.
+ * Runs on plain Node type stripping, matching the CLI entrypoint.
  *
  * Two graphs are built:
  *  - value graph (`typeOnly: false`): runtime import edges. Cycles and the

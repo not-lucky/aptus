@@ -3,8 +3,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.js";
-import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.js";
+import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.ts";
+import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.ts";
 import {
   COMPLETE_RESPONSES_BYTES,
   ERROR_RESPONSES_BYTES,
@@ -13,7 +13,7 @@ import {
   SSE_RESPONSES_ERROR_BYTES,
   SSE_RESPONSES_FAILED_BYTES,
   SSE_RESPONSES_INCOMPLETE_BYTES,
-} from "../helpers/responses-fixtures.js";
+} from "../helpers/responses-fixtures.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",

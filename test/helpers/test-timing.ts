@@ -1,4 +1,4 @@
-import type { Clock, RandomSource, Sleeper } from "../../src/routing/timing.js";
+import type { Clock, RandomSource, Sleeper } from "../../src/routing/timing.ts";
 
 /**
  * Controllable clock test double for deterministic testing.

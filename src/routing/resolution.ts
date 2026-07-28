@@ -1,4 +1,4 @@
-import type { AptusConfig, ClientKeyConfig } from "../config/types.js";
+import type { AptusConfig, ClientKeyConfig } from "../config/types.ts";
 
 /**
  * Precomputed index for fast model/route resolution and client authorization checks.

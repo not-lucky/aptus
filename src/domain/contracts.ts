@@ -1,5 +1,5 @@
-import type { IrFailureCategory, NormalizedFailure, TraceStage, TraceTerminal } from "./operations.js";
-import type { AptusRequestId } from "./request-id.js";
+import type { IrFailureCategory, NormalizedFailure, TraceStage, TraceTerminal } from "./operations.ts";
+import type { AptusRequestId } from "./request-id.ts";
 
 /**
  * A JSON primitive scalar, array, or object value.

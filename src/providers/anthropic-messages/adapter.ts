@@ -1,5 +1,5 @@
-import type { JsonObject, ModelListInput, ProtocolAdapter } from "../../domain/contracts.js";
-import { createNativeAdapter } from "../shared/native.js";
+import type { JsonObject, ModelListInput, ProtocolAdapter } from "../../domain/contracts.ts";
+import { createNativeAdapter } from "../shared/native.ts";
 
 /**
  * Creates the Anthropic Messages {@link ProtocolAdapter}.

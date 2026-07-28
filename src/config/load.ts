@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Alias, parseAllDocuments, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
 import type { $ZodIssue } from "zod/v4/core";
-import type { Result } from "../domain/contracts.js";
-import { jsonPointer, type StartupError, sortStartupErrors, startupError } from "./errors.js";
-import { probeTraceRoot } from "./probe.js";
-import { aptusConfigSchema } from "./schema.js";
-import { resolveSecrets } from "./secrets.js";
-import type { AptusConfig } from "./types.js";
-import { validateCrossReferences } from "./validate.js";
+import type { Result } from "../domain/contracts.ts";
+import { jsonPointer, type StartupError, sortStartupErrors, startupError } from "./errors.ts";
+import { probeTraceRoot } from "./probe.ts";
+import { aptusConfigSchema } from "./schema.ts";
+import { resolveSecrets } from "./secrets.ts";
+import type { AptusConfig } from "./types.ts";
+import { validateCrossReferences } from "./validate.ts";
 
 /**
  * Result of a successful configuration load and verification.

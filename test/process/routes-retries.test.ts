@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, stopCli, type RunningCli } from "../helpers/cli-process.js";
-import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.js";
-import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.js";
+import { postJson, seededSecrets, startAptusCli, stopCli, type RunningCli } from "../helpers/cli-process.ts";
+import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
+import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
@@ -105,7 +105,7 @@ function chatRequest(port: number, caseName: string, model = "reliable-chat", st
   );
 }
 
-test("process: two 429s with three keys rotate keys before wait and succeed on third attempt", async () => {
+test.concurrent("process: two 429s with three keys rotate keys before wait and succeed on third attempt", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 
@@ -158,7 +158,7 @@ test("process: two 429s with three keys rotate keys before wait and succeed on t
   }
 });
 
-test("process: 503 retries exhausted on primary origin falls back to backup origin", async () => {
+test.concurrent("process: 503 retries exhausted on primary origin falls back to backup origin", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 
@@ -186,7 +186,7 @@ test("process: 503 retries exhausted on primary origin falls back to backup orig
   }
 });
 
-test("process: pre-header disconnect falls back to backup origin", async () => {
+test.concurrent("process: pre-header disconnect falls back to backup origin", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 
@@ -211,7 +211,7 @@ test("process: pre-header disconnect falls back to backup origin", async () => {
   }
 });
 
-test("process: protocol-mismatch-only route returns 400 with zero origin dispatches", async () => {
+test.concurrent("process: protocol-mismatch-only route returns 400 with zero origin dispatches", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 
@@ -236,7 +236,7 @@ test("process: protocol-mismatch-only route returns 400 with zero origin dispatc
   }
 });
 
-test("process: stalled response head times out with no retry and a 504 terminal", async () => {
+test.concurrent("process: stalled response head times out with no retry and a 504 terminal", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 
@@ -263,7 +263,7 @@ test("process: stalled response head times out with no retry and a 504 terminal"
   }
 });
 
-test("process: retry wait past the request deadline expires with a 504 and no extra dispatch", async () => {
+test.concurrent("process: retry wait past the request deadline expires with a 504 and no extra dispatch", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 
@@ -295,7 +295,7 @@ test("process: retry wait past the request deadline expires with a 504 and no ex
   }
 });
 
-test("process: post-header disconnect on a stream cannot fall back after client bytes", async () => {
+test.concurrent("process: post-header disconnect on a stream cannot fall back after client bytes", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
 

@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { Agent, type Dispatcher, request } from "undici";
-import type { HeaderMap, ProviderDispatcher } from "../../domain/contracts.js";
-import { filterInboundHeaders } from "./headers.js";
+import type { HeaderMap, ProviderDispatcher } from "../../domain/contracts.ts";
+import { filterInboundHeaders } from "./headers.ts";
 
 /**
  * Stable reason codes attached to errors thrown during dispatch (before any

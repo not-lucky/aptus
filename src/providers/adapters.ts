@@ -1,7 +1,7 @@
-import type { Protocol, ProtocolAdapter } from "../domain/contracts.js";
-import { createMessagesAdapter } from "./anthropic-messages/adapter.js";
-import { createChatAdapter } from "./openai-chat/adapter.js";
-import { createResponsesAdapter } from "./openai-responses/adapter.js";
+import type { Protocol, ProtocolAdapter } from "../domain/contracts.ts";
+import { createMessagesAdapter } from "./anthropic-messages/adapter.ts";
+import { createChatAdapter } from "./openai-chat/adapter.ts";
+import { createResponsesAdapter } from "./openai-responses/adapter.ts";
 
 /**
  * Instantiates the default set of protocol adapters for OpenAI Chat, OpenAI

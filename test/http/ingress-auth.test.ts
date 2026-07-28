@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "vitest";
-import type { ClientKeyConfig, SecretString } from "../../src/config/types.js";
-import { authenticateClient } from "../../src/http/auth.js";
-import { admitJsonObject, filterClientHeaders, parseDuplicateFreeJson } from "../../src/http/ingress.js";
+import type { ClientKeyConfig, SecretString } from "../../src/config/types.ts";
+import { authenticateClient } from "../../src/http/auth.ts";
+import { admitJsonObject, filterClientHeaders, parseDuplicateFreeJson } from "../../src/http/ingress.ts";
 
 const keys: readonly ClientKeyConfig[] = [{ name: "client", secret: "client-secret" as SecretString }];
 

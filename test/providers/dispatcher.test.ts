@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import type { PreparedProviderRequest } from "../../src/domain/contracts.js";
-import { createUndiciDispatcher } from "../../src/providers/shared/dispatcher.js";
-import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.js";
+import type { PreparedProviderRequest } from "../../src/domain/contracts.ts";
+import { createUndiciDispatcher } from "../../src/providers/shared/dispatcher.ts";
+import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.ts";
 
 const dispatcher = createUndiciDispatcher();
 

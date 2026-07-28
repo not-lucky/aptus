@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import type { JsonValue, TraceContext, TraceRecorder, TraceSession } from "../../domain/contracts.js";
-import type { TraceManifest, TraceStage, TraceTerminal } from "../../domain/operations.js";
-import { createRedactor, type Redactor } from "./redaction.js";
+import type { JsonValue, TraceContext, TraceRecorder, TraceSession } from "../../domain/contracts.ts";
+import type { TraceManifest, TraceStage, TraceTerminal } from "../../domain/operations.ts";
+import { createRedactor, type Redactor } from "./redaction.ts";
 
 const encoder = new TextEncoder();
 

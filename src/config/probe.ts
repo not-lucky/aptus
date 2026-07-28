@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { type StartupError, startupError } from "./errors.js";
+import { type StartupError, startupError } from "./errors.ts";
 
 /**
  * Executes the fail-closed filesystem startup probe on the configured trace root directory.

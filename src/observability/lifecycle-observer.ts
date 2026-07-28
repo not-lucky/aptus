@@ -1,7 +1,7 @@
 import type { Logger } from "@logtape/logtape";
-import type { JsonValue, LifecycleEvent, LifecycleObserver, Protocol } from "../domain/contracts.js";
-import type { IrFailureCategory } from "../domain/operations.js";
-import type { MetricsRegistry } from "./metrics.js";
+import type { JsonValue, LifecycleEvent, LifecycleObserver, Protocol } from "../domain/contracts.ts";
+import type { IrFailureCategory } from "../domain/operations.ts";
+import type { MetricsRegistry } from "./metrics.ts";
 
 /**
  * A bounded provider attempt result: `success`, one of the 13 canonical

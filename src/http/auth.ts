@@ -1,5 +1,5 @@
 import type { IncomingHttpHeaders } from "node:http";
-import type { ClientKeyConfig } from "../config/types.js";
+import type { ClientKeyConfig } from "../config/types.ts";
 
 /**
  * Kind of client authentication credential provided:

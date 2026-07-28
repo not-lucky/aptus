@@ -1,4 +1,4 @@
-import type { TraceRecorder, TraceSession } from "../../domain/contracts.js";
+import type { TraceRecorder, TraceSession } from "../../domain/contracts.ts";
 
 /**
  * Creates a no-op {@link TraceRecorder} used when tracing is disabled.

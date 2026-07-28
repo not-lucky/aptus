@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import type { ProviderKeyConfig, SecretString } from "../../src/config/types.js";
-import type { KeyLease } from "../../src/domain/contracts.js";
-import { createKeyPool } from "../../src/routing/key-pool.js";
+import type { ProviderKeyConfig, SecretString } from "../../src/config/types.ts";
+import type { KeyLease } from "../../src/domain/contracts.ts";
+import { createKeyPool } from "../../src/routing/key-pool.ts";
 
 // Deterministic linear congruential generator so property failures reproduce
 // exactly from the fixed seed below (docs/testing-and-implementation.md,

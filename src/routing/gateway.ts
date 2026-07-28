@@ -1,4 +1,4 @@
-import type { AptusConfig, ModelConfig, RouteConfig } from "../config/types.js";
+import type { AptusConfig, ModelConfig, RouteConfig } from "../config/types.ts";
 import type {
   Gateway,
   GatewayRequest,
@@ -7,11 +7,11 @@ import type {
   ProtocolAdapter,
   ProviderDispatcher,
   TraceRecorder,
-} from "../domain/contracts.js";
-import type { IrFailureCategory, NormalizedFailure, TraceTerminal } from "../domain/operations.js";
-import type { GatewayObservability } from "../observability/lifecycle-observer.js";
-import { type AttemptContext, executeAttempt } from "./attempt.js";
-import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.js";
+} from "../domain/contracts.ts";
+import type { IrFailureCategory, NormalizedFailure, TraceTerminal } from "../domain/operations.ts";
+import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import { type AttemptContext, executeAttempt } from "./attempt.ts";
+import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
 import {
   cancelledFailure,
   failureFromObservation,
@@ -22,11 +22,11 @@ import {
   timeoutFailure,
   unavailableFailure,
   unsupportedCapabilityFailure,
-} from "./failures.js";
-import { createKeyPool } from "./key-pool.js";
-import { type RelayContext, readAll, relayComplete, relayStream } from "./relay.js";
-import { authorizePublicName, createNameIndex, type NameIndex } from "./resolution.js";
-import { shouldFallback, shouldRetry } from "./retry-policy.js";
+} from "./failures.ts";
+import { createKeyPool } from "./key-pool.ts";
+import { type RelayContext, readAll, relayComplete, relayStream } from "./relay.ts";
+import { authorizePublicName, createNameIndex, type NameIndex } from "./resolution.ts";
+import { shouldFallback, shouldRetry } from "./retry-policy.ts";
 import {
   type Clock,
   type RandomSource,
@@ -34,7 +34,7 @@ import {
   systemClock,
   systemRandomSource,
   systemSleeper,
-} from "./timing.js";
+} from "./timing.ts";
 
 /**
  * Construction options for the Gateway composition seam.

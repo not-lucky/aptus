@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.js";
-import { PUBLIC_NAME_PATTERN } from "../domain/names.js";
-import type { AptusConfig, SecretString } from "./types.js";
+import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.ts";
+import { PUBLIC_NAME_PATTERN } from "../domain/names.ts";
+import type { AptusConfig, SecretString } from "./types.ts";
 
 /** Validates canonical names (1-128 chars, alphanumeric start, dots, underscores, dashes). */
 const nameSchema = z.string().regex(PUBLIC_NAME_PATTERN);

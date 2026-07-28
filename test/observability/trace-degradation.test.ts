@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LogRecord, Sink } from "@logtape/logtape";
 import { test } from "vitest";
-import { createRequestId } from "../../src/domain/request-id.js";
-import { createLifecycleObserver } from "../../src/observability/lifecycle-observer.js";
-import { aptusLogger, configureLogging } from "../../src/observability/logging.js";
-import { createMetricsRegistry } from "../../src/observability/metrics.js";
-import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.js";
+import { createRequestId } from "../../src/domain/request-id.ts";
+import { createLifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
+import { aptusLogger, configureLogging } from "../../src/observability/logging.ts";
+import { createMetricsRegistry } from "../../src/observability/metrics.ts";
+import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.ts";
 
 test("runtime trace write failure degrades readiness without failing traffic", async () => {
   const captured: LogRecord[] = [];

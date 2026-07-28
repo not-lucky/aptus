@@ -1,4 +1,4 @@
-import type { PreparedProviderRequest, ProviderDispatcher, ProviderResponse } from "../../src/domain/contracts.js";
+import type { PreparedProviderRequest, ProviderDispatcher, ProviderResponse } from "../../src/domain/contracts.ts";
 
 /**
  * One scripted fixture response served (FIFO) by the fixture dispatcher.

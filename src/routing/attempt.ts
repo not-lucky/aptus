@@ -8,12 +8,12 @@ import type {
   ProviderDispatcher,
   ProviderResponse,
   TraceSession,
-} from "../domain/contracts.js";
-import type { NormalizedFailure } from "../domain/operations.js";
-import type { GatewayObservability } from "../observability/lifecycle-observer.js";
-import type { CandidateDescriptor } from "./candidates.js";
-import { dispatchFailure, failureJson } from "./failures.js";
-import type { Clock, Sleeper } from "./timing.js";
+} from "../domain/contracts.ts";
+import type { NormalizedFailure } from "../domain/operations.ts";
+import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { CandidateDescriptor } from "./candidates.ts";
+import { dispatchFailure, failureJson } from "./failures.ts";
+import type { Clock, Sleeper } from "./timing.ts";
 
 const utf8Decoder = new TextDecoder();
 

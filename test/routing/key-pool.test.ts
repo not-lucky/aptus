@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import type { KeyPoolConfig, ProviderKeyConfig, SecretString } from "../../src/config/types.js";
-import { createKeyPool } from "../../src/routing/key-pool.js";
-import { TestRandomSource } from "../helpers/test-timing.js";
+import type { KeyPoolConfig, ProviderKeyConfig, SecretString } from "../../src/config/types.ts";
+import { createKeyPool } from "../../src/routing/key-pool.ts";
+import { TestRandomSource } from "../helpers/test-timing.ts";
 
 const DEFAULT_CONFIG: KeyPoolConfig = {
   failureCooldownMs: [500, 2000],

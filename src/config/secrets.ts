@@ -1,5 +1,5 @@
 import { type Document, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
-import { jsonPointer, type StartupError, startupError } from "./errors.js";
+import { jsonPointer, type StartupError, startupError } from "./errors.ts";
 
 /**
  * Internal record of a discovered secret environment reference.

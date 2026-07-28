@@ -5,12 +5,12 @@ import type {
   Protocol,
   ProviderResponse,
   TraceSession,
-} from "../domain/contracts.js";
-import type { TraceTerminal } from "../domain/operations.js";
-import type { GatewayObservability } from "../observability/lifecycle-observer.js";
-import { parseJsonBytes } from "./attempt.js";
-import { failureFromObservation, streamFailure } from "./failures.js";
-import type { Clock } from "./timing.js";
+} from "../domain/contracts.ts";
+import type { TraceTerminal } from "../domain/operations.ts";
+import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import { parseJsonBytes } from "./attempt.ts";
+import { failureFromObservation, streamFailure } from "./failures.ts";
+import type { Clock } from "./timing.ts";
 
 /**
  * Reads a response body stream fully into a single byte buffer.

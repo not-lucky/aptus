@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { formatStartupError } from "../config/errors.js";
-import { loadConfig, resolveConfigPath } from "../config/load.js";
-import { type Runtime, startRuntime } from "./run.js";
+import { formatStartupError } from "../config/errors.ts";
+import { loadConfig, resolveConfigPath } from "../config/load.ts";
+import { type Runtime, startRuntime } from "./run.ts";
 
 const argv = process.argv.slice(2);
 const env = process.env;

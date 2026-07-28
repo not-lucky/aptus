@@ -1,7 +1,7 @@
 import express from "express";
-import type { AptusConfig } from "../config/types.js";
-import type { HealthPayload } from "../domain/operations.js";
-import type { MetricsRegistry } from "../observability/metrics.js";
+import type { AptusConfig } from "../config/types.ts";
+import type { HealthPayload } from "../domain/operations.ts";
+import type { MetricsRegistry } from "../observability/metrics.ts";
 
 /**
  * Mutable process-local runtime state shared across HTTP listeners and shutdown handlers.

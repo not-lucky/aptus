@@ -1,4 +1,4 @@
-import type { Server } from "../http/listeners.js";
+import type { Server } from "../http/listeners.ts";
 
 /**
  * Controller interface coordinating listener drain and forced abort during process shutdown.

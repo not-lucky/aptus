@@ -10,7 +10,7 @@
     "esModuleInterop": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
-    "allowImportingTsExtensions": false,
+    "allowImportingTsExtensions": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "noImplicitReturns": true,

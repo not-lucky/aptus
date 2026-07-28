@@ -7,10 +7,10 @@ import type {
   Protocol,
   ProtocolAdapter,
   Result,
-} from "../../domain/contracts.js";
-import type { IrFailureCategory, NormalizedFailure } from "../../domain/operations.js";
-import { filterOutboundHeaders, type OutboundAuth, parseRetryAfter } from "./headers.js";
-import { applyNativeMutations } from "./mutation.js";
+} from "../../domain/contracts.ts";
+import type { IrFailureCategory, NormalizedFailure } from "../../domain/operations.ts";
+import { filterOutboundHeaders, type OutboundAuth, parseRetryAfter } from "./headers.ts";
+import { applyNativeMutations } from "./mutation.ts";
 
 const encoder = new TextEncoder();
 

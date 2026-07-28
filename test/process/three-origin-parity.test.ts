@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, type RunningCli } from "../helpers/cli-process.js";
-import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.js";
-import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.js";
-import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.js";
-import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.js";
+import { postJson, seededSecrets, startAptusCli, type RunningCli } from "../helpers/cli-process.ts";
+import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
+import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
+import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
+import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",

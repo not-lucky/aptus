@@ -1,4 +1,4 @@
-import { createProviderOrigin, type ProviderOrigin } from "./provider-origin.js";
+import { createProviderOrigin, type ProviderOrigin } from "./provider-origin.ts";
 
 /**
  * Three-origin provider harness managing Chat, Responses, and Messages loopback origins

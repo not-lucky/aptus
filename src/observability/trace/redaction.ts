@@ -1,4 +1,4 @@
-import type { HeaderMap, JsonValue } from "../../domain/contracts.js";
+import type { HeaderMap, JsonValue } from "../../domain/contracts.ts";
 
 /**
  * Pinned replacement marker for redacted credential values and resolved secrets.

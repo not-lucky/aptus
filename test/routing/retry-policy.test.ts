@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import type { KeyPoolConfig } from "../../src/config/types.js";
+import type { KeyPoolConfig } from "../../src/config/types.ts";
 import {
   calculateRetryDelay,
   MAX_SAME_CANDIDATE_RETRIES,
   RETRYABLE_STATUSES,
   shouldFallback,
   shouldRetry,
-} from "../../src/routing/retry-policy.js";
-import { TestRandomSource } from "../helpers/test-timing.js";
+} from "../../src/routing/retry-policy.ts";
+import { TestRandomSource } from "../helpers/test-timing.ts";
 
 test("RETRYABLE_STATUSES contains exactly 429, 500, 503, 529", () => {
   assert.deepEqual([...RETRYABLE_STATUSES].sort(), [429, 500, 503, 529]);
