@@ -10,7 +10,6 @@ import type {
 /** Readiness status vocabulary exposed by the health capability. */
 export type ReadinessStatus = "healthy" | "not_ready";
 
-
 /** Immutable, safe liveness and readiness snapshot. */
 export interface ReadinessSnapshot {
   /** Healthy only when every readiness predicate is satisfied. */
@@ -25,6 +24,8 @@ export interface ReadinessSnapshot {
   readonly configValid: boolean;
   /** Whether plugin registration completed. */
   readonly pluginsRegistered: boolean;
+  /** Whether translation adapter registration completed atomically. */
+  readonly adaptersRegistered: boolean;
   /** Safe aggregate credential counts. */
   readonly credentials: CredentialCounts;
   /** Safe upstream provider check statuses. */
@@ -37,6 +38,8 @@ export interface ReadinessSnapshot {
 export interface OperationalReadinessState {
   /** Whether configured plugins have registered. */
   readonly pluginsRegistered: boolean;
+  /** Whether translation adapters registered without collisions. */
+  readonly adaptersRegistered: boolean;
   /** Safe aggregate credential counts. */
   readonly credentials: CredentialCounts;
   /** Whether at least one credential is eligible. */
@@ -79,6 +82,7 @@ export class ConfigurationCoordinator
   private config: Readonly<GatewayConfig> | undefined;
   private operational: OperationalReadinessState = {
     pluginsRegistered: false,
+    adaptersRegistered: false,
     credentials: freezeDeep(emptyCounts()),
     eligibleCredential: false,
     upstreamChecks: freezeDeep({}),
@@ -95,11 +99,21 @@ export class ConfigurationCoordinator
   publishValidated(config: GatewayConfig): void {
     this.config = freezeDeep(config);
   }
+  /** Records the explicit result of startup adapter registration. */
+  setAdaptersRegistered(registered: boolean): void {
+    if (typeof registered !== "boolean")
+      throw new TypeError("adapter readiness state must be boolean");
+    this.operational = {
+      ...this.operational,
+      adaptersRegistered: registered,
+    };
+  }
 
   /** Replaces all operational readiness inputs as one immutable state transition. */
   setOperationalState(state: OperationalReadinessState): void {
     if (
       typeof state.pluginsRegistered !== "boolean" ||
+      typeof state.adaptersRegistered !== "boolean" ||
       typeof state.eligibleCredential !== "boolean"
     )
       throw new TypeError("readiness boolean state must be boolean");
@@ -126,6 +140,7 @@ export class ConfigurationCoordinator
     }
     this.operational = {
       pluginsRegistered: state.pluginsRegistered,
+      adaptersRegistered: state.adaptersRegistered,
       credentials: freezeDeep({
         active: counts.active,
         cooldown: counts.cooldown,
@@ -160,13 +175,16 @@ export class ConfigurationCoordinator
       suspended: credentialCounts.suspended,
     });
     if (!Object.values(credentials).every(validCount))
-      throw new TypeError("credential counts must be finite non-negative integers");
+      throw new TypeError(
+        "credential counts must be finite non-negative integers",
+      );
     const requiredUpstreamsReady = [
       ...this.operational.requiredUpstreamProviders,
     ].every((provider) => this.operational.upstreamChecks[provider] === "ok");
     const ready =
       configValid &&
       this.operational.pluginsRegistered &&
+      this.operational.adaptersRegistered &&
       eligibleCredential &&
       requiredUpstreamsReady;
     return freezeDeep({
@@ -176,6 +194,7 @@ export class ConfigurationCoordinator
       port: 11248,
       configValid,
       pluginsRegistered: this.operational.pluginsRegistered,
+      adaptersRegistered: this.operational.adaptersRegistered,
       credentials,
       upstreamChecks: this.operational.upstreamChecks,
       checkedAt: new Date(this.clock.now()).toISOString(),

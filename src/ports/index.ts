@@ -1,6 +1,7 @@
 export { createStreamTranslationState } from "./translation.js";
 export type {
   EgressValue,
+  RawHeaderValue,
   RawIngressInput,
   TranslationContext,
   StreamResponseMetadata,
@@ -8,6 +9,20 @@ export type {
   IngressTranslationAdapter,
   EgressTranslationAdapter,
 } from "./translation.js";
+export {
+  MAX_TRUSTED_ROUTING_IDENTIFIER_LENGTH,
+  MAX_TRUSTED_ROUTING_COST_USD,
+  MAX_TRUSTED_ROUTING_LATENCY_MS,
+  MAX_TRUSTED_REQUIRED_CAPABILITIES,
+  MAX_TRUSTED_REQUIRED_CAPABILITY_LENGTH,
+  TRUSTED_ROUTING_HEADER_NAMES,
+  parseTrustedRoutingHeaders,
+  mergeTrustedRoutingOverrides,
+} from "./routing-headers.js";
+export type {
+  ParseTrustedRoutingHeadersInput,
+  ParsedTrustedRoutingHeaders,
+} from "./routing-headers.js";
 export type {
   ProviderDispatchPort,
   DispatchAttemptBudget,

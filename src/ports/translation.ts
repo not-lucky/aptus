@@ -10,14 +10,22 @@ import type { TokenUsage } from "../domain/index.js";
 /** Value emitted by an egress adapter; ownership remains with the adapter. */
 export type EgressValue = Uint8Array | string | Record<string, unknown>;
 
-/** Protocol input before canonical translation; headers are intentionally mutable for parsing. */
+/** One normalized ingress header value, including repeatable field lines. */
+export type RawHeaderValue = string | ReadonlyArray<string>;
+
+/** Protocol input before canonical translation. */
 export interface RawIngressInput {
   /** Normalized or raw request path supplied by the outer adapter. */
   path: string;
-  /** Parsed request headers; translation may consume or normalize them. */
-  headers: Record<string, string>;
+  /** Untrusted parsed request headers; translators never establish proxy trust. */
+  headers: Record<string, RawHeaderValue>;
   /** Untrusted protocol body awaiting validation. */
   body: unknown;
+  /**
+   * Server-attested ingress proxy identity supplied by the outer transport.
+   * Client headers must never populate this field.
+   */
+  readonly ingressProxyId?: string;
   /** Optional outer-boundary authorization value; never copied into canonical data. */
   readonly authorization?: string;
   /** Optional caller-owned cancellation signal linked to the application scope. */
@@ -64,7 +72,11 @@ export interface StreamTranslationState {
   /** Anthropic-compatible open block lifecycle by canonical address. */
   openBlocks?: Map<
     string,
-    { readonly kind: string; readonly emitted: boolean; readonly index?: number }
+    {
+      readonly kind: string;
+      readonly emitted: boolean;
+      readonly index?: number;
+    }
   >;
   /** Next protocol block index to allocate. */
   nextBlockIndex?: number;
@@ -78,7 +90,7 @@ export interface StreamTranslationState {
   terminal: boolean;
   /** Whether at least one non-resumed typed record reached the wire. */
   bytesEmitted: boolean;
- }
+}
 
 /** Request-local context shared across translation boundaries. */
 export interface TranslationContext {

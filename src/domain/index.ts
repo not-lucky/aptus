@@ -4,6 +4,7 @@ export type {
   CanonicalRole,
   KnownCapability,
   Capability,
+  ProtocolNamespace,
   Citation,
   ContentBlockBase,
   ContentBlock,

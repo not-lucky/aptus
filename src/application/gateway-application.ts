@@ -35,7 +35,14 @@ import type {
 } from "../ports/dispatch.js";
 import type { CredentialStatePort } from "../ports/credentials.js";
 import { classifyCredentialFailure } from "../ports/credentials.js";
-import type { EgressValue, RawIngressInput, TranslationContext } from "../ports/translation.js";
+import {
+  mergeTrustedRoutingOverrides,
+  parseTrustedRoutingHeaders,
+  type EgressValue,
+  type ParsedTrustedRoutingHeaders,
+  type RawIngressInput,
+  type TranslationContext,
+} from "../ports/index.js";
 import {
   BoundedCandidateIterator,
   DISPATCH_STATE_KEYS,
@@ -69,11 +76,20 @@ export interface GatewayApplicationDependencies {
   readonly credentials: CredentialStatePort;
   /** Already-redacted dispatch trace sink. */
   readonly trace: TracePort;
+  /**
+   * Server-configured proxy identities trusted to supply gateway routing
+   * headers. The outer transport attests `RawIngressInput.ingressProxyId`.
+   */
+  readonly trustedIngressProxyIds?: ReadonlySet<string>;
 }
 
 type StageResult<T> =
   | { readonly ok: true; readonly value: T; readonly context: GatewayContext }
-  | { readonly ok: true; readonly shortCircuit: T; readonly context: GatewayContext }
+  | {
+      readonly ok: true;
+      readonly shortCircuit: T;
+      readonly context: GatewayContext;
+    }
   | { readonly ok: false; readonly error: GatewayError };
 type RequestStage =
   "onIngressReceived" | "onCanonicalTranslate" | "beforeUpstreamDispatch";
@@ -146,9 +162,23 @@ function normalizeFailure(value: unknown, requestId: string): GatewayError {
 
 function dispatchFailure(value: unknown, requestId: string): GatewayError {
   if (value instanceof DispatchBudgetStateError)
-    return safeError(requestId, "dispatch_budget_failed", "dispatch budget failed", "internal", 500, false);
+    return safeError(
+      requestId,
+      "dispatch_budget_failed",
+      "dispatch budget failed",
+      "internal",
+      500,
+      false,
+    );
   if (value instanceof Error && value.name === "DispatchPolicyResolutionError")
-    return safeError(requestId, "dispatch_policy_failed", "dispatch policy failed", "internal", 500, false);
+    return safeError(
+      requestId,
+      "dispatch_policy_failed",
+      "dispatch policy failed",
+      "internal",
+      500,
+      false,
+    );
   return normalizeFailure(value, requestId);
 }
 
@@ -164,6 +194,33 @@ function syntheticRequest(requestId: string): CanonicalRequest {
   };
 }
 
+function trustedRoutingInput(
+  dependencies: GatewayApplicationDependencies,
+  input: RawIngressInput,
+  requestId: string,
+): ParsedTrustedRoutingHeaders {
+  const proxyId = input.ingressProxyId;
+  const trusted =
+    proxyId !== undefined &&
+    dependencies.trustedIngressProxyIds?.has(proxyId) === true;
+  return parseTrustedRoutingHeaders({
+    trusted,
+    headers: input.headers,
+    requestId,
+  });
+}
+
+function withTrustedRouting(
+  request: CanonicalRequest,
+  trusted: ParsedTrustedRoutingHeaders,
+): CanonicalRequest {
+  if (Object.keys(trusted.routing).length === 0) return request;
+  return Object.freeze({
+    ...request,
+    routing: mergeTrustedRoutingOverrides(request.routing, trusted.routing),
+  });
+}
+
 function isRequestStage(hook: HookName): hook is RequestStage {
   return (
     hook === "onIngressReceived" ||
@@ -172,10 +229,12 @@ function isRequestStage(hook: HookName): hook is RequestStage {
   );
 }
 function isSuccessfulResponse(response: CanonicalResponse): boolean {
-  return response.provider.upstreamStatus >= 200 &&
+  return (
+    response.provider.upstreamStatus >= 200 &&
     response.provider.upstreamStatus <= 299 &&
     response.error === undefined &&
-    !response.choices.some((choice) => choice.finishReason === "content_filter");
+    !response.choices.some((choice) => choice.finishReason === "content_filter")
+  );
 }
 
 function responseMayAdvance(
@@ -184,7 +243,10 @@ function responseMayAdvance(
 ): boolean {
   const code = response.error?.code;
   if (code === "content_filter" || code === "context_overflow") return false;
-  if (response.choices.some((choice) => choice.finishReason === "content_filter")) return false;
+  if (
+    response.choices.some((choice) => choice.finishReason === "content_filter")
+  )
+    return false;
   const status = response.provider.upstreamStatus;
   if (status === 401 || status === 403) return true;
   if (status === 429 || status >= 500)
@@ -193,9 +255,11 @@ function responseMayAdvance(
 }
 
 function errorMayAdvance(error: GatewayError): boolean {
-  return error.code === "upstream_dns" ||
+  return (
+    error.code === "upstream_dns" ||
     error.code === "upstream_connection" ||
-    error.code === "upstream_timeout";
+    error.code === "upstream_timeout"
+  );
 }
 
 class DefaultGatewayExchange implements GatewayExchange {
@@ -269,9 +333,10 @@ class DefaultGatewayExchange implements GatewayExchange {
       this.context,
       value,
     );
-    const output = result.ok && "value" in result
-      ? result.value
-      : await this.fail(result.ok ? this.invalidEgress() : result.error);
+    const output =
+      result.ok && "value" in result
+        ? result.value
+        : await this.fail(result.ok ? this.invalidEgress() : result.error);
     this.egressPrepared = result.ok && "value" in result;
     if (!result.ok) {
       this.releasePendingEgress();
@@ -401,7 +466,10 @@ class DefaultGatewayExchange implements GatewayExchange {
     if (this.controller.signal.aborted)
       return {
         ok: false,
-        error: normalizeFailure(this.controller.signal.reason, context.requestId),
+        error: normalizeFailure(
+          this.controller.signal.reason,
+          context.requestId,
+        ),
       };
     const configuration = this.dependencies.hookTimeouts[hook];
     const timerController = new AbortController();
@@ -453,7 +521,9 @@ class DefaultGatewayExchange implements GatewayExchange {
   }
 
   private cachedResponse(): CanonicalResponse | GatewayError {
-    const value = this.context.getState<CanonicalResponse>("cache-lookup:response");
+    const value = this.context.getState<CanonicalResponse>(
+      "cache-lookup:response",
+    );
     if (!isSafeCanonicalResponse(value, this.context.requestId))
       return safeError(
         this.context.requestId,
@@ -497,7 +567,9 @@ class DefaultGatewayExchange implements GatewayExchange {
           block: {
             type: block.type,
             ...(block.id === undefined ? {} : { id: block.id }),
-            ...("name" in block && block.name !== undefined ? { name: block.name } : {}),
+            ...("name" in block && block.name !== undefined
+              ? { name: block.name }
+              : {}),
             ...("toolKind" in block && block.toolKind !== undefined
               ? { toolKind: block.toolKind }
               : {}),
@@ -509,33 +581,61 @@ class DefaultGatewayExchange implements GatewayExchange {
         });
         switch (block.type) {
           case "text":
-            chunks.push({ type: "text_delta", address, text: block.text, sequenceNumber: sequenceNumber++ });
+            chunks.push({
+              type: "text_delta",
+              address,
+              text: block.text,
+              sequenceNumber: sequenceNumber++,
+            });
             for (const citation of block.citations ?? [])
-              chunks.push({ type: "citation_added", address, citation, sequenceNumber: sequenceNumber++ });
+              chunks.push({
+                type: "citation_added",
+                address,
+                citation,
+                sequenceNumber: sequenceNumber++,
+              });
             break;
           case "refusal":
-            chunks.push({ type: "refusal_delta", address, text: block.refusal, sequenceNumber: sequenceNumber++ });
+            chunks.push({
+              type: "refusal_delta",
+              address,
+              text: block.refusal,
+              sequenceNumber: sequenceNumber++,
+            });
             break;
           case "reasoning":
             chunks.push({
               type: "reasoning_delta",
               address,
               ...(block.text === undefined ? {} : { text: block.text }),
-              ...(block.signature === undefined ? {} : { signatureDelta: block.signature }),
-              ...(block.redactedData === undefined ? {} : { redactedDataDelta: block.redactedData }),
-              ...(block.encryptedContent === undefined ? {} : { encryptedContentDelta: block.encryptedContent }),
+              ...(block.signature === undefined
+                ? {}
+                : { signatureDelta: block.signature }),
+              ...(block.redactedData === undefined
+                ? {}
+                : { redactedDataDelta: block.redactedData }),
+              ...(block.encryptedContent === undefined
+                ? {}
+                : { encryptedContentDelta: block.encryptedContent }),
               sequenceNumber: sequenceNumber++,
             });
             break;
           case "audio_base64":
-            chunks.push({ type: "audio_delta", address, audioBase64: block.data, sequenceNumber: sequenceNumber++ });
+            chunks.push({
+              type: "audio_delta",
+              address,
+              audioBase64: block.data,
+              sequenceNumber: sequenceNumber++,
+            });
             break;
           case "audio_output":
             chunks.push({
               type: "audio_delta",
               address,
               ...(block.data === undefined ? {} : { audioBase64: block.data }),
-              ...(block.transcript === undefined ? {} : { transcriptDelta: block.transcript }),
+              ...(block.transcript === undefined
+                ? {}
+                : { transcriptDelta: block.transcript }),
               sequenceNumber: sequenceNumber++,
             });
             break;
@@ -555,7 +655,9 @@ class DefaultGatewayExchange implements GatewayExchange {
               address,
               id: block.toolCallId,
               ...(block.name === undefined ? {} : { name: block.name }),
-              ...(block.argumentsJson === undefined ? {} : { argumentsDelta: block.argumentsJson }),
+              ...(block.argumentsJson === undefined
+                ? {}
+                : { argumentsDelta: block.argumentsJson }),
               sequenceNumber: sequenceNumber++,
             });
             break;
@@ -573,12 +675,23 @@ class DefaultGatewayExchange implements GatewayExchange {
         type: "choice_end",
         choiceIndex: choice.index,
         finishReason: choice.finishReason,
-        ...(choice.stopSequence === undefined ? {} : { stopSequence: choice.stopSequence }),
+        ...(choice.stopSequence === undefined
+          ? {}
+          : { stopSequence: choice.stopSequence }),
         sequenceNumber: sequenceNumber++,
       });
     }
-    chunks.push({ type: "usage", usage: response.usage, cost: response.cost, sequenceNumber: sequenceNumber++ });
-    chunks.push({ type: "response_end", status: response.status, sequenceNumber });
+    chunks.push({
+      type: "usage",
+      usage: response.usage,
+      cost: response.cost,
+      sequenceNumber: sequenceNumber++,
+    });
+    chunks.push({
+      type: "response_end",
+      status: response.status,
+      sequenceNumber,
+    });
     for (const chunk of chunks) {
       if (requireEgress && this.pendingEgress !== undefined)
         await this.pendingEgress.promise;
@@ -595,11 +708,16 @@ class DefaultGatewayExchange implements GatewayExchange {
       this.canonicalReady = true;
       if (requireEgress) {
         const gate = Promise.withResolvers<void>();
-        this.pendingEgress = { promise: gate.promise, resolve: gate.resolve, reject: gate.reject, settled: false };
+        this.pendingEgress = {
+          promise: gate.promise,
+          resolve: gate.resolve,
+          reject: gate.reject,
+          settled: false,
+        };
         this.egressUsed = false;
         this.egressPrepared = false;
-      }
-      else if (!this.commitmentState.committed) this.commitmentState.committed = true;
+      } else if (!this.commitmentState.committed)
+        this.commitmentState.committed = true;
       yield result.value;
     }
   }
@@ -608,80 +726,320 @@ class DefaultGatewayExchange implements GatewayExchange {
     try {
       const requestIdResult = this.resolveRequestId();
       if (!requestIdResult.ok) return await this.fail(requestIdResult.error);
-      const translationContext: TranslationContext = { requestId: requestIdResult.value, signal: this.controller.signal, trustedRoutingHeaders: {} };
-      const translated = this.dependencies.adapters.ingress(this.input.path).translate(this.input, translationContext);
-      if (!validateCanonicalRequest(translated).valid || translated.requestId !== requestIdResult.value || translated.stream)
-        return await this.fail(safeError(requestIdResult.value, "invalid_canonical_request", "invalid canonical request", "validation", 400, false));
-      this.dispatchPolicySnapshot = this.dependencies.dispatchPolicies.snapshot();
+      const trusted = trustedRoutingInput(
+        this.dependencies,
+        this.input,
+        requestIdResult.value,
+      );
+      const translationContext: TranslationContext = {
+        requestId: requestIdResult.value,
+        signal: this.controller.signal,
+        trustedRoutingHeaders: trusted.headers,
+      };
+      const translated = withTrustedRouting(
+        this.dependencies.adapters
+          .ingress(this.input.path, requestIdResult.value)
+          .translate(this.input, translationContext),
+        trusted,
+      );
+      if (
+        !validateCanonicalRequest(translated).valid ||
+        translated.requestId !== requestIdResult.value ||
+        translated.stream
+      )
+        return await this.fail(
+          safeError(
+            requestIdResult.value,
+            "invalid_canonical_request",
+            "invalid canonical request",
+            "validation",
+            400,
+            false,
+          ),
+        );
+      this.dispatchPolicySnapshot =
+        this.dependencies.dispatchPolicies.snapshot();
       this.setContext(translated);
-      let stage = await this.runStage("onIngressReceived", this.context, translated);
+      let stage = await this.runStage(
+        "onIngressReceived",
+        this.context,
+        translated,
+      );
       if (!stage.ok) return await this.fail(stage.error);
-      if ("shortCircuit" in stage) { const cached = this.cachedResponse(); return isGatewayError(cached) ? await this.fail(cached) : cached; }
-      const effectiveDryRun = stage.value.routing.dryRun === true || this.context.getState<boolean>(DISPATCH_STATE_KEYS.dryRun) === true || this.dispatchPolicySnapshot.defaultDryRun;
-      const canonicalRequest: CanonicalRequest = effectiveDryRun ? Object.freeze({ ...stage.value, routing: Object.freeze({ ...stage.value.routing, dryRun: true }) }) : stage.value;
+      if ("shortCircuit" in stage) {
+        const cached = this.cachedResponse();
+        return isGatewayError(cached) ? await this.fail(cached) : cached;
+      }
+      const effectiveDryRun =
+        stage.value.routing.dryRun === true ||
+        this.context.getState<boolean>(DISPATCH_STATE_KEYS.dryRun) === true ||
+        this.dispatchPolicySnapshot.defaultDryRun;
+      const canonicalRequest: CanonicalRequest = effectiveDryRun
+        ? Object.freeze({
+            ...stage.value,
+            routing: Object.freeze({ ...stage.value.routing, dryRun: true }),
+          })
+        : stage.value;
       this.context.setState(DISPATCH_STATE_KEYS.dryRun, effectiveDryRun);
       this.setContext(canonicalRequest);
-      stage = await this.runStage("onCanonicalTranslate", this.context, canonicalRequest);
+      stage = await this.runStage(
+        "onCanonicalTranslate",
+        this.context,
+        canonicalRequest,
+      );
       if (!stage.ok) return await this.fail(stage.error);
-      if ("shortCircuit" in stage) { const cached = this.cachedResponse(); return isGatewayError(cached) ? await this.fail(cached) : cached; }
+      if ("shortCircuit" in stage) {
+        const cached = this.cachedResponse();
+        return isGatewayError(cached) ? await this.fail(cached) : cached;
+      }
       const postCanonicalRequest = stage.value;
-      const routes = await this.resolveRoutes(stage.context, postCanonicalRequest);
+      const routes = await this.resolveRoutes(
+        stage.context,
+        postCanonicalRequest,
+      );
       if (!routes.ok) return await this.fail(routes.error);
-      if (!("value" in routes) || routes.value.resolved.length === 0 || routes.value.attempts.length === 0)
-        return await this.fail(safeError(this.context.requestId, "route_exhausted", "no eligible route candidate", "routing", 503, true));
+      if (
+        !("value" in routes) ||
+        routes.value.resolved.length === 0 ||
+        routes.value.attempts.length === 0
+      )
+        return await this.fail(
+          safeError(
+            this.context.requestId,
+            "route_exhausted",
+            "no eligible route candidate",
+            "routing",
+            503,
+            true,
+          ),
+        );
       const root = routes.value.resolved[0];
-      if (root === undefined) return await this.fail(safeError(this.context.requestId, "route_exhausted", "no eligible route candidate", "routing", 503, true));
+      if (root === undefined)
+        return await this.fail(
+          safeError(
+            this.context.requestId,
+            "route_exhausted",
+            "no eligible route candidate",
+            "routing",
+            503,
+            true,
+          ),
+        );
       const rootPolicy = this.dispatchPolicySnapshot.resolve(root);
-      const ledger = new DispatchBudgetLedger(rootPolicy.attemptBudget, this.dependencies.clock, this.controller.signal, this.commitment);
+      const ledger = new DispatchBudgetLedger(
+        rootPolicy.attemptBudget,
+        this.dependencies.clock,
+        this.controller.signal,
+        this.commitment,
+      );
       let minimumContextTokens = 0;
-      for await (const candidate of new BoundedCandidateIterator(routes.value.attempts, rootPolicy.attemptBudget.maxAttempts, this.controller.signal)) {
+      for await (const candidate of new BoundedCandidateIterator(
+        routes.value.attempts,
+        rootPolicy.attemptBudget.maxAttempts,
+        this.controller.signal,
+      )) {
         const policy = this.dispatchPolicySnapshot.resolve(candidate);
-        if (policy.contextTokens <= minimumContextTokens || ledger.blockReason(candidate) !== undefined || !this.dependencies.credentials.eligible(candidate.credentialId)) continue;
+        if (
+          policy.contextTokens <= minimumContextTokens ||
+          ledger.blockReason(candidate) !== undefined ||
+          !this.dependencies.credentials.eligible(candidate.credentialId)
+        )
+          continue;
         this.setContext(postCanonicalRequest, candidate);
-        const before = await this.runStage("beforeUpstreamDispatch", this.context, postCanonicalRequest);
+        const before = await this.runStage(
+          "beforeUpstreamDispatch",
+          this.context,
+          postCanonicalRequest,
+        );
         if (!before.ok) return await this.fail(before.error);
-        if ("shortCircuit" in before) { const cached = this.cachedResponse(); return isGatewayError(cached) ? await this.fail(cached) : cached; }
-        const estimate = this.context.getState<DispatchCostEstimate>(DISPATCH_STATE_KEYS.costEstimate);
-        if (estimate === undefined || !Number.isFinite(estimate.cost.totalUsd) || estimate.cost.totalUsd < 0)
-          return await this.fail(safeError(this.context.requestId, "cost_estimate_failed", "cost estimate failed", "internal", 500, false));
+        if ("shortCircuit" in before) {
+          const cached = this.cachedResponse();
+          return isGatewayError(cached) ? await this.fail(cached) : cached;
+        }
+        const estimate = this.context.getState<DispatchCostEstimate>(
+          DISPATCH_STATE_KEYS.costEstimate,
+        );
+        if (
+          estimate === undefined ||
+          !Number.isFinite(estimate.cost.totalUsd) ||
+          estimate.cost.totalUsd < 0
+        )
+          return await this.fail(
+            safeError(
+              this.context.requestId,
+              "cost_estimate_failed",
+              "cost estimate failed",
+              "internal",
+              500,
+              false,
+            ),
+          );
         if (effectiveDryRun) {
-          const dryRun: CanonicalResponse = { requestId: postCanonicalRequest.requestId, responseId: `${postCanonicalRequest.requestId}-dry-run`, createdAt: postCanonicalRequest.receivedAt, model: postCanonicalRequest.model, status: "completed", choices: [{ index: 0, output: [], finishReason: "stop" }], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, cost: estimate.cost, provider: { providerId: candidate.providerId, credentialId: "dry-run", physicalModel: candidate.physicalModel, responseHeaders: {}, upstreamStatus: 200 }, extensions: { custom: { dryRun: true, routeId: candidate.routeId, providerId: candidate.providerId, physicalModel: candidate.physicalModel, estimatedTokens: estimate.usage.totalTokens, estimatedCostUsd: estimate.cost.totalUsd, actualCostUsd: 0 } } };
+          const dryRun: CanonicalResponse = {
+            requestId: postCanonicalRequest.requestId,
+            responseId: `${postCanonicalRequest.requestId}-dry-run`,
+            createdAt: postCanonicalRequest.receivedAt,
+            model: postCanonicalRequest.model,
+            status: "completed",
+            choices: [{ index: 0, output: [], finishReason: "stop" }],
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            cost: estimate.cost,
+            provider: {
+              providerId: candidate.providerId,
+              credentialId: "dry-run",
+              physicalModel: candidate.physicalModel,
+              responseHeaders: {},
+              upstreamStatus: 200,
+            },
+            extensions: {
+              custom: {
+                dryRun: true,
+                routeId: candidate.routeId,
+                providerId: candidate.providerId,
+                physicalModel: candidate.physicalModel,
+                estimatedTokens: estimate.usage.totalTokens,
+                estimatedCostUsd: estimate.cost.totalUsd,
+                actualCostUsd: 0,
+              },
+            },
+          };
           this.canonicalReady = true;
-          void this.dependencies.trace.record({ schema: "aptus.dispatch.trace", version: 1, event: "dry_run", requestId: postCanonicalRequest.requestId, routeId: candidate.routeId, providerId: candidate.providerId, physicalModel: candidate.physicalModel }).catch(() => undefined);
+          void this.dependencies.trace
+            .record({
+              schema: "aptus.dispatch.trace",
+              version: 1,
+              event: "dry_run",
+              requestId: postCanonicalRequest.requestId,
+              routeId: candidate.routeId,
+              providerId: candidate.providerId,
+              physicalModel: candidate.physicalModel,
+            })
+            .catch(() => undefined);
           return dryRun;
         }
         try {
-          const dispatch = composeProviderDispatch(this.dependencies.providers.create(candidate.providerId), { candidate, policy, requestId: this.context.requestId, commitment: this.commitment, ledger, clock: this.dependencies.clock, credentials: this.dependencies.credentials, trace: this.dependencies.trace });
-          const response = await dispatch.dispatch(candidate, before.value, this.controller.signal);
-          if (!isSafeCanonicalResponse(response, this.context.requestId)) return await this.fail(safeError(this.context.requestId, "invalid_upstream_response", "upstream returned an invalid canonical response", "upstream", 502, false));
-          const responseStage = await this.runStage("onUpstreamResponse", this.context, response);
+          const dispatch = composeProviderDispatch(
+            this.dependencies.providers.create(candidate.providerId),
+            {
+              candidate,
+              policy,
+              requestId: this.context.requestId,
+              commitment: this.commitment,
+              ledger,
+              clock: this.dependencies.clock,
+              credentials: this.dependencies.credentials,
+              trace: this.dependencies.trace,
+            },
+          );
+          const response = await dispatch.dispatch(
+            candidate,
+            before.value,
+            this.controller.signal,
+          );
+          if (!isSafeCanonicalResponse(response, this.context.requestId))
+            return await this.fail(
+              safeError(
+                this.context.requestId,
+                "invalid_upstream_response",
+                "upstream returned an invalid canonical response",
+                "upstream",
+                502,
+                false,
+              ),
+            );
+          const responseStage = await this.runStage(
+            "onUpstreamResponse",
+            this.context,
+            response,
+          );
           if (!responseStage.ok) return await this.fail(responseStage.error);
-          if (!("value" in responseStage)) return await this.fail(this.invalidEgress());
-          if (isSuccessfulResponse(responseStage.value)) { this.state.set(DISPATCH_STATE_KEYS.attempts, ledger.attempts()); this.canonicalReady = true; return responseStage.value; }
-          if (responseStage.value.error?.code === "context_overflow") { minimumContextTokens = policy.contextTokens; continue; }
-          if (!responseMayAdvance(responseStage.value, policy)) { this.canonicalReady = true; return responseStage.value; }
+          if (!("value" in responseStage))
+            return await this.fail(this.invalidEgress());
+          if (isSuccessfulResponse(responseStage.value)) {
+            this.state.set(DISPATCH_STATE_KEYS.attempts, ledger.attempts());
+            this.canonicalReady = true;
+            return responseStage.value;
+          }
+          if (responseStage.value.error?.code === "context_overflow") {
+            minimumContextTokens = policy.contextTokens;
+            continue;
+          }
+          if (!responseMayAdvance(responseStage.value, policy)) {
+            this.canonicalReady = true;
+            return responseStage.value;
+          }
         } catch (value: unknown) {
           const failure = dispatchFailure(value, this.context.requestId);
           if (!errorMayAdvance(failure)) return await this.fail(failure);
-          try { this.dependencies.credentials.failure(candidate.credentialId, classifyCredentialFailure(failure)); this.context.setState(DISPATCH_STATE_KEYS.credentialOutcomeHandled, `${candidate.routeId}\u0000${candidate.providerId}\u0000${candidate.credentialId}\u0000${candidate.physicalModel}`); }
-          catch { return await this.fail(safeError(this.context.requestId, "credential_policy_failed", "credential policy failed", "internal", 500, false)); }
+          try {
+            this.dependencies.credentials.failure(
+              candidate.credentialId,
+              classifyCredentialFailure(failure),
+            );
+            this.context.setState(
+              DISPATCH_STATE_KEYS.credentialOutcomeHandled,
+              `${candidate.routeId}\u0000${candidate.providerId}\u0000${candidate.credentialId}\u0000${candidate.physicalModel}`,
+            );
+          } catch {
+            return await this.fail(
+              safeError(
+                this.context.requestId,
+                "credential_policy_failed",
+                "credential policy failed",
+                "internal",
+                500,
+                false,
+              ),
+            );
+          }
         }
       }
       this.state.set(DISPATCH_STATE_KEYS.attempts, ledger.attempts());
-      return await this.fail(safeError(this.context.requestId, "route_exhausted", "no eligible route candidate", "routing", 503, true));
-    } catch (error: unknown) { return await this.fail(dispatchFailure(error, this.context.requestId)); }
+      return await this.fail(
+        safeError(
+          this.context.requestId,
+          "route_exhausted",
+          "no eligible route candidate",
+          "routing",
+          503,
+          true,
+        ),
+      );
+    } catch (error: unknown) {
+      return await this.fail(dispatchFailure(error, this.context.requestId));
+    }
   }
 
   private async resolveRoutes(
     context: GatewayContext,
     request: CanonicalRequest,
-  ): Promise<StageResult<{ readonly resolved: ReadonlyArray<RouteCandidate>; readonly attempts: ReadonlyArray<RouteCandidate> }>> {
+  ): Promise<
+    StageResult<{
+      readonly resolved: ReadonlyArray<RouteCandidate>;
+      readonly attempts: ReadonlyArray<RouteCandidate>;
+    }>
+  > {
     try {
-      const resolved = Object.freeze([...(await this.dependencies.routes.resolve(request, context))]);
-      const transformed = await this.runStage("onRouteResolve", context, resolved);
+      const resolved = Object.freeze([
+        ...(await this.dependencies.routes.resolve(request, context)),
+      ]);
+      const transformed = await this.runStage(
+        "onRouteResolve",
+        context,
+        resolved,
+      );
       if (!transformed.ok) return transformed;
-      if ("shortCircuit" in transformed) return { ok: true, shortCircuit: { resolved, attempts: transformed.shortCircuit }, context: transformed.context };
-      return { ok: true, value: { resolved, attempts: Object.freeze([...transformed.value]) }, context: transformed.context };
+      if ("shortCircuit" in transformed)
+        return {
+          ok: true,
+          shortCircuit: { resolved, attempts: transformed.shortCircuit },
+          context: transformed.context,
+        };
+      return {
+        ok: true,
+        value: { resolved, attempts: Object.freeze([...transformed.value]) },
+        context: transformed.context,
+      };
     } catch (error: unknown) {
       return { ok: false, error: normalizeFailure(error, context.requestId) };
     }
@@ -734,14 +1092,22 @@ class DefaultGatewayExchange implements GatewayExchange {
         yield { type: "error", error: await this.fail(requestIdResult.error) };
         return;
       }
+      const trusted = trustedRoutingInput(
+        this.dependencies,
+        this.input,
+        requestIdResult.value,
+      );
       const translationContext: TranslationContext = {
         requestId: requestIdResult.value,
         signal: this.controller.signal,
-        trustedRoutingHeaders: {},
+        trustedRoutingHeaders: trusted.headers,
       };
-      const translated = this.dependencies.adapters
-        .ingress(this.input.path)
-        .translate(this.input, translationContext);
+      const translated = withTrustedRouting(
+        this.dependencies.adapters
+          .ingress(this.input.path, requestIdResult.value)
+          .translate(this.input, translationContext),
+        trusted,
+      );
       if (
         !validateCanonicalRequest(translated).valid ||
         translated.requestId !== requestIdResult.value ||
@@ -762,104 +1128,342 @@ class DefaultGatewayExchange implements GatewayExchange {
         };
         return;
       }
-      this.dispatchPolicySnapshot = this.dependencies.dispatchPolicies.snapshot();
+      this.dispatchPolicySnapshot =
+        this.dependencies.dispatchPolicies.snapshot();
       this.setContext(translated);
-      let stage = await this.runStage("onIngressReceived", this.context, translated);
-      if (!stage.ok) { yield { type: "error", error: await this.fail(stage.error) }; return; }
+      let stage = await this.runStage(
+        "onIngressReceived",
+        this.context,
+        translated,
+      );
+      if (!stage.ok) {
+        yield { type: "error", error: await this.fail(stage.error) };
+        return;
+      }
       if ("shortCircuit" in stage) {
         const cached = this.cachedResponse();
-        if (isGatewayError(cached)) { yield { type: "error", error: await this.fail(cached) }; return; }
+        if (isGatewayError(cached)) {
+          yield { type: "error", error: await this.fail(cached) };
+          return;
+        }
         yield* this.cachedChunks(cached, requireEgress);
         return;
       }
-      const effectiveDryRun = stage.value.routing.dryRun === true || this.context.getState<boolean>(DISPATCH_STATE_KEYS.dryRun) === true || this.dispatchPolicySnapshot.defaultDryRun;
-      const canonicalRequest: CanonicalRequest = effectiveDryRun ? Object.freeze({ ...stage.value, routing: Object.freeze({ ...stage.value.routing, dryRun: true }) }) : stage.value;
+      const effectiveDryRun =
+        stage.value.routing.dryRun === true ||
+        this.context.getState<boolean>(DISPATCH_STATE_KEYS.dryRun) === true ||
+        this.dispatchPolicySnapshot.defaultDryRun;
+      const canonicalRequest: CanonicalRequest = effectiveDryRun
+        ? Object.freeze({
+            ...stage.value,
+            routing: Object.freeze({ ...stage.value.routing, dryRun: true }),
+          })
+        : stage.value;
       this.context.setState(DISPATCH_STATE_KEYS.dryRun, effectiveDryRun);
       this.setContext(canonicalRequest);
-      stage = await this.runStage("onCanonicalTranslate", this.context, canonicalRequest);
-      if (!stage.ok) { yield { type: "error", error: await this.fail(stage.error) }; return; }
+      stage = await this.runStage(
+        "onCanonicalTranslate",
+        this.context,
+        canonicalRequest,
+      );
+      if (!stage.ok) {
+        yield { type: "error", error: await this.fail(stage.error) };
+        return;
+      }
       if ("shortCircuit" in stage) {
         const cached = this.cachedResponse();
-        if (isGatewayError(cached)) { yield { type: "error", error: await this.fail(cached) }; return; }
+        if (isGatewayError(cached)) {
+          yield { type: "error", error: await this.fail(cached) };
+          return;
+        }
         yield* this.cachedChunks(cached, requireEgress);
         return;
       }
       const postCanonicalRequest = stage.value;
-      const candidatesResult = await this.resolveRoutes(stage.context, postCanonicalRequest);
-      if (!candidatesResult.ok || !("value" in candidatesResult) || candidatesResult.value.attempts.length === 0) {
+      const candidatesResult = await this.resolveRoutes(
+        stage.context,
+        postCanonicalRequest,
+      );
+      if (
+        !candidatesResult.ok ||
+        !("value" in candidatesResult) ||
+        candidatesResult.value.attempts.length === 0
+      ) {
         yield {
           type: "error",
           error: await this.fail(
             candidatesResult.ok
-              ? safeError(this.context.requestId, "route_exhausted", "no eligible route candidate", "routing", 503, true)
+              ? safeError(
+                  this.context.requestId,
+                  "route_exhausted",
+                  "no eligible route candidate",
+                  "routing",
+                  503,
+                  true,
+                )
               : candidatesResult.error,
           ),
         };
         return;
       }
       const root = candidatesResult.value.resolved[0];
-      if (root === undefined) { yield { type: "error", error: await this.fail(safeError(this.context.requestId, "route_exhausted", "no eligible route candidate", "routing", 503, true)) }; return; }
+      if (root === undefined) {
+        yield {
+          type: "error",
+          error: await this.fail(
+            safeError(
+              this.context.requestId,
+              "route_exhausted",
+              "no eligible route candidate",
+              "routing",
+              503,
+              true,
+            ),
+          ),
+        };
+        return;
+      }
       const snapshot = this.dispatchPolicySnapshot;
-      if (snapshot === undefined) { yield { type: "error", error: await this.fail(safeError(this.context.requestId, "dispatch_policy_failed", "dispatch policy failed", "internal", 500, false)) }; return; }
+      if (snapshot === undefined) {
+        yield {
+          type: "error",
+          error: await this.fail(
+            safeError(
+              this.context.requestId,
+              "dispatch_policy_failed",
+              "dispatch policy failed",
+              "internal",
+              500,
+              false,
+            ),
+          ),
+        };
+        return;
+      }
       const rootPolicy = snapshot.resolve(root);
-      const ledger = new DispatchBudgetLedger(rootPolicy.attemptBudget, this.dependencies.clock, this.controller.signal, this.commitment);
+      const ledger = new DispatchBudgetLedger(
+        rootPolicy.attemptBudget,
+        this.dependencies.clock,
+        this.controller.signal,
+        this.commitment,
+      );
       let yielded = false;
-      for await (const candidate of new BoundedCandidateIterator(candidatesResult.value.attempts, rootPolicy.attemptBudget.maxAttempts, this.controller.signal)) {
+      for await (const candidate of new BoundedCandidateIterator(
+        candidatesResult.value.attempts,
+        rootPolicy.attemptBudget.maxAttempts,
+        this.controller.signal,
+      )) {
         if (this.commitment.isCommitted() && !yielded) break;
         const policy = snapshot.resolve(candidate);
-        if (ledger.blockReason(candidate) !== undefined || !this.dependencies.credentials.eligible(candidate.credentialId)) continue;
+        if (
+          ledger.blockReason(candidate) !== undefined ||
+          !this.dependencies.credentials.eligible(candidate.credentialId)
+        )
+          continue;
         this.setContext(postCanonicalRequest, candidate);
-        const before = await this.runStage("beforeUpstreamDispatch", this.context, postCanonicalRequest);
-        if (!before.ok) { yield { type: "error", error: await this.fail(before.error) }; return; }
+        const before = await this.runStage(
+          "beforeUpstreamDispatch",
+          this.context,
+          postCanonicalRequest,
+        );
+        if (!before.ok) {
+          yield { type: "error", error: await this.fail(before.error) };
+          return;
+        }
         if ("shortCircuit" in before) {
           const cached = this.cachedResponse();
-          if (isGatewayError(cached)) yield { type: "error", error: await this.fail(cached) };
+          if (isGatewayError(cached))
+            yield { type: "error", error: await this.fail(cached) };
           else yield* this.cachedChunks(cached, requireEgress);
           return;
         }
-        const estimate = this.context.getState<DispatchCostEstimate>(DISPATCH_STATE_KEYS.costEstimate);
-        if (estimate === undefined || !Number.isFinite(estimate.cost.totalUsd) || estimate.cost.totalUsd < 0) { yield { type: "error", error: await this.fail(safeError(this.context.requestId, "cost_estimate_failed", "cost estimate failed", "internal", 500, false)) }; return; }
+        const estimate = this.context.getState<DispatchCostEstimate>(
+          DISPATCH_STATE_KEYS.costEstimate,
+        );
+        if (
+          estimate === undefined ||
+          !Number.isFinite(estimate.cost.totalUsd) ||
+          estimate.cost.totalUsd < 0
+        ) {
+          yield {
+            type: "error",
+            error: await this.fail(
+              safeError(
+                this.context.requestId,
+                "cost_estimate_failed",
+                "cost estimate failed",
+                "internal",
+                500,
+                false,
+              ),
+            ),
+          };
+          return;
+        }
         if (effectiveDryRun) {
-          const dryRun: CanonicalResponse = { requestId: postCanonicalRequest.requestId, responseId: `${postCanonicalRequest.requestId}-dry-run`, createdAt: postCanonicalRequest.receivedAt, model: postCanonicalRequest.model, status: "completed", choices: [{ index: 0, output: [], finishReason: "stop" }], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, cost: estimate.cost, provider: { providerId: candidate.providerId, credentialId: "dry-run", physicalModel: candidate.physicalModel, responseHeaders: {}, upstreamStatus: 200 }, extensions: { custom: { dryRun: true, routeId: candidate.routeId, providerId: candidate.providerId, physicalModel: candidate.physicalModel, estimatedTokens: estimate.usage.totalTokens, estimatedCostUsd: estimate.cost.totalUsd, actualCostUsd: 0 } } };
+          const dryRun: CanonicalResponse = {
+            requestId: postCanonicalRequest.requestId,
+            responseId: `${postCanonicalRequest.requestId}-dry-run`,
+            createdAt: postCanonicalRequest.receivedAt,
+            model: postCanonicalRequest.model,
+            status: "completed",
+            choices: [{ index: 0, output: [], finishReason: "stop" }],
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            cost: estimate.cost,
+            provider: {
+              providerId: candidate.providerId,
+              credentialId: "dry-run",
+              physicalModel: candidate.physicalModel,
+              responseHeaders: {},
+              upstreamStatus: 200,
+            },
+            extensions: {
+              custom: {
+                dryRun: true,
+                routeId: candidate.routeId,
+                providerId: candidate.providerId,
+                physicalModel: candidate.physicalModel,
+                estimatedTokens: estimate.usage.totalTokens,
+                estimatedCostUsd: estimate.cost.totalUsd,
+                actualCostUsd: 0,
+              },
+            },
+          };
           yield* this.cachedChunks(dryRun, requireEgress);
           return;
         }
         try {
-          const provider = composeProviderDispatch(this.dependencies.providers.create(candidate.providerId), { candidate, policy, requestId: this.context.requestId, commitment: this.commitment, ledger, clock: this.dependencies.clock, credentials: this.dependencies.credentials, trace: this.dependencies.trace });
-          const providerIterator = provider.stream(candidate, before.value, this.controller.signal)[Symbol.asyncIterator]();
+          const provider = composeProviderDispatch(
+            this.dependencies.providers.create(candidate.providerId),
+            {
+              candidate,
+              policy,
+              requestId: this.context.requestId,
+              commitment: this.commitment,
+              ledger,
+              clock: this.dependencies.clock,
+              credentials: this.dependencies.credentials,
+              trace: this.dependencies.trace,
+            },
+          );
+          const providerIterator = provider
+            .stream(candidate, before.value, this.controller.signal)
+            [Symbol.asyncIterator]();
           this.iterator = providerIterator;
           this.iteratorClosed = false;
           let candidateYielded = false;
           while (!this.controller.signal.aborted) {
-            if (requireEgress && this.pendingEgress !== undefined) await this.pendingEgress.promise;
+            if (requireEgress && this.pendingEgress !== undefined)
+              await this.pendingEgress.promise;
             if (this.egressFailure !== undefined) return;
             const next = await providerIterator.next();
             if (next.done || next.value === undefined) break;
-            const chunkStage = await this.runStage("onStreamChunk", this.context, next.value);
-            if (!chunkStage.ok) { if (!this.controller.signal.aborted) yield { type: "error", error: await this.fail(chunkStage.error) }; return; }
-            if (!("value" in chunkStage)) { yield { type: "error", error: await this.fail(this.invalidEgress()) }; return; }
+            const chunkStage = await this.runStage(
+              "onStreamChunk",
+              this.context,
+              next.value,
+            );
+            if (!chunkStage.ok) {
+              if (!this.controller.signal.aborted)
+                yield {
+                  type: "error",
+                  error: await this.fail(chunkStage.error),
+                };
+              return;
+            }
+            if (!("value" in chunkStage)) {
+              yield {
+                type: "error",
+                error: await this.fail(this.invalidEgress()),
+              };
+              return;
+            }
             candidateYielded = true;
             yielded = true;
             this.canonicalReady = true;
-            if (requireEgress) { const gate = Promise.withResolvers<void>(); this.pendingEgress = { promise: gate.promise, resolve: gate.resolve, reject: gate.reject, settled: false }; this.egressUsed = false; this.egressPrepared = false; }
-            else if (!this.commitmentState.committed) this.commitmentState.committed = true;
+            if (requireEgress) {
+              const gate = Promise.withResolvers<void>();
+              this.pendingEgress = {
+                promise: gate.promise,
+                resolve: gate.resolve,
+                reject: gate.reject,
+                settled: false,
+              };
+              this.egressUsed = false;
+              this.egressPrepared = false;
+            } else if (!this.commitmentState.committed)
+              this.commitmentState.committed = true;
             yield chunkStage.value;
           }
           await this.closeIterator();
-          if (candidateYielded) { this.dependencies.credentials.success(candidate.credentialId); return; }
-          throw safeError(this.context.requestId, "upstream_empty_stream", "upstream stream ended without a response", "upstream", 502, true);
+          if (candidateYielded) {
+            this.dependencies.credentials.success(candidate.credentialId);
+            return;
+          }
+          throw safeError(
+            this.context.requestId,
+            "upstream_empty_stream",
+            "upstream stream ended without a response",
+            "upstream",
+            502,
+            true,
+          );
         } catch (value: unknown) {
           await this.closeIterator();
           const failure = dispatchFailure(value, this.context.requestId);
-          if (this.commitment.isCommitted() || yielded || !errorMayAdvance(failure)) { yield { type: "error", error: await this.fail(failure) }; return; }
-          try { this.dependencies.credentials.failure(candidate.credentialId, classifyCredentialFailure(failure)); } catch { yield { type: "error", error: await this.fail(safeError(this.context.requestId, "credential_policy_failed", "credential policy failed", "internal", 500, false)) }; return; }
+          if (
+            this.commitment.isCommitted() ||
+            yielded ||
+            !errorMayAdvance(failure)
+          ) {
+            yield { type: "error", error: await this.fail(failure) };
+            return;
+          }
+          try {
+            this.dependencies.credentials.failure(
+              candidate.credentialId,
+              classifyCredentialFailure(failure),
+            );
+          } catch {
+            yield {
+              type: "error",
+              error: await this.fail(
+                safeError(
+                  this.context.requestId,
+                  "credential_policy_failed",
+                  "credential policy failed",
+                  "internal",
+                  500,
+                  false,
+                ),
+              ),
+            };
+            return;
+          }
         }
       }
-      yield { type: "error", error: await this.fail(safeError(this.context.requestId, "route_exhausted", "no eligible route candidate", "routing", 503, true)) };
+      yield {
+        type: "error",
+        error: await this.fail(
+          safeError(
+            this.context.requestId,
+            "route_exhausted",
+            "no eligible route candidate",
+            "routing",
+            503,
+            true,
+          ),
+        ),
+      };
       return;
     } catch (error: unknown) {
       if (!this.controller.signal.aborted)
-        yield { type: "error", error: await this.fail(normalizeFailure(error, this.context.requestId)) };
+        yield {
+          type: "error",
+          error: await this.fail(
+            normalizeFailure(error, this.context.requestId),
+          ),
+        };
     } finally {
       await this.close();
     }

@@ -105,6 +105,7 @@ function freshConfig(): GatewayConfig {
 }
 const operational = {
   pluginsRegistered: true,
+  adaptersRegistered: true,
   credentials: { active: 1, cooldown: 0, critical_failure: 0, suspended: 0 },
   eligibleCredential: true,
   upstreamChecks: {
@@ -133,6 +134,7 @@ describe("ConfigurationCoordinator", () => {
       },
     });
     expect(Object.keys(snapshot).sort()).toEqual([
+      "adaptersRegistered",
       "checkedAt",
       "configValid",
       "credentials",
@@ -187,7 +189,12 @@ describe("ConfigurationCoordinator", () => {
     coordinator.publishValidated(freshConfig());
     coordinator.setOperationalState({
       ...operational,
-      credentials: { active: 999, cooldown: 999, critical_failure: 999, suspended: 999 },
+      credentials: {
+        active: 999,
+        cooldown: 999,
+        critical_failure: 999,
+        suspended: 999,
+      },
       eligibleCredential: true,
     });
     const [first, second] = await Promise.all([
@@ -288,6 +295,31 @@ describe("ConfigurationCoordinator", () => {
     expect(Object.isFrozen(snapshot.credentials)).toBe(true);
     expect(Object.isFrozen(snapshot.upstreamChecks)).toBe(true);
   });
+  it("keeps readiness false until adapter registration succeeds", async () => {
+    const coordinator = new ConfigurationCoordinator(clock);
+    coordinator.publishValidated(freshConfig());
+    coordinator.setOperationalState({
+      ...operational,
+      adaptersRegistered: false,
+    });
+    expect(await coordinator.check(new AbortController().signal)).toMatchObject(
+      {
+        ready: false,
+        status: "not_ready",
+        adaptersRegistered: false,
+      },
+    );
+
+    coordinator.setAdaptersRegistered(true);
+    expect(await coordinator.check(new AbortController().signal)).toMatchObject(
+      {
+        ready: true,
+        status: "healthy",
+        adaptersRegistered: true,
+      },
+    );
+  });
+
   it("keeps readiness closed until configured plugin registration succeeds", async () => {
     const coordinator = new ConfigurationCoordinator(clock);
     coordinator.publishValidated(freshConfig());

@@ -38,6 +38,20 @@ export type KnownCapability =
 /** Open capability name retaining unknown provider capabilities. */
 export type Capability = KnownCapability | (string & {});
 
+/**
+ * Protocol namespace identifying a translation family.
+ *
+ * Built-in names remain literal types while registered adapters may use a
+ * deployment-owned namespace. Runtime boundaries validate custom names before
+ * publishing or accepting canonical data.
+ */
+export type ProtocolNamespace =
+  | "openai-chat"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "custom"
+  | (string & {});
+
 /** Structured source pointer attached to generated or search text. */
 export interface Citation {
   kind:
@@ -295,9 +309,9 @@ export interface SamplingParameters {
 /** Routing policy constraints; this object carries no resolved credential. */
 export interface RoutingConstraints {
   modelAlias?: string;
-  requiredCapabilities?: Capability[];
-  preferredProviders?: string[];
-  excludedProviders?: string[];
+  requiredCapabilities?: ReadonlyArray<Capability>;
+  preferredProviders?: ReadonlyArray<string>;
+  excludedProviders?: ReadonlyArray<string>;
   overrideRoute?: string;
   maxCostUsd?: number;
   maxLatencyMs?: number;
@@ -349,8 +363,7 @@ export interface CanonicalRequest {
   receivedAt: string;
   source: {
     adapter: string;
-    protocol:
-      "openai-chat" | "openai-responses" | "anthropic-messages" | "custom";
+    protocol: ProtocolNamespace;
     path: string;
   };
   model: string;
@@ -585,8 +598,7 @@ export interface GatewayError {
 
 /** Lossless fields belonging to a source protocol. */
 export interface ProtocolParameterSet {
-  protocol:
-    "openai-chat" | "openai-responses" | "anthropic-messages" | "custom";
+  protocol: ProtocolNamespace;
   body: Record<string, JsonValue>;
   headers: Record<string, string>;
   sourceFields: ReadonlyArray<string>;

@@ -39,12 +39,11 @@ const ROLES: Record<string, true> = {
   assistant: true,
   tool: true,
 };
-const PROTOCOLS: Record<string, true> = {
-  "openai-chat": true,
-  "openai-responses": true,
-  "anthropic-messages": true,
-  custom: true,
-};
+const PROTOCOL_NAMESPACE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+
+function validProtocolNamespace(value: unknown): value is string {
+  return typeof value === "string" && PROTOCOL_NAMESPACE_PATTERN.test(value);
+}
 
 function invalid(
   code: ValidationIssueCode,
@@ -630,11 +629,17 @@ function validateExtensions(value: unknown, path: string): ValidationResult {
           });
           continue;
         }
-        if (PROTOCOLS[String(entry["protocol"])] !== true)
+        if (!validProtocolNamespace(entry["protocol"]))
           issues.push({
             code: "invalid_extension",
             path: `${entryPath}.protocol`,
-            message: "Expected a known canonical protocol.",
+            message: "Expected a safe protocol namespace.",
+          });
+        else if (entry["protocol"] !== name)
+          issues.push({
+            code: "invalid_extension",
+            path: `${entryPath}.protocol`,
+            message: "Expected the protocol to match its extension namespace.",
           });
         if (!objectValue(entry["body"]) || !isJsonValue(entry["body"]))
           issues.push({
@@ -754,11 +759,11 @@ export function validateCanonicalRequest(value: unknown): ValidationResult {
         path: "source.adapter",
         message: "Expected a non-empty adapter name.",
       });
-    if (PROTOCOLS[String(source["protocol"])] !== true)
+    if (!validProtocolNamespace(source["protocol"]))
       issues.push({
         code: "invalid_canonical_request",
         path: "source.protocol",
-        message: "Expected a known canonical protocol.",
+        message: "Expected a safe protocol namespace.",
       });
     if (typeof source["path"] !== "string" || source["path"].length === 0)
       issues.push({

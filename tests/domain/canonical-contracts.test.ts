@@ -305,6 +305,33 @@ describe("canonical request", () => {
       expect(result.issues.some((issue) => issue.path === path)).toBe(true);
   });
 
+  it("accepts a bounded custom namespace and enforces its extension key", () => {
+    const valid = structuredClone(completeRequest);
+    valid.source.protocol = "x";
+    valid.extensions = {
+      protocols: {
+        x: {
+          protocol: "x",
+          body: {},
+          headers: {},
+          sourceFields: [],
+        },
+      },
+    };
+    expect(validateCanonicalRequest(valid)).toEqual({ valid: true });
+
+    const mismatched = structuredClone(valid);
+    mismatched.extensions!.protocols!["x"]!.protocol = "other";
+    const result = validateCanonicalRequest(mismatched);
+    expect(result.valid).toBe(false);
+    if (!result.valid)
+      expect(result.issues).toContainEqual({
+        code: "invalid_extension",
+        path: "extensions.protocols.x.protocol",
+        message: "Expected the protocol to match its extension namespace.",
+      });
+  });
+
   it("rejects invalid recursive extensions at stable paths", () => {
     const value = structuredClone(completeRequest) as unknown as Record<
       string,

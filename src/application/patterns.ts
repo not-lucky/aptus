@@ -6,6 +6,7 @@ import type {
   ContentBlock,
   GatewayError,
   JsonValue,
+  ProtocolNamespace,
 } from "../domain/index.js";
 import type { ProviderDispatchPort } from "../ports/dispatch.js";
 import type {
@@ -26,13 +27,9 @@ export type { CredentialState, CredentialStatePort } from "../ports/index.js";
 /** Creates protocol translation ports for an injected protocol namespace. */
 export interface ProtocolAdapterFactory {
   /** Creates an ingress adapter for a canonical source protocol. */
-  createIngress(
-    protocol: CanonicalRequest["source"]["protocol"],
-  ): IngressTranslationAdapter;
+  createIngress(protocol: ProtocolNamespace): IngressTranslationAdapter;
   /** Creates an egress adapter for a canonical source protocol. */
-  createEgress(
-    protocol: CanonicalRequest["source"]["protocol"],
-  ): EgressTranslationAdapter;
+  createEgress(protocol: ProtocolNamespace): EgressTranslationAdapter;
 }
 
 /** Creates provider dispatch ports without exposing SDK implementations. */
@@ -106,11 +103,12 @@ export type PluginGroup = ReadonlyArray<GatewayPlugin>;
 
 /** Registry for path and protocol translation adapters. */
 export interface AdapterRegistry {
-  /** Looks up an ingress adapter by route path. */
-  ingress(path: string): IngressTranslationAdapter;
-  /** Looks up an egress adapter by canonical source protocol. */
+  /** Looks up an ingress adapter by route path or throws a typed safe failure. */
+  ingress(path: string, requestId?: string): IngressTranslationAdapter;
+  /** Looks up an egress adapter by canonical source protocol or throws safely. */
   egress(
-    protocol: CanonicalRequest["source"]["protocol"],
+    protocol: ProtocolNamespace,
+    requestId?: string,
   ): EgressTranslationAdapter;
 }
 
