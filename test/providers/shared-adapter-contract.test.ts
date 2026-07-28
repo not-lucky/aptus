@@ -236,6 +236,15 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(obs.beforeClientBytes, true);
     });
 
+    test("classify records Retry-After on 503 and 529 for key-pool cooldown", () => {
+      const adapter = tc.factory();
+      for (const status of [503, 529]) {
+        const obs = adapter.classify({ status, headers: { "retry-after": "7" } });
+        assert.equal(obs.result, "unavailable", `status ${status}`);
+        assert.equal(obs.retryDelayMs, 7000, `status ${status}`);
+      }
+    });
+
     test("classify parses a Retry-After HTTP-date on 429", () => {
       const adapter = tc.factory();
       const futureDate = new Date(Date.now() + 60_000).toUTCString();
@@ -245,10 +254,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       const { retryDelayMs } = obs;
       assert.ok(retryDelayMs !== undefined, "HTTP-date Retry-After should parse");
       if (retryDelayMs !== undefined) {
-        assert.ok(
-          retryDelayMs > 50_000 && retryDelayMs <= 60_000,
-          `expected ~60s delay, got ${retryDelayMs}`,
-        );
+        assert.ok(retryDelayMs > 50_000 && retryDelayMs <= 60_000, `expected ~60s delay, got ${retryDelayMs}`);
       }
     });
 
@@ -259,6 +265,21 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(obs.result, "rate_limit");
       assert.equal(obs.retryDelayMs, undefined);
       assert.equal(obs.beforeClientBytes, true);
+    });
+
+    test("classify parses HTTP-date Retry-After deterministically from injected nowMs", () => {
+      const adapter = tc.factory();
+      const fixedNow = Date.parse("2026-01-01T00:00:00.000Z");
+
+      const future = new Date(fixedNow + 60_000).toUTCString();
+      const obs = adapter.classify({ status: 429, headers: { "retry-after": future } }, fixedNow);
+      assert.equal(obs.result, "rate_limit");
+      assert.equal(obs.retryDelayMs, 60_000);
+
+      const past = new Date(fixedNow - 60_000).toUTCString();
+      const expired = adapter.classify({ status: 429, headers: { "retry-after": past } }, fixedNow);
+      assert.equal(expired.result, "rate_limit");
+      assert.equal(expired.retryDelayMs, undefined);
     });
 
     test("buildModelList returns valid catalog envelope for populated and empty lists", () => {

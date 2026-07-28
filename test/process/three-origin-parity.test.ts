@@ -1,18 +1,12 @@
 import assert from "node:assert/strict";
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "vitest";
-import { completeYaml } from "../config/yaml.js";
+import { postJson, seededSecrets, startAptusCli, type RunningCli } from "../helpers/cli-process.js";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.js";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.js";
 import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.js";
-import { type ThreeOriginHarness, createThreeOriginHarness } from "../helpers/three-origin-harness.js";
-
-const REPO = resolve(import.meta.dirname, "..", "..");
-const CLI = join(REPO, "src", "bootstrap", "cli.ts");
-const TSX_CLI = join(REPO, "node_modules", "tsx", "dist", "cli.mjs");
+import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.js";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
@@ -23,28 +17,7 @@ const ENV_NAMES = [
   "ANTHROPIC_KEY_A",
 ] as const;
 
-function seededEnv(caseName: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (let index = 0; index < ENV_NAMES.length; index++) {
-    env[ENV_NAMES[index] as string] = `aptus-parity-${caseName}-${index}`;
-  }
-  return env;
-}
-
-function mergedEnv(env: Record<string, string>): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of ENV_NAMES) delete merged[name];
-  for (const [key, value] of Object.entries(env)) merged[key] = value;
-  return merged;
-}
-
-interface RunningCli {
-  child: ChildProcess;
-  clientPort: number;
-  operationsPort: number;
-  stdout: string;
-  traceRoot: string;
-}
+const seededEnv = (caseName: string) => seededSecrets(caseName, ENV_NAMES, "aptus-parity");
 
 const RESPONSES_MODEL_SNIPPET = `  - name: responses-main
     aliases: [responses-default]
@@ -95,60 +68,28 @@ const MULTI_ROUTE_SNIPPET = `  - name: multi-protocol-route
         maxOutputTokens: null
 `;
 
-async function startCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningCli> {
-  const dir = mkdtempSync(join(tmpdir(), `aptus-parity-${caseName}-`));
-  const traceRoot = join(dir, "traces");
-  const env = seededEnv(caseName);
-
-  const baseConfig = completeYaml({
-    "  port: 8080": "  port: 0",
-    "  port: 9090": "  port: 0",
-    "  root: ./traces": `  root: ${traceRoot}`,
-    "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${harness.chatOrigin.baseUrl}`,
-    "    baseUrl: https://api.openai.com/v1": `    baseUrl: ${harness.responsesOrigin.baseUrl}`,
-    "    baseUrl: https://api.anthropic.com": `    baseUrl: ${harness.messagesOrigin.baseUrl}`,
-    "      allow: [gpt-main, claude-main, reliable-chat]":
-      "      allow: [gpt-main, claude-main, reliable-chat, responses-main, multi-protocol-route]",
-    "models:\n": `models:\n${RESPONSES_MODEL_SNIPPET}`,
-    "routes:\n": `routes:\n${MULTI_ROUTE_SNIPPET}`,
+function startCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningCli> {
+  return startAptusCli({
+    casePrefix: "aptus-parity",
+    caseName,
+    envNames: ENV_NAMES,
+    secretPrefix: "aptus-parity",
+    replacements: {
+      "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${harness.chatOrigin.baseUrl}`,
+      "    baseUrl: https://api.openai.com/v1": `    baseUrl: ${harness.responsesOrigin.baseUrl}`,
+      "    baseUrl: https://api.anthropic.com": `    baseUrl: ${harness.messagesOrigin.baseUrl}`,
+      "      allow: [gpt-main, claude-main, reliable-chat]":
+        "      allow: [gpt-main, claude-main, reliable-chat, responses-main, multi-protocol-route]",
+      "models:\n": `models:\n${RESPONSES_MODEL_SNIPPET}`,
+      "routes:\n": `routes:\n${MULTI_ROUTE_SNIPPET}`,
+    },
   });
-
-  writeFileSync(join(dir, "aptus.yaml"), baseConfig);
-
-  const child = spawn(
-    process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
-
-  let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-  });
-
-  await waitFor(() => /^aptus ready: /m.test(stdout), "ready line", child);
-  const match = /aptus ready: operations http:\/\/[^:]+:(\d+), client http:\/\/[^:]+:(\d+)/.exec(stdout);
-  assert.ok(match, `ready line parsed: ${stdout}`);
-
-  return {
-    child,
-    clientPort: Number(match[2]),
-    operationsPort: Number(match[1]),
-    stdout,
-    traceRoot,
-  };
-}
-
-async function waitFor(condition: () => boolean, label: string, child: ChildProcess): Promise<void> {
-  const deadline = Date.now() + 20_000;
-  while (!condition()) {
-    if (Date.now() > deadline || child.exitCode !== null) throw new Error(`timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
 }
 
 function traceDirectories(traceRoot: string): string[] {
-  return readdirSync(traceRoot).filter((name) => !name.startsWith(".")).sort();
+  return readdirSync(traceRoot)
+    .filter((name) => !name.startsWith("."))
+    .sort();
 }
 
 function traceSourceProtocol(traceRoot: string, dir: string): string | undefined {
@@ -156,19 +97,6 @@ function traceSourceProtocol(traceRoot: string, dir: string): string | undefined
     sourceProtocol?: string;
   };
   return manifest.sourceProtocol;
-}
-
-async function postJson(
-  port: number,
-  path: string,
-  auth: { name: string; value: string },
-  body: string,
-): Promise<Response> {
-  return fetch(`http://127.0.0.1:${port}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", [auth.name]: auth.value },
-    body,
-  });
 }
 
 test.concurrent("process: concurrent requests across 3 simultaneous origins succeed with byte parity", async () => {

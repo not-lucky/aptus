@@ -68,6 +68,12 @@ export interface MetricsRegistry {
     outcomeCategory: string,
   ): void;
 
+  /** Records one scheduled same-candidate retry. */
+  retries(targetProtocol: string, provider: string, outcomeCategory: string): void;
+
+  /** Records one route transition to a next candidate. */
+  fallbacks(endpointProtocol: string, targetProtocol: string, publicName: string, outcomeCategory: string): void;
+
   /** Sets the available enabled keys gauge for a provider pool. */
   keyPoolAvailable(targetProtocol: string, provider: string, count: number): void;
 
@@ -132,6 +138,18 @@ export function createMetricsRegistry(): MetricsRegistry {
     name: "aptus_candidate_skips_total",
     help: "Candidate Preflight skips with zero dispatch.",
     labelNames: ["endpoint_protocol", "target_protocol", "provider", "public_name", "outcome_category"],
+    registers: [registry],
+  });
+  const retriesCounter = new Counter({
+    name: "aptus_retries_total",
+    help: "Scheduled same-Candidate retries.",
+    labelNames: ["target_protocol", "provider", "outcome_category"],
+    registers: [registry],
+  });
+  const fallbacksCounter = new Counter({
+    name: "aptus_fallbacks_total",
+    help: "Route transitions to a next Candidate.",
+    labelNames: ["endpoint_protocol", "target_protocol", "public_name", "outcome_category"],
     registers: [registry],
   });
   const keyPoolAvailableGauge = new Gauge({
@@ -216,6 +234,21 @@ export function createMetricsRegistry(): MetricsRegistry {
         endpoint_protocol: endpointProtocol,
         target_protocol: targetProtocol,
         provider,
+        public_name: publicName,
+        outcome_category: outcomeCategory,
+      });
+    },
+    retries(targetProtocol, provider, outcomeCategory) {
+      retriesCounter.inc({
+        target_protocol: targetProtocol,
+        provider,
+        outcome_category: outcomeCategory,
+      });
+    },
+    fallbacks(endpointProtocol, targetProtocol, publicName, outcomeCategory) {
+      fallbacksCounter.inc({
+        endpoint_protocol: endpointProtocol,
+        target_protocol: targetProtocol,
         public_name: publicName,
         outcome_category: outcomeCategory,
       });

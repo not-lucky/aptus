@@ -4,12 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 /**
  * Response delivery modes supported by the provider origin.
  */
-export type ResponseMode =
-  | "complete"
-  | "sse"
-  | "pre-header-disconnect"
-  | "post-header-disconnect"
-  | "held-open";
+export type ResponseMode = "complete" | "sse" | "pre-header-disconnect" | "post-header-disconnect" | "held-open";
 
 /**
  * A queued response the origin serves (FIFO) to the next request.
@@ -23,6 +18,8 @@ export interface QueuedResponse {
   readonly mode?: ResponseMode;
   /** Serves `count` same-path redirects before falling through to the final response. */
   readonly redirect?: { readonly location: string; readonly count: number };
+  /** Delays the response head (and everything after it) to exercise dispatch deadlines. */
+  readonly headDelayMs?: number;
 }
 
 /**
@@ -156,6 +153,10 @@ async function serveResponse(
   if (item.mode === "pre-header-disconnect") {
     req.socket.destroy();
     return;
+  }
+
+  if (item.headDelayMs !== undefined && item.headDelayMs > 0) {
+    await delay(item.headDelayMs);
   }
 
   // Redirect hops are re-queued so the same item serves the final response after `count` hops.

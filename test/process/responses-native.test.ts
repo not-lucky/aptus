@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "vitest";
-import { completeYaml } from "../config/yaml.js";
-import { type ProviderOrigin, createProviderOrigin } from "../helpers/provider-origin.js";
+import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.js";
+import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.js";
 import {
   COMPLETE_RESPONSES_BYTES,
   ERROR_RESPONSES_BYTES,
@@ -17,10 +15,6 @@ import {
   SSE_RESPONSES_INCOMPLETE_BYTES,
 } from "../helpers/responses-fixtures.js";
 
-const REPO = resolve(import.meta.dirname, "..", "..");
-const CLI = join(REPO, "src", "bootstrap", "cli.ts");
-const TSX_CLI = join(REPO, "node_modules", "tsx", "dist", "cli.mjs");
-
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
   "APTUS_CLIENT_OPERATOR",
@@ -30,28 +24,12 @@ const ENV_NAMES = [
   "ANTHROPIC_KEY_A",
 ] as const;
 
-function seededEnv(caseName: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (let index = 0; index < ENV_NAMES.length; index++) {
-    env[ENV_NAMES[index] as string] = `aptus-responses-${caseName}-${index}`;
-  }
-  return env;
-}
+const seededEnv = (caseName: string) => seededSecrets(caseName, ENV_NAMES, "aptus-responses");
 
-function mergedEnv(env: Record<string, string>): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of ENV_NAMES) delete merged[name];
-  for (const [key, value] of Object.entries(env)) merged[key] = value;
-  return merged;
-}
-
-interface RunningCli {
-  child: ChildProcess;
-  clientPort: number;
-  operationsPort: number;
-  stdout: string;
-  traceRoot: string;
-}
+const bearer = (secret: string): { name: string; value: string } => ({
+  name: "authorization",
+  value: `Bearer ${secret}`,
+});
 
 const RESPONSES_MODEL_SNIPPET = `  - name: responses-main
     aliases: [responses-default]
@@ -85,66 +63,18 @@ const RESPONSES_MODEL_SNIPPET = `  - name: responses-main
       cacheWriteUsdPerMillionTokens: null
 `;
 
-async function startCli(origin: ProviderOrigin, caseName: string): Promise<RunningCli> {
-  const dir = mkdtempSync(join(tmpdir(), `aptus-responses-${caseName}-`));
-  const traceRoot = join(dir, "traces");
-  const env = seededEnv(caseName);
-
-  const baseConfig = completeYaml({
-    "  port: 8080": "  port: 0",
-    "  port: 9090": "  port: 0",
-    "  root: ./traces": `  root: ${traceRoot}`,
-    "    baseUrl: https://api.openai.com/v1\n": `    baseUrl: ${origin.baseUrl}\n`,
-    "      allow: [gpt-main, claude-main, reliable-chat]":
-      "      allow: [gpt-main, claude-main, reliable-chat, responses-main]",
-    "models:\n": `models:\n${RESPONSES_MODEL_SNIPPET}`,
-  });
-
-  writeFileSync(join(dir, "aptus.yaml"), baseConfig);
-
-  const child = spawn(
-    process.execPath,
-    ["--disable-warning=DEP0205", TSX_CLI, CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
-
-  let stdout = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-  });
-
-  await waitFor(() => /^aptus ready: /m.test(stdout), "ready line", child);
-  const match = /aptus ready: operations http:\/\/[^:]+:(\d+), client http:\/\/[^:]+:(\d+)/.exec(stdout);
-  assert.ok(match, `ready line parsed: ${stdout}`);
-
-  return {
-    child,
-    clientPort: Number(match[2]),
-    operationsPort: Number(match[1]),
-    stdout,
-    traceRoot,
-  };
-}
-
-function traceFiles(traceRoot: string): string[] {
-  const dir = readdirSync(traceRoot).find((name) => !name.startsWith("."));
-  if (dir === undefined) return [];
-  return readdirSync(join(traceRoot, dir)).sort();
-}
-
-async function waitFor(condition: () => boolean, label: string, child: ChildProcess): Promise<void> {
-  const deadline = Date.now() + 20_000;
-  while (!condition()) {
-    if (Date.now() > deadline || child.exitCode !== null) throw new Error(`timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
-
-async function postJson(port: number, path: string, auth: string, body: string): Promise<Response> {
-  return fetch(`http://127.0.0.1:${port}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${auth}` },
-    body,
+function startCli(origin: ProviderOrigin, caseName: string): Promise<RunningCli> {
+  return startAptusCli({
+    casePrefix: "aptus-responses",
+    caseName,
+    envNames: ENV_NAMES,
+    secretPrefix: "aptus-responses",
+    replacements: {
+      "    baseUrl: https://api.openai.com/v1\n": `    baseUrl: ${origin.baseUrl}\n`,
+      "      allow: [gpt-main, claude-main, reliable-chat]":
+        "      allow: [gpt-main, claude-main, reliable-chat, responses-main]",
+      "models:\n": `models:\n${RESPONSES_MODEL_SNIPPET}`,
+    },
   });
 }
 
@@ -159,7 +89,7 @@ test.concurrent("process: complete Responses native path applies mutation and re
     const response = await postJson(
       cli.clientPort,
       "/responses",
-      env.APTUS_CLIENT_PRIMARY as string,
+      bearer(env.APTUS_CLIENT_PRIMARY),
       JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, unknown_custom: [42] }),
     );
     assert.equal(response.status, 200);
@@ -192,7 +122,7 @@ test.concurrent("process: complete Responses native path applies mutation and re
     const responseV1 = await postJson(
       cli.clientPort,
       "/v1/responses",
-      env.APTUS_CLIENT_PRIMARY as string,
+      bearer(env.APTUS_CLIENT_PRIMARY),
       JSON.stringify(MINIMAL_RESPONSES_REQUEST),
     );
     assert.equal(responseV1.status, 200);
@@ -221,7 +151,7 @@ test.concurrent("process: SSE Responses relays exact named events with no [DONE]
     const response = await postJson(
       cli.clientPort,
       "/responses",
-      env.APTUS_CLIENT_PRIMARY as string,
+      bearer(env.APTUS_CLIENT_PRIMARY),
       JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, stream: true }),
     );
     assert.equal(response.status, 200);
@@ -272,7 +202,7 @@ test.concurrent("process: Responses stream terminal variants (failed, incomplete
       const response = await postJson(
         cli.clientPort,
         "/responses",
-        env.APTUS_CLIENT_PRIMARY as string,
+        bearer(env.APTUS_CLIENT_PRIMARY),
         JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, stream: true }),
       );
       assert.equal(response.status, 200);
@@ -300,7 +230,7 @@ test.concurrent("process: Responses terminal non-2xx HTTP error is relayed with 
     const response = await postJson(
       cli.clientPort,
       "/responses",
-      env.APTUS_CLIENT_PRIMARY as string,
+      bearer(env.APTUS_CLIENT_PRIMARY),
       JSON.stringify(MINIMAL_RESPONSES_REQUEST),
     );
     assert.equal(response.status, 400);

@@ -8,19 +8,38 @@ import type {
   ProtocolAdapter,
   Result,
 } from "../../domain/contracts.js";
-import type { NormalizedFailure } from "../../domain/operations.js";
-import { filterOutboundHeaders, type OutboundAuth } from "./headers.js";
+import type { IrFailureCategory, NormalizedFailure } from "../../domain/operations.js";
+import { filterOutboundHeaders, type OutboundAuth, parseRetryAfter } from "./headers.js";
 import { applyNativeMutations } from "./mutation.js";
 
 const encoder = new TextEncoder();
 
 /**
+ * Explicit non-2xx provider statuses with a dedicated failure category; every
+ * other non-2xx status classifies as `"provider"`. The table is shared by all
+ * three protocols except HTTP 422, which the adapter spec supplies.
+ */
+const STATUS_CATEGORIES: ReadonlyMap<number, IrFailureCategory> = new Map([
+  [400, "invalid_request"],
+  [401, "authentication"],
+  [403, "permission"],
+  [404, "not_found"],
+  [408, "timeout"],
+  [409, "conflict"],
+  [413, "payload_too_large"],
+  [500, "unavailable"],
+  [503, "unavailable"],
+  [504, "timeout"],
+  [529, "unavailable"],
+]);
+
+/**
  * The protocol-specific facts one native adapter supplies.
  *
  * The shared factory owns everything identical across the three protocols
- * (public-model read, mutation pipeline, outbound header filtering, and body
- * encoding). Each protocol module contributes only its wire facts: create
- * path, auth header, response classification, and model-list envelope.
+ * (public-model read, mutation pipeline, outbound header filtering, response
+ * classification, and body encoding). Each protocol module contributes only
+ * its wire facts: create path, auth header, and model-list envelope.
  */
 export interface NativeAdapterSpec {
   /** Protocol identifier handled by this adapter. */
@@ -32,8 +51,8 @@ export interface NativeAdapterSpec {
   /** Builds the outbound auth header from the selected provider secret. */
   readonly createAuth: (secret: string) => OutboundAuth;
 
-  /** Maps a response head (status + optional Retry-After) into an observation. */
-  readonly classify: (status: number, retryAfter?: string) => AttemptObservation;
+  /** Failure category for HTTP 422: `"invalid_request"` where the protocol validates with 422 (OpenAI), `"provider"` where it is not a defined status (Anthropic). */
+  readonly category422: IrFailureCategory;
 
   /** Builds the protocol-native model catalog list envelope. */
   readonly buildModelList: (input: ModelListInput) => JsonObject;
@@ -50,7 +69,7 @@ export interface NativeAdapterSpec {
  * name, since a protocol adapter is shared across every provider of that
  * protocol.
  *
- * @param spec - Protocol create path, auth, classification, and catalog facts.
+ * @param spec - Protocol create path, auth, and catalog facts.
  * @returns A fully implemented native {@link ProtocolAdapter}.
  */
 export function createNativeAdapter(spec: NativeAdapterSpec): ProtocolAdapter {
@@ -87,11 +106,45 @@ export function createNativeAdapter(spec: NativeAdapterSpec): ProtocolAdapter {
       };
     },
 
-    classify(response): AttemptObservation {
-      return spec.classify(response.status, response.headers["retry-after"]);
+    classify(response, nowMs): AttemptObservation {
+      if (response.status === 422) {
+        return withRetryDelay({ result: spec.category422, status: 422 }, response.headers["retry-after"], nowMs);
+      }
+      return classifyNativeStatus(response.status, response.headers["retry-after"], nowMs);
     },
 
     buildModelList: spec.buildModelList,
+  };
+}
+
+/**
+ * Maps a provider response head into a normalized attempt observation.
+ *
+ * Runs before any client bytes, so `beforeClientBytes` is always `true`. A
+ * parseable `Retry-After` is recorded as `retryDelayMs` for every non-2xx
+ * status; the key pool decides whether it overrides the fixed cooldown.
+ */
+function classifyNativeStatus(status: number, retryAfter: string | undefined, nowMs?: number): AttemptObservation {
+  if (status >= 200 && status < 300) {
+    return { result: "success", status, beforeClientBytes: true };
+  }
+  return withRetryDelay(
+    { result: status === 429 ? "rate_limit" : (STATUS_CATEGORIES.get(status) ?? "provider"), status },
+    retryAfter,
+    nowMs,
+  );
+}
+
+function withRetryDelay(
+  observation: { readonly result: AttemptObservation["result"]; readonly status: number },
+  retryAfter: string | undefined,
+  nowMs?: number,
+): AttemptObservation {
+  const retryDelayMs = parseRetryAfter(retryAfter, nowMs);
+  return {
+    ...observation,
+    ...(retryDelayMs === undefined ? {} : { retryDelayMs }),
+    beforeClientBytes: true,
   };
 }
 

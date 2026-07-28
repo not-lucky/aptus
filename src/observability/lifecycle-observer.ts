@@ -13,10 +13,14 @@ export type AttemptResult = "success" | IrFailureCategory | "client_cancelled";
  * Request-scoped telemetry helpers used by the Gateway (and bootstrap) in
  * addition to the canonical {@link LifecycleObserver}.
  *
- * This is the single observability seam into the Gateway. Each helper emits a
- * documented LogTape event and/or updates one Prometheus metric. The Gateway
- * declares a structurally identical local interface so that `routing` never
- * imports `observability`.
+ * The Gateway emits every documented {@link LifecycleEvent} through
+ * {@link LifecycleObserver.observe}, and additionally calls one full-context
+ * named helper per event. The named helpers carry the metric-label facts the
+ * minimal event payloads omit (provider, public name, target protocol), so
+ * this production observer records every log and metric through them and
+ * leaves `observe` as a no-op. The canonical `observe` stream remains the
+ * documented routing-fact contract for tests and future observers; the two
+ * channels are two views of the same transitions, never two emission points.
  */
 export interface GatewayObservability extends LifecycleObserver {
   /** Request admitted: in-flight gauge + `aptus.request.ingress`. */
@@ -64,6 +68,12 @@ export interface GatewayObservability extends LifecycleObserver {
   /** `aptus.response.first_byte` log. */
   firstByte(fields: { aptusRequestId: string; attemptNumber: number; durationMs: number }): void;
 
+  /** `aptus.retry.scheduled` log + `aptus_retries_total`. */
+  retryScheduled(fields: RetryScheduledFields): void;
+
+  /** `aptus.fallback.selected` log + `aptus_fallbacks_total`. */
+  fallbackSelected(fields: FallbackSelectedFields): void;
+
   /** `aptus.request.completed` log + duration and TTFF histograms. */
   completed(fields: CompletedFields): void;
 
@@ -75,6 +85,36 @@ export interface GatewayObservability extends LifecycleObserver {
 
   /** `aptus.trace.failure` log + `aptus_trace_write_failures_total`. */
   traceFailure(fields: { aptusRequestId: string | undefined; operation: string; safeErrorCode: string }): void;
+}
+
+/**
+ * Fields for a scheduled retry.
+ */
+export interface RetryScheduledFields {
+  readonly aptusRequestId: string;
+  readonly attemptNumber: number;
+  readonly provider: string;
+  readonly targetProtocol: Protocol;
+  readonly category: IrFailureCategory;
+  /**
+   * Cooldown scheduled on the failed key (base + jitter, capped). This equals
+   * the actual wait only when no other enabled key is available to rotate to;
+   * with key rotation the retry proceeds immediately despite a non-zero value.
+   */
+  readonly delayMs: number;
+}
+
+/**
+ * Fields for a selected candidate fallback.
+ */
+export interface FallbackSelectedFields {
+  readonly aptusRequestId: string;
+  readonly endpointProtocol: Protocol;
+  readonly targetProtocol: Protocol;
+  readonly publicName: string;
+  readonly fromCandidateIndex: number;
+  readonly toCandidateIndex: number;
+  readonly category: IrFailureCategory;
 }
 
 /**
@@ -152,34 +192,10 @@ export function createLifecycleObserver(options: LifecycleObserverOptions): Life
   const { logger, metrics, loggingEnabled, metricsEnabled } = options;
 
   return {
-    observe(event: LifecycleEvent): void {
-      // The canonical routing events are carried with full context through the
-      // named helpers below. `retry_scheduled` and `fallback_selected` are
-      // logged here because they carry all of their documented fields.
-      switch (event.type) {
-        case "retry_scheduled":
-          if (loggingEnabled) {
-            logger.info("aptus.retry.scheduled", {
-              aptusRequestId: event.aptusRequestId,
-              attemptNumber: event.attemptNumber,
-              category: event.category,
-              delayMs: event.delayMs,
-            });
-          }
-          break;
-        case "fallback_selected":
-          if (loggingEnabled) {
-            logger.info("aptus.fallback.selected", {
-              aptusRequestId: event.aptusRequestId,
-              fromCandidateIndex: event.fromCandidateIndex,
-              toCandidateIndex: event.toCandidateIndex,
-              category: event.category,
-            });
-          }
-          break;
-        default:
-          break;
-      }
+    observe(_event: LifecycleEvent): void {
+      // Canonical routing facts only. Logs and metrics are recorded by the
+      // named helpers above, which carry the full label context the minimal
+      // event payloads omit; `observe` intentionally does not double-emit.
     },
 
     requestIngress(fields) {
@@ -296,6 +312,35 @@ export function createLifecycleObserver(options: LifecycleObserverOptions): Life
           attemptNumber: fields.attemptNumber,
           durationMs: fields.durationMs,
         });
+      }
+    },
+
+    retryScheduled(fields) {
+      if (loggingEnabled) {
+        logger.info("aptus.retry.scheduled", {
+          aptusRequestId: fields.aptusRequestId,
+          attemptNumber: fields.attemptNumber,
+          provider: fields.provider,
+          category: fields.category,
+          delayMs: fields.delayMs,
+        });
+      }
+      if (metricsEnabled) {
+        metrics.retries(fields.targetProtocol, fields.provider, fields.category);
+      }
+    },
+
+    fallbackSelected(fields) {
+      if (loggingEnabled) {
+        logger.info("aptus.fallback.selected", {
+          aptusRequestId: fields.aptusRequestId,
+          fromCandidateIndex: fields.fromCandidateIndex,
+          toCandidateIndex: fields.toCandidateIndex,
+          category: fields.category,
+        });
+      }
+      if (metricsEnabled) {
+        metrics.fallbacks(fields.endpointProtocol, fields.targetProtocol, fields.publicName, fields.category);
       }
     },
 

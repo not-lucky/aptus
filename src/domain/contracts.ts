@@ -485,9 +485,12 @@ export interface ProtocolAdapter {
    * Classifies an upstream response head into a normalized attempt observation.
    *
    * @param response - Response status and filtered headers.
+   * @param nowMs - Optional wall-clock Unix epoch milliseconds used to parse
+   * absolute HTTP-date `Retry-After` headers deterministically. Defaults to the
+   * current wall-clock time when omitted.
    * @returns An {@link AttemptObservation} indicating outcome and retry metadata.
    */
-  classify(response: ProviderResponseHead): AttemptObservation;
+  classify(response: ProviderResponseHead, nowMs?: number): AttemptObservation;
 
   /**
    * Constructs a protocol-native model catalog list envelope.
@@ -599,8 +602,19 @@ export interface KeyPool {
    * @param lease - The leased key used for the attempt.
    * @param observation - Classified attempt observation.
    * @param nowMs - Monotonic timestamp of the observation.
+   * @returns The exact cooldown delay scheduled in milliseconds when a cooldown was
+   * applied, or `undefined` when no cooldown was scheduled (success, client
+   * cancellation, 4xx non-429, stale lease, or unknown key).
    */
-  observe(lease: KeyLease, observation: AttemptObservation, nowMs: number): void;
+  observe(lease: KeyLease, observation: AttemptObservation, nowMs: number): number | undefined;
+
+  /**
+   * Returns the count of enabled keys in this pool that are not cooling down at the given monotonic timestamp.
+   *
+   * @param nowMs - Current monotonic time in milliseconds.
+   * @returns The number of currently available keys.
+   */
+  availableCount(nowMs: number): number;
 }
 
 /**
