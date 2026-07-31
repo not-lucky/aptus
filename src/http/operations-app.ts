@@ -83,7 +83,7 @@ export function createOperationsApp(options: OperationsAppOptions): express.Expr
   });
 
   app.get("/health", (_req, res) => {
-    metrics.operations("health");
+    metrics.operations("health_ready");
     const isReady = ready();
     res.status(isReady ? 200 : 503).json(payload(isReady ? "ok" : "degraded"));
   });

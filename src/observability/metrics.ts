@@ -6,6 +6,71 @@ import { Counter, Gauge, Histogram, Registry } from "prom-client";
  */
 const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600];
 
+/** Valid protocol identifiers. */
+const VALID_PROTOCOLS: ReadonlySet<string> = new Set(["openai-chat", "openai-responses", "anthropic-messages"]);
+
+/** Valid target protocol metric labels (protocols plus "unknown"). */
+const VALID_TARGET_PROTOCOLS: ReadonlySet<string> = new Set([
+  "openai-chat",
+  "openai-responses",
+  "anthropic-messages",
+  "unknown",
+]);
+
+/** Valid HTTP endpoint metric labels. */
+const VALID_HTTP_ENDPOINTS: ReadonlySet<string> = new Set(["chat_completions", "responses", "messages", "models"]);
+
+/** Valid HTTP outcome categories. */
+const VALID_HTTP_OUTCOMES: ReadonlySet<string> = new Set(["complete", "failed", "cancelled"]);
+
+/** The canonical 13 failure categories. */
+const VALID_FAILURE_CATEGORIES: ReadonlySet<string> = new Set([
+  "invalid_request",
+  "authentication",
+  "permission",
+  "not_found",
+  "conflict",
+  "payload_too_large",
+  "rate_limit",
+  "quota",
+  "timeout",
+  "unavailable",
+  "provider",
+  "unsupported_capability",
+  "stream_interrupted",
+]);
+
+/** Valid attempt results ("success", 13 categories, "client_cancelled"). */
+const VALID_ATTEMPT_RESULTS: ReadonlySet<string> = new Set([
+  ...VALID_FAILURE_CATEGORIES,
+  "success",
+  "client_cancelled",
+]);
+
+/** Valid retention cleanup reasons. */
+const VALID_CLEANUP_REASONS: ReadonlySet<string> = new Set(["age", "size"]);
+
+/** Valid trace failure operations. */
+const VALID_TRACE_OPERATIONS: ReadonlySet<string> = new Set([
+  "trace_start",
+  "trace_write",
+  "trace_finish",
+  "retention",
+]);
+
+/** Valid operations listener endpoints. */
+const VALID_OPERATIONS_ENDPOINTS: ReadonlySet<string> = new Set(["metrics", "health_live", "health_ready"]);
+
+/**
+ * Options for configuring bounded metric label validation domains.
+ */
+export interface MetricsRegistryOptions {
+  /** Configured provider names for bounded label validation. */
+  readonly providers?: ReadonlySet<string>;
+  /** Configured canonical public model/route names for bounded label validation. */
+  readonly publicNames?: ReadonlySet<string>;
+}
+
 /**
  * The single process-local Prometheus registry surface.
  *
@@ -80,6 +145,12 @@ export interface MetricsRegistry {
   /** Records a runtime trace write failure. */
   traceWriteFailures(operation: string): void;
 
+  /** Records completed trace directories deleted during retention pass. */
+  traceCleanupDeleted(reason: string): void;
+
+  /** Sets the count of requests active during shutdown drain. */
+  shutdownActiveRequests(count: number): void;
+
   /** Records an operations-listener request. */
   operations(endpoint: string): void;
 }
@@ -90,10 +161,43 @@ export interface MetricsRegistry {
  * Every metric name, help text, label set, and bucket boundary follows
  * operational metric specifications.
  *
+ * @param options - Optional finite configured provider and public name domains.
  * @returns A {@link MetricsRegistry} instance.
  */
-export function createMetricsRegistry(): MetricsRegistry {
+export function createMetricsRegistry(options?: MetricsRegistryOptions): MetricsRegistry {
   const registry = new Registry();
+
+  const validProviders = options?.providers;
+  const validPublicNames = options?.publicNames;
+
+  const sanitizeProtocol = (val: string): string => (VALID_PROTOCOLS.has(val) ? val : "openai-chat");
+
+  const sanitizeTargetProtocol = (val: string): string => (VALID_TARGET_PROTOCOLS.has(val) ? val : "unknown");
+
+  const sanitizeEndpoint = (val: string): string => (VALID_HTTP_ENDPOINTS.has(val) ? val : "chat_completions");
+
+  const sanitizeHttpOutcome = (val: string): string => (VALID_HTTP_OUTCOMES.has(val) ? val : "failed");
+
+  const sanitizeFailureCategory = (val: string): string => (VALID_FAILURE_CATEGORIES.has(val) ? val : "provider");
+
+  const sanitizeAttemptResult = (val: string): string => (VALID_ATTEMPT_RESULTS.has(val) ? val : "provider");
+
+  const sanitizeProvider = (val: string): string =>
+    validProviders !== undefined ? (validProviders.has(val) ? val : "unknown") : val || "unknown";
+
+  const sanitizePublicName = (val: string): string =>
+    validPublicNames !== undefined ? (validPublicNames.has(val) ? val : "unknown") : val || "unknown";
+
+  const sanitizeCleanupReason = (val: string): string => (VALID_CLEANUP_REASONS.has(val) ? val : "age");
+
+  const sanitizeTraceOperation = (val: string): string => (VALID_TRACE_OPERATIONS.has(val) ? val : "trace_write");
+
+  const sanitizeOperationsEndpoint = (val: string): string => {
+    if (val === "/health" || val === "/health/ready" || val === "health") return "health_ready";
+    if (val === "/health/live") return "health_live";
+    if (val === "/metrics") return "metrics";
+    return VALID_OPERATIONS_ENDPOINTS.has(val) ? val : "health_ready";
+  };
 
   const httpRequests = new Counter({
     name: "aptus_http_requests_total",
@@ -164,6 +268,18 @@ export function createMetricsRegistry(): MetricsRegistry {
     labelNames: ["operation"],
     registers: [registry],
   });
+  const traceCleanupDeletedCounter = new Counter({
+    name: "aptus_trace_cleanup_deleted_total",
+    help: "Completed Trace directories deleted by retention.",
+    labelNames: ["reason"],
+    registers: [registry],
+  });
+  const shutdownActiveRequestsGauge = new Gauge({
+    name: "aptus_shutdown_active_requests",
+    help: "Requests still active during shutdown.",
+    labelNames: [],
+    registers: [registry],
+  });
   const operationsRequests = new Counter({
     name: "aptus_operations_requests_total",
     help: "Operations listener requests by bounded endpoint.",
@@ -178,20 +294,20 @@ export function createMetricsRegistry(): MetricsRegistry {
 
     httpRequest(endpointProtocol, endpoint, outcomeCategory, stream) {
       httpRequests.inc({
-        endpoint_protocol: endpointProtocol,
-        endpoint,
-        outcome_category: outcomeCategory,
+        endpoint_protocol: sanitizeProtocol(endpointProtocol),
+        endpoint: sanitizeEndpoint(endpoint),
+        outcome_category: sanitizeHttpOutcome(outcomeCategory),
         stream: streamLabel(stream),
       });
     },
     httpDuration(endpointProtocol, targetProtocol, provider, publicName, outcomeCategory, stream, seconds) {
       httpDuration.observe(
         {
-          endpoint_protocol: endpointProtocol,
-          target_protocol: targetProtocol,
-          provider,
-          public_name: publicName,
-          outcome_category: outcomeCategory,
+          endpoint_protocol: sanitizeProtocol(endpointProtocol),
+          target_protocol: sanitizeTargetProtocol(targetProtocol),
+          provider: sanitizeProvider(provider),
+          public_name: sanitizePublicName(publicName),
+          outcome_category: sanitizeHttpOutcome(outcomeCategory),
           stream: streamLabel(stream),
         },
         seconds,
@@ -200,67 +316,81 @@ export function createMetricsRegistry(): MetricsRegistry {
     httpFirstByte(endpointProtocol, targetProtocol, provider, publicName, stream, seconds) {
       httpFirstByte.observe(
         {
-          endpoint_protocol: endpointProtocol,
-          target_protocol: targetProtocol,
-          provider,
-          public_name: publicName,
+          endpoint_protocol: sanitizeProtocol(endpointProtocol),
+          target_protocol: sanitizeTargetProtocol(targetProtocol),
+          provider: sanitizeProvider(provider),
+          public_name: sanitizePublicName(publicName),
           stream: streamLabel(stream),
         },
         seconds,
       );
     },
     inFlightInc(endpointProtocol, stream) {
-      inFlight.inc({ endpoint_protocol: endpointProtocol, stream: streamLabel(stream) });
+      inFlight.inc({ endpoint_protocol: sanitizeProtocol(endpointProtocol), stream: streamLabel(stream) });
     },
     inFlightDec(endpointProtocol, stream) {
-      inFlight.dec({ endpoint_protocol: endpointProtocol, stream: streamLabel(stream) });
+      inFlight.dec({ endpoint_protocol: sanitizeProtocol(endpointProtocol), stream: streamLabel(stream) });
     },
     providerAttempt(targetProtocol, provider, attemptResult, stream) {
       providerAttempts.inc({
-        target_protocol: targetProtocol,
-        provider,
-        attempt_result: attemptResult,
+        target_protocol: sanitizeTargetProtocol(targetProtocol),
+        provider: sanitizeProvider(provider),
+        attempt_result: sanitizeAttemptResult(attemptResult),
         stream: streamLabel(stream),
       });
     },
     providerAttemptDuration(targetProtocol, provider, attemptResult, stream, seconds) {
       providerAttemptDuration.observe(
-        { target_protocol: targetProtocol, provider, attempt_result: attemptResult, stream: streamLabel(stream) },
+        {
+          target_protocol: sanitizeTargetProtocol(targetProtocol),
+          provider: sanitizeProvider(provider),
+          attempt_result: sanitizeAttemptResult(attemptResult),
+          stream: streamLabel(stream),
+        },
         seconds,
       );
     },
     candidateSkips(endpointProtocol, targetProtocol, provider, publicName, outcomeCategory) {
       candidateSkipCounter.inc({
-        endpoint_protocol: endpointProtocol,
-        target_protocol: targetProtocol,
-        provider,
-        public_name: publicName,
-        outcome_category: outcomeCategory,
+        endpoint_protocol: sanitizeProtocol(endpointProtocol),
+        target_protocol: sanitizeTargetProtocol(targetProtocol),
+        provider: sanitizeProvider(provider),
+        public_name: sanitizePublicName(publicName),
+        outcome_category: sanitizeFailureCategory(outcomeCategory),
       });
     },
     retries(targetProtocol, provider, outcomeCategory) {
       retriesCounter.inc({
-        target_protocol: targetProtocol,
-        provider,
-        outcome_category: outcomeCategory,
+        target_protocol: sanitizeTargetProtocol(targetProtocol),
+        provider: sanitizeProvider(provider),
+        outcome_category: sanitizeFailureCategory(outcomeCategory),
       });
     },
     fallbacks(endpointProtocol, targetProtocol, publicName, outcomeCategory) {
       fallbacksCounter.inc({
-        endpoint_protocol: endpointProtocol,
-        target_protocol: targetProtocol,
-        public_name: publicName,
-        outcome_category: outcomeCategory,
+        endpoint_protocol: sanitizeProtocol(endpointProtocol),
+        target_protocol: sanitizeTargetProtocol(targetProtocol),
+        public_name: sanitizePublicName(publicName),
+        outcome_category: sanitizeFailureCategory(outcomeCategory),
       });
     },
     keyPoolAvailable(targetProtocol, provider, count) {
-      keyPoolAvailableGauge.set({ target_protocol: targetProtocol, provider }, count);
+      keyPoolAvailableGauge.set(
+        { target_protocol: sanitizeTargetProtocol(targetProtocol), provider: sanitizeProvider(provider) },
+        count,
+      );
     },
     traceWriteFailures(operation) {
-      traceWriteFailureCounter.inc({ operation });
+      traceWriteFailureCounter.inc({ operation: sanitizeTraceOperation(operation) });
+    },
+    traceCleanupDeleted(reason) {
+      traceCleanupDeletedCounter.inc({ reason: sanitizeCleanupReason(reason) });
+    },
+    shutdownActiveRequests(count) {
+      shutdownActiveRequestsGauge.set(count);
     },
     operations(endpoint) {
-      operationsRequests.inc({ endpoint });
+      operationsRequests.inc({ endpoint: sanitizeOperationsEndpoint(endpoint) });
     },
   };
 }

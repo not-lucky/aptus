@@ -1,6 +1,7 @@
 import type { HeaderMap, Protocol } from "../domain/contracts.ts";
 import type { EncodedFailure, ErrorEncoder, IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
 import type { AptusRequestId } from "../domain/request-id.ts";
+import { statusFromCategory } from "../routing/failures.ts";
 
 const encoder = new TextEncoder();
 
@@ -63,7 +64,7 @@ function encodeFailure(
     failure.category,
     failure.message,
     failure.code,
-    failureStatus(failure.category, protocol),
+    statusFromCategory(failure.category, protocol),
     aptusRequestId,
   );
   if (failure.retryAfterSeconds === undefined || failure.retryAfterSeconds <= 0) return encoded;
@@ -71,41 +72,6 @@ function encodeFailure(
     ...encoded,
     headers: { ...encoded.headers, "retry-after": String(Math.floor(failure.retryAfterSeconds)) },
   };
-}
-
-/**
- * Maps failure categories to exact HTTP status codes according to protocol specification.
- *
- * Notable protocol differences:
- * - `"unavailable"` -> Anthropic returns HTTP 529 (`overloaded_error`); OpenAI returns HTTP 503 (`api_error`).
- * - `"stream_interrupted"` -> HTTP 502.
- */
-function failureStatus(category: IrFailureCategory, protocol: Protocol): number {
-  switch (category) {
-    case "invalid_request":
-    case "unsupported_capability":
-      return 400;
-    case "authentication":
-      return 401;
-    case "permission":
-      return 403;
-    case "not_found":
-      return 404;
-    case "conflict":
-      return 409;
-    case "payload_too_large":
-      return 413;
-    case "rate_limit":
-    case "quota":
-      return 429;
-    case "timeout":
-      return 504;
-    case "unavailable":
-      return protocol === "anthropic-messages" ? 529 : 503;
-    case "provider":
-    case "stream_interrupted":
-      return 502;
-  }
 }
 
 /**

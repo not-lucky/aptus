@@ -127,9 +127,9 @@ export type TraceTerminal =
       readonly kind: "dry_run";
     }
   | {
-      /** Trace aborted prematurely due to write failure, process crash, or shutdown timeout. */
+      /** Trace aborted prematurely due to write failure, process crash, shutdown timeout, or local internal fault. */
       readonly kind: "incomplete";
-      readonly reason: "trace_write_failed" | "process_exit" | "shutdown_abort";
+      readonly reason: "trace_write_failed" | "process_exit" | "shutdown_abort" | "internal_fault";
     };
 
 /**
@@ -195,6 +195,11 @@ export interface RetentionResult {
    * Total disk size in bytes of remaining completed traces after cleanup.
    */
   readonly remainingBytes: number;
+
+  /**
+   * Total disk size in bytes of active or incomplete trace directories skipped by this pass.
+   */
+  readonly incompleteBytes: number;
 }
 
 /**

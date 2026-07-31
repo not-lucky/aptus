@@ -5,7 +5,14 @@ import { join } from "node:path";
 import { test } from "vitest";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
 import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.ts";
-import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.ts";
+import {
+  postJson,
+  type RunningCli,
+  seededSecrets,
+  startAptusCli,
+  traceFiles,
+  waitFor,
+} from "../helpers/cli-process.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
@@ -67,6 +74,7 @@ test.concurrent("process: complete Chat native path applies mutation and relays 
     assert.deepEqual(recordedBody.unknown, [1, 2]);
 
     // Trace has the documented stage sequence and terminal.
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const names = traceFiles(cli.traceRoot);
     assert.ok(names.includes("000_manifest.json"));
     assert.ok(names.includes("999_terminal.json"));

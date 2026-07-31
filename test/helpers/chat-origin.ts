@@ -6,7 +6,7 @@ import {
   type ResponseMode,
 } from "./provider-origin.ts";
 
-export type { ResponseMode, QueuedResponse, RecordedRequest };
+export type { QueuedResponse, RecordedRequest, ResponseMode };
 
 /**
  * A loopback Chat origin used to exercise the dispatcher and process paths

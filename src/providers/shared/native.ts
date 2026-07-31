@@ -85,7 +85,7 @@ export function createNativeAdapter(spec: NativeAdapterSpec): ProtocolAdapter {
     },
 
     prepareNative(input: NativePreparationInput): Result<PreparedProviderRequest, NormalizedFailure> {
-      const { body } = applyNativeMutations(input.clientBody, input.mutations, input.upstreamModel);
+      const { body, mutations } = applyNativeMutations(input.clientBody, input.mutations, input.upstreamModel);
       const headers = filterOutboundHeaders(
         input.clientHeaders,
         input.providerHeaders,
@@ -102,6 +102,7 @@ export function createNativeAdapter(spec: NativeAdapterSpec): ProtocolAdapter {
           stream: body.stream === true,
           deadlineMs: input.deadlineMs,
           streamIdleMs: input.streamIdleMs,
+          mutations,
         },
       };
     },

@@ -97,3 +97,20 @@ test("estimateCostUsd: mixed usage sums all four terms", () => {
   // 0.5 + 0.5 + 0.025 + 0.025 = 1.05
   assert.equal(cost, "1.05");
 });
+
+test("estimateCostUsd: exact decimal never emits scientific notation or float artifacts", () => {
+  // IEEE-754 computes 0.1 + 0.2 = 0.30000000000000004, and dividing by 1e6 would render
+  // as "3.0000000000000004e-7". Exact decimal fixed-point arithmetic must yield the true value.
+  assert.equal(
+    estimateCostUsd(pricing({ inputUsdPerMillionTokens: "0.1", outputUsdPerMillionTokens: "0.2" }), {
+      input: 1,
+      output: 1,
+    }),
+    "0.0000003",
+  );
+  // A rate with five decimal places also stays exact and never uses scientific notation.
+  assert.equal(
+    estimateCostUsd(pricing({ inputUsdPerMillionTokens: "0.12345" }), { input: 1_000_000, output: 0 }),
+    "0.12345",
+  );
+});

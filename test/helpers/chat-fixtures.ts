@@ -31,9 +31,7 @@ export const COMPLETE_CHAT_BODY = {
       message: {
         role: "assistant",
         content: "hello from origin",
-        tool_calls: [
-          { id: "call_1", type: "function", function: { name: "lookup", arguments: '{"q":"x"}' } },
-        ],
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: '{"q":"x"}' } }],
       },
       finish_reason: "stop",
     },

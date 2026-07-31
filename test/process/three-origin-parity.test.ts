@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, type RunningCli } from "../helpers/cli-process.ts";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
+import { postJson, type RunningCli, seededSecrets, startAptusCli } from "../helpers/cli-process.ts";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
 import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
@@ -217,8 +217,20 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
     assert.equal(harness.responsesOrigin.dispatchCount(), 1, "responsesOrigin should now have 1 request");
 
     // Verify metrics on operations port carry per-protocol labels for skips, attempts, and ingress.
-    const metricsRes = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
-    const metricsText = await metricsRes.text();
+    // Accepted-request counters are recorded after HTTP delivery, so poll until they appear.
+    let metricsText = "";
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const metricsRes = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
+      metricsText = await metricsRes.text();
+      if (
+        /aptus_http_requests_total\{[^}]*endpoint_protocol="openai-chat"[^}]*\}/.test(metricsText) &&
+        /aptus_http_requests_total\{[^}]*endpoint_protocol="openai-responses"[^}]*\}/.test(metricsText) &&
+        /aptus_http_requests_total\{[^}]*endpoint_protocol="anthropic-messages"[^}]*\}/.test(metricsText)
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
 
     // Candidate skips: Chat skipped the Messages candidate; Responses skipped Messages and Chat.
     // Label order follows the counter's labelNames declaration (endpoint_protocol, target_protocol, provider, public_name, outcome_category).

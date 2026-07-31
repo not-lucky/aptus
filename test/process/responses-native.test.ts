@@ -3,7 +3,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.ts";
+import {
+  postJson,
+  type RunningCli,
+  seededSecrets,
+  startAptusCli,
+  traceFiles,
+  waitFor,
+} from "../helpers/cli-process.ts";
 import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.ts";
 import {
   COMPLETE_RESPONSES_BYTES,
@@ -112,6 +119,7 @@ test.concurrent("process: complete Responses native path applies mutation and re
     assert.deepEqual(recordedBody.unknown_custom, [42]);
 
     // Trace validation
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const names = traceFiles(cli.traceRoot);
     assert.ok(names.includes("000_manifest.json"));
     assert.ok(names.includes("999_terminal.json"));
@@ -236,6 +244,7 @@ test.concurrent("process: Responses terminal non-2xx HTTP error is relayed with 
     assert.equal(response.status, 400);
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), ERROR_RESPONSES_BYTES);
 
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminalJson = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {

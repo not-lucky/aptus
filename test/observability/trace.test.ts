@@ -23,6 +23,7 @@ test("file recorder writes manifest, ordered stages, exact bytes, and one termin
     onFailure: () => {
       failures++;
     },
+    onDegrade: () => undefined,
     onRecover: () => undefined,
   });
 
@@ -104,6 +105,7 @@ test("file recorder records a non-JSON response as .bin bytes", async () => {
     root,
     secrets: new Set<string>(),
     onFailure: () => undefined,
+    onDegrade: () => undefined,
     onRecover: () => undefined,
   });
   const session = await recorder.start({
@@ -140,7 +142,7 @@ test("redactor preserves __proto__ as an own property without prototype pollutio
   const input = JSON.parse('{"__proto__":{"polluted":true,"token":"secret-tok"},"a":1}');
   const output = redactor.redactJson(input) as Record<string, unknown>;
 
-  assert.equal(Object.prototype.hasOwnProperty.call(output, "__proto__"), true);
+  assert.equal(Object.hasOwn(output, "__proto__"), true);
   const protoVal = (output as Record<string, any>)["__proto__"];
   assert.equal(protoVal.polluted, true);
   assert.equal(protoVal.token, "[REDACTED]");

@@ -27,14 +27,6 @@ export function unsupportedCapabilityFailure(targetProtocol: Protocol): Normaliz
   };
 }
 
-export function cancelledFailure(): NormalizedFailure {
-  return { category: "provider", message: "request cancelled", retryable: false };
-}
-
-export function internalFailure(): NormalizedFailure {
-  return { category: "provider", message: "internal gateway error", retryable: false };
-}
-
 export function interruptedFailure(): NormalizedFailure {
   return { category: "stream_interrupted", message: "provider response body was interrupted", retryable: false };
 }
@@ -90,4 +82,39 @@ export function failureJson(failure: NormalizedFailure): JsonValue {
   if (failure.capability !== undefined) out.capability = failure.capability;
   if (failure.retryAfterSeconds !== undefined) out.retryAfterSeconds = failure.retryAfterSeconds;
   return out;
+}
+
+/**
+ * Maps an IR failure category to its target-protocol HTTP response status code.
+ *
+ * @param category - Canonical failure category.
+ * @param protocol - Client protocol owning the response envelope. Only
+ * `unavailable` differs across protocols (Anthropic `overloaded_error` is 529
+ * while OpenAI uses 503).
+ */
+export function statusFromCategory(category: IrFailureCategory, protocol: Protocol): number {
+  switch (category) {
+    case "invalid_request":
+    case "unsupported_capability":
+      return 400;
+    case "authentication":
+      return 401;
+    case "permission":
+      return 403;
+    case "not_found":
+      return 404;
+    case "conflict":
+      return 409;
+    case "payload_too_large":
+      return 413;
+    case "rate_limit":
+    case "quota":
+      return 429;
+    case "unavailable":
+      return protocol === "anthropic-messages" ? 529 : 503;
+    case "timeout":
+      return 504;
+    default:
+      return 502;
+  }
 }

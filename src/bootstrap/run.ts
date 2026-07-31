@@ -2,7 +2,7 @@ import type express from "express";
 import { type StartupError, startupError } from "../config/errors.ts";
 import type { AptusConfig } from "../config/types.ts";
 import type { Result } from "../domain/contracts.ts";
-import { createClientApp, type HttpRequestObserver } from "../http/client-app.ts";
+import { createClientApp } from "../http/client-app.ts";
 import { createErrorEncoder } from "../http/error-encoder.ts";
 import { type BoundListener, listen } from "../http/listeners.ts";
 import { createOperationsApp, type RuntimeState } from "../http/operations-app.ts";
@@ -12,6 +12,9 @@ import { aptusLogger, configureLogging } from "../observability/logging.ts";
 import { createMetricsRegistry } from "../observability/metrics.ts";
 import { createFileTraceRecorder } from "../observability/trace/file-recorder.ts";
 import { createNoopTraceRecorder } from "../observability/trace/noop-recorder.ts";
+import { createRedactor } from "../observability/trace/redaction.ts";
+import { createTraceRetention } from "../observability/trace/retention.ts";
+import { startRetentionScheduler, type TraceRetentionScheduler } from "../observability/trace/scheduler.ts";
 import { createProtocolAdapters } from "../providers/adapters.ts";
 import { createUndiciDispatcher } from "../providers/shared/dispatcher.ts";
 import { createGateway } from "../routing/gateway.ts";
@@ -50,7 +53,11 @@ export async function startRuntime(
 
   configureLogging(config.logging);
   const logger = aptusLogger();
-  const metrics = createMetricsRegistry();
+
+  const providerNames = new Set(config.providers.map((p) => p.name));
+  const publicNames = new Set([...config.models.map((m) => m.name), ...config.routes.map((r) => r.name)]);
+
+  const metrics = createMetricsRegistry({ providers: providerNames, publicNames });
   const observer = createLifecycleObserver({
     logger,
     metrics,
@@ -58,16 +65,21 @@ export async function startRuntime(
     metricsEnabled: config.metrics.enabled,
   });
 
+  const secrets = collectSecrets(config);
+  const redactor = createRedactor(secrets);
+
   // The trace recorder degrades readiness on write failure and recovers on a
   // later successful write. The failure hook also emits the trace-failure log
   // and metric through the shared observer.
   const traceRecorder = config.tracing.enabled
     ? createFileTraceRecorder({
         root: config.tracing.root,
-        secrets: collectSecrets(config),
-        onFailure: (safeErrorCode) => {
+        secrets,
+        onFailure: (operation, safeErrorCode, aptusRequestId) => {
+          observer.traceFailure({ aptusRequestId, operation, safeErrorCode });
+        },
+        onDegrade: () => {
           state.traceReady = false;
-          observer.traceFailure({ aptusRequestId: undefined, operation: "trace_write", safeErrorCode });
         },
         onRecover: () => {
           state.traceReady = true;
@@ -84,17 +96,8 @@ export async function startRuntime(
     dispatcher,
     traceRecorder,
     observer,
+    redactor,
   });
-
-  // HTTP stays decoupled from the observability module through this narrow
-  // structural observer, which records `aptus_http_requests_total`.
-  const httpObserver: HttpRequestObserver = {
-    observeRequest(fields) {
-      if (config.metrics.enabled) {
-        metrics.httpRequest(fields.endpointProtocol, fields.endpoint, fields.outcome, fields.stream);
-      }
-    },
-  };
 
   const cancellations = createRequestCancellationRegistry();
 
@@ -117,11 +120,14 @@ export async function startRuntime(
     () =>
       createClientApp({
         config,
+        revision,
         gateway,
         adapters,
         errorEncoder: createErrorEncoder(),
+        traceRecorder,
+        observer,
         cancellations,
-        observer: httpObserver,
+        redactor,
       }),
     "/server",
   );
@@ -132,7 +138,28 @@ export async function startRuntime(
     return client;
   }
 
-  // 3. Assemble running runtime and shutdown coordinator.
+  // 3. Start retention scheduler after both listeners are bound and startup Trace probe passed.
+  let retentionScheduler: TraceRetentionScheduler | undefined;
+  if (config.tracing.enabled) {
+    const retention = createTraceRetention({
+      root: config.tracing.root,
+      maxAgeMs: config.tracing.retention.maxAgeMs,
+      maxBytes: config.tracing.retention.maxBytes,
+      onDeleted: (reason) => metrics.traceCleanupDeleted(reason),
+    });
+    retentionScheduler = startRetentionScheduler({
+      retention,
+      observer,
+      intervalMs: config.tracing.retention.cleanupIntervalMs,
+      onFailure: () => {
+        state.traceReady = false;
+      },
+    });
+    // Run one retention pass immediately at startup, then on the interval.
+    void retentionScheduler.triggerNow();
+  }
+
+  // 4. Assemble running runtime and shutdown coordinator.
   return {
     ok: true,
     value: {
@@ -144,6 +171,7 @@ export async function startRuntime(
         drainMs: config.server.shutdownDrainMs,
         onDraining: () => {
           state.draining = true;
+          retentionScheduler?.stop();
         },
         onAbortActive: () => cancellations.abortAll(),
         onShutdown: async () => {

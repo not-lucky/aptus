@@ -77,6 +77,12 @@ export interface GatewayObservability extends LifecycleObserver {
   /** `aptus.request.completed` log + duration and TTFF histograms. */
   completed(fields: CompletedFields): void;
 
+  /** Accepted-request HTTP counter + duration/TTFF without the completion log. */
+  httpTerminal(fields: CompletedFields): void;
+
+  /** `models` catalog terminal HTTP observation (no in-flight/Trace session). */
+  catalogCompleted(fields: { endpointProtocol: Protocol }): void;
+
   /** `aptus.request.cancelled` log. */
   cancelled(fields: { aptusRequestId: string; phase: string; by: string }): void;
 
@@ -85,6 +91,21 @@ export interface GatewayObservability extends LifecycleObserver {
 
   /** `aptus.trace.failure` log + `aptus_trace_write_failures_total`. */
   traceFailure(fields: { aptusRequestId: string | undefined; operation: string; safeErrorCode: string }): void;
+
+  /** `aptus.retention.run` log. */
+  retentionRun(fields: {
+    deletedForAge: number;
+    deletedForSize: number;
+    skipped: number;
+    remainingBytes: number;
+    incompleteBytes: number;
+  }): void;
+
+  /** `aptus.shutdown.started` log + `aptus_shutdown_active_requests`. */
+  shutdownStarted(fields: { activeRequests: number; drainMs: number }): void;
+
+  /** `aptus.shutdown.completed` log. */
+  shutdownCompleted(fields: { drained: number; aborted: number; durationMs: number }): void;
 }
 
 /**
@@ -151,7 +172,7 @@ export interface AttemptCompletedFields {
 export interface CompletedFields {
   readonly aptusRequestId: string;
   readonly endpointProtocol: Protocol;
-  readonly targetProtocol: Protocol;
+  readonly targetProtocol: Protocol | "unknown";
   readonly provider: string;
   readonly canonicalPublicName: string;
   readonly outcomeCategory: "complete" | "failed" | "cancelled";
@@ -199,211 +220,349 @@ export function createLifecycleObserver(options: LifecycleObserverOptions): Life
     },
 
     requestIngress(fields) {
-      if (metricsEnabled) metrics.inFlightInc(fields.endpointProtocol, fields.stream);
-      if (loggingEnabled) {
-        logger.info("aptus.request.ingress", {
-          aptusRequestId: fields.aptusRequestId,
-          endpointProtocol: fields.endpointProtocol,
-          endpoint: fields.endpoint,
-          stream: fields.stream,
-        });
+      try {
+        if (metricsEnabled) metrics.inFlightInc(fields.endpointProtocol, fields.stream);
+        if (loggingEnabled) {
+          logger.info("aptus.request.ingress", {
+            aptusRequestId: fields.aptusRequestId,
+            endpointProtocol: fields.endpointProtocol,
+            endpoint: fields.endpoint,
+            stream: fields.stream,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
       }
     },
 
     requestTerminal(fields) {
-      if (metricsEnabled) metrics.inFlightDec(fields.endpointProtocol, fields.stream);
+      try {
+        if (metricsEnabled) metrics.inFlightDec(fields.endpointProtocol, fields.stream);
+      } catch {
+        // Observability errors never fail traffic.
+      }
     },
 
     authResult(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.auth.result", {
-          aptusRequestId: fields.aptusRequestId,
-          scheme: fields.scheme,
-          result: fields.result,
-        });
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.auth.result", {
+            aptusRequestId: fields.aptusRequestId,
+            scheme: fields.scheme,
+            result: fields.result,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
       }
     },
 
     nameResolved(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.name.resolved", {
-          aptusRequestId: fields.aptusRequestId,
-          canonicalPublicName: fields.canonicalPublicName,
-          kind: fields.kind,
-        });
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.name.resolved", {
+            aptusRequestId: fields.aptusRequestId,
+            canonicalPublicName: fields.canonicalPublicName,
+            kind: fields.kind,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
       }
     },
 
     candidateSkipped(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.candidate.skipped", {
-          aptusRequestId: fields.aptusRequestId,
-          canonicalPublicName: fields.canonicalPublicName,
-          candidateIndex: fields.candidateIndex,
-          provider: fields.provider,
-          targetProtocol: fields.targetProtocol,
-          category: fields.category,
-          capability: fields.capability ?? null,
-        });
-      }
-      if (metricsEnabled) {
-        metrics.candidateSkips(
-          fields.endpointProtocol,
-          fields.targetProtocol,
-          fields.provider,
-          fields.canonicalPublicName,
-          fields.category,
-        );
-      }
-    },
-
-    keySelected(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.key.selected", {
-          aptusRequestId: fields.aptusRequestId,
-          attemptNumber: fields.attemptNumber,
-          provider: fields.provider,
-          keyName: fields.keyName,
-          strategy: fields.strategy,
-        });
-      }
-    },
-
-    attemptStarted(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.attempt.started", {
-          aptusRequestId: fields.aptusRequestId,
-          attemptNumber: fields.attemptNumber,
-          candidateIndex: fields.candidateIndex,
-          provider: fields.provider,
-          targetProtocol: fields.targetProtocol,
-          stream: fields.stream,
-        });
-      }
-    },
-
-    attemptCompleted(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.dispatch.completed", {
-          aptusRequestId: fields.aptusRequestId,
-          attemptNumber: fields.attemptNumber,
-          provider: fields.provider,
-          status: fields.status ?? 0,
-          attemptResult: fields.attemptResult,
-          durationMs: fields.durationMs,
-        });
-      }
-      if (metricsEnabled) {
-        metrics.providerAttempt(fields.targetProtocol, fields.provider, fields.attemptResult, fields.stream);
-        metrics.providerAttemptDuration(
-          fields.targetProtocol,
-          fields.provider,
-          fields.attemptResult,
-          fields.stream,
-          fields.durationMs / 1000,
-        );
-      }
-    },
-
-    firstByte(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.response.first_byte", {
-          aptusRequestId: fields.aptusRequestId,
-          attemptNumber: fields.attemptNumber,
-          durationMs: fields.durationMs,
-        });
-      }
-    },
-
-    retryScheduled(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.retry.scheduled", {
-          aptusRequestId: fields.aptusRequestId,
-          attemptNumber: fields.attemptNumber,
-          provider: fields.provider,
-          category: fields.category,
-          delayMs: fields.delayMs,
-        });
-      }
-      if (metricsEnabled) {
-        metrics.retries(fields.targetProtocol, fields.provider, fields.category);
-      }
-    },
-
-    fallbackSelected(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.fallback.selected", {
-          aptusRequestId: fields.aptusRequestId,
-          fromCandidateIndex: fields.fromCandidateIndex,
-          toCandidateIndex: fields.toCandidateIndex,
-          category: fields.category,
-        });
-      }
-      if (metricsEnabled) {
-        metrics.fallbacks(fields.endpointProtocol, fields.targetProtocol, fields.publicName, fields.category);
-      }
-    },
-
-    completed(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.request.completed", {
-          aptusRequestId: fields.aptusRequestId,
-          canonicalPublicName: fields.canonicalPublicName,
-          outcomeCategory: fields.outcomeCategory,
-          status: fields.status,
-          attempts: fields.attempts,
-          stream: fields.stream,
-          durationMs: fields.durationMs,
-          ...(fields.usage === undefined ? {} : { usage: fields.usage }),
-          ...(fields.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: fields.estimatedCostUsd }),
-        });
-      }
-      if (metricsEnabled) {
-        metrics.httpDuration(
-          fields.endpointProtocol,
-          fields.targetProtocol,
-          fields.provider,
-          fields.canonicalPublicName,
-          fields.outcomeCategory,
-          fields.stream,
-          fields.durationMs / 1000,
-        );
-        if (fields.firstByteMs !== undefined) {
-          metrics.httpFirstByte(
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.candidate.skipped", {
+            aptusRequestId: fields.aptusRequestId,
+            canonicalPublicName: fields.canonicalPublicName,
+            candidateIndex: fields.candidateIndex,
+            provider: fields.provider,
+            targetProtocol: fields.targetProtocol,
+            category: fields.category,
+            capability: fields.capability ?? null,
+          });
+        }
+        if (metricsEnabled) {
+          metrics.candidateSkips(
             fields.endpointProtocol,
             fields.targetProtocol,
             fields.provider,
             fields.canonicalPublicName,
-            fields.stream,
-            fields.firstByteMs / 1000,
+            fields.category,
           );
         }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    keySelected(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.key.selected", {
+            aptusRequestId: fields.aptusRequestId,
+            attemptNumber: fields.attemptNumber,
+            provider: fields.provider,
+            keyName: fields.keyName,
+            strategy: fields.strategy,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    attemptStarted(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.attempt.started", {
+            aptusRequestId: fields.aptusRequestId,
+            attemptNumber: fields.attemptNumber,
+            candidateIndex: fields.candidateIndex,
+            provider: fields.provider,
+            targetProtocol: fields.targetProtocol,
+            stream: fields.stream,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    attemptCompleted(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.dispatch.completed", {
+            aptusRequestId: fields.aptusRequestId,
+            attemptNumber: fields.attemptNumber,
+            provider: fields.provider,
+            status: fields.status ?? 0,
+            attemptResult: fields.attemptResult,
+            durationMs: fields.durationMs,
+          });
+        }
+        if (metricsEnabled) {
+          metrics.providerAttempt(fields.targetProtocol, fields.provider, fields.attemptResult, fields.stream);
+          metrics.providerAttemptDuration(
+            fields.targetProtocol,
+            fields.provider,
+            fields.attemptResult,
+            fields.stream,
+            fields.durationMs / 1000,
+          );
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    firstByte(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.response.first_byte", {
+            aptusRequestId: fields.aptusRequestId,
+            attemptNumber: fields.attemptNumber,
+            durationMs: fields.durationMs,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    retryScheduled(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.retry.scheduled", {
+            aptusRequestId: fields.aptusRequestId,
+            attemptNumber: fields.attemptNumber,
+            provider: fields.provider,
+            category: fields.category,
+            delayMs: fields.delayMs,
+          });
+        }
+        if (metricsEnabled) {
+          metrics.retries(fields.targetProtocol, fields.provider, fields.category);
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    fallbackSelected(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.fallback.selected", {
+            aptusRequestId: fields.aptusRequestId,
+            fromCandidateIndex: fields.fromCandidateIndex,
+            toCandidateIndex: fields.toCandidateIndex,
+            category: fields.category,
+          });
+        }
+        if (metricsEnabled) {
+          metrics.fallbacks(fields.endpointProtocol, fields.targetProtocol, fields.publicName, fields.category);
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    catalogCompleted(fields) {
+      try {
+        if (metricsEnabled) metrics.httpRequest(fields.endpointProtocol, "models", "complete", false);
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    completed(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.request.completed", {
+            aptusRequestId: fields.aptusRequestId,
+            canonicalPublicName: fields.canonicalPublicName,
+            outcomeCategory: fields.outcomeCategory,
+            status: fields.status,
+            attempts: fields.attempts,
+            stream: fields.stream,
+            durationMs: fields.durationMs,
+            ...(fields.usage === undefined ? {} : { usage: fields.usage }),
+            ...(fields.estimatedCostUsd === undefined ? {} : { estimatedCostUsd: fields.estimatedCostUsd }),
+          });
+        }
+        recordHttpTerminal(fields, metricsEnabled, metrics);
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    httpTerminal(fields) {
+      try {
+        recordHttpTerminal(fields, metricsEnabled, metrics);
+      } catch {
+        // Observability errors never fail traffic.
       }
     },
 
     cancelled(fields) {
-      if (loggingEnabled) {
-        logger.info("aptus.request.cancelled", {
-          aptusRequestId: fields.aptusRequestId,
-          phase: fields.phase,
-          by: fields.by,
-        });
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.request.cancelled", {
+            aptusRequestId: fields.aptusRequestId,
+            phase: fields.phase,
+            by: fields.by,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
       }
     },
 
     setKeyPoolAvailable(provider, targetProtocol, count) {
-      if (metricsEnabled) metrics.keyPoolAvailable(targetProtocol, provider, count);
+      try {
+        if (metricsEnabled) metrics.keyPoolAvailable(targetProtocol, provider, count);
+      } catch {
+        // Observability errors never fail traffic.
+      }
     },
 
     traceFailure(fields) {
-      if (loggingEnabled) {
-        logger.warn("aptus.trace.failure", {
-          aptusRequestId: fields.aptusRequestId ?? "",
-          operation: fields.operation,
-          safeErrorCode: fields.safeErrorCode,
-        });
+      try {
+        if (loggingEnabled) {
+          logger.warn("aptus.trace.failure", {
+            aptusRequestId: fields.aptusRequestId ?? "system",
+            operation: fields.operation,
+            safeErrorCode: fields.safeErrorCode,
+          });
+        }
+        if (metricsEnabled) metrics.traceWriteFailures(fields.operation);
+      } catch {
+        // Observability errors never fail traffic.
       }
-      if (metricsEnabled) metrics.traceWriteFailures(fields.operation);
+    },
+
+    retentionRun(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.retention.run", {
+            deletedForAge: fields.deletedForAge,
+            deletedForSize: fields.deletedForSize,
+            skipped: fields.skipped,
+            remainingBytes: fields.remainingBytes,
+            incompleteBytes: fields.incompleteBytes,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    shutdownStarted(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.shutdown.started", {
+            activeRequests: fields.activeRequests,
+            drainMs: fields.drainMs,
+          });
+        }
+        if (metricsEnabled) {
+          metrics.shutdownActiveRequests(fields.activeRequests);
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
+    },
+
+    shutdownCompleted(fields) {
+      try {
+        if (loggingEnabled) {
+          logger.info("aptus.shutdown.completed", {
+            drained: fields.drained,
+            aborted: fields.aborted,
+            durationMs: fields.durationMs,
+          });
+        }
+      } catch {
+        // Observability errors never fail traffic.
+      }
     },
   };
+}
+
+/**
+ * Records the accepted-request HTTP counter plus the duration and TTFF
+ * histograms. Shared by `completed` (which additionally logs
+ * `aptus.request.completed`) and `httpTerminal` (pre-Gateway failures that
+ * must not emit the completion log).
+ */
+function recordHttpTerminal(fields: CompletedFields, metricsEnabled: boolean, metrics: MetricsRegistry): void {
+  if (!metricsEnabled) return;
+  const endpoint =
+    fields.endpointProtocol === "openai-chat"
+      ? "chat_completions"
+      : fields.endpointProtocol === "openai-responses"
+        ? "responses"
+        : "messages";
+  metrics.httpRequest(fields.endpointProtocol, endpoint, fields.outcomeCategory, fields.stream);
+  metrics.httpDuration(
+    fields.endpointProtocol,
+    fields.targetProtocol,
+    fields.provider,
+    fields.canonicalPublicName,
+    fields.outcomeCategory,
+    fields.stream,
+    fields.durationMs / 1000,
+  );
+  if (fields.firstByteMs !== undefined) {
+    metrics.httpFirstByte(
+      fields.endpointProtocol,
+      fields.targetProtocol,
+      fields.provider,
+      fields.canonicalPublicName,
+      fields.stream,
+      fields.firstByteMs / 1000,
+    );
+  }
 }

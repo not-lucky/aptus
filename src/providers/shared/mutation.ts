@@ -46,25 +46,36 @@ export function applyNativeMutations(
   const pointers: string[] = [];
 
   // 1. defaults: insert absent-only leaves.
-  forEachLeaf(mutations.defaults, (segments, value) => {
-    if (pathIsWritable(body, segments) && getPath(body, segments) === undefined) {
-      setPath(body, segments, cloneJson(value));
-      pointers.push(toPointer(segments));
-    }
-  });
+  if (mutations?.defaults) {
+    forEachLeaf(mutations.defaults, (segments, value) => {
+      if (pathIsWritable(body, segments) && getPath(body, segments) === undefined) {
+        setPath(body, segments, cloneJson(value));
+        pointers.push(toPointer(segments));
+      }
+    });
+  }
 
   // 2. extraBody: deep merge, recording each changed/inserted leaf.
-  mergeExtraBody(body, mutations.extraBody, pointers, []);
+  if (mutations?.extraBody) {
+    mergeExtraBody(body, mutations.extraBody, pointers, []);
+  }
 
-  // 3. overrides: replace-or-insert each leaf.
-  forEachLeaf(mutations.overrides, (segments, value) => {
-    setPath(body, segments, cloneJson(value));
-    pointers.push(toPointer(segments));
-  });
+  // 3. overrides: replace-or-insert each changed leaf.
+  if (mutations?.overrides) {
+    forEachLeaf(mutations.overrides, (segments, value) => {
+      const existing = getPath(body, segments);
+      if (!isJsonEqual(existing, value)) {
+        setPath(body, segments, cloneJson(value));
+        pointers.push(toPointer(segments));
+      }
+    });
+  }
 
-  // 4. model replacement is always last (Chat requires a model input).
-  body.model = upstreamModel;
-  pointers.push("/model");
+  // 4. model replacement is recorded only when it actually changes.
+  if (body.model !== upstreamModel) {
+    body.model = upstreamModel;
+    pointers.push("/model");
+  }
 
   return { body, mutations: pointers };
 }
@@ -88,10 +99,40 @@ function mergeExtraBody(
       }
       mergeExtraBody(target[key] as MutableJsonObject, value, pointers, path);
     } else {
-      target[key] = cloneJson(value);
-      pointers.push(toPointer(path));
+      const existing = target[key];
+      if (!isJsonEqual(existing, value)) {
+        target[key] = cloneJson(value);
+        pointers.push(toPointer(path));
+      }
     }
   }
+}
+
+/**
+ * Deep equality check for JSON values.
+ */
+function isJsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined) return false;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!isJsonEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (const key of keysA) {
+      if (!isJsonEqual(a[key], b[key])) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 /**

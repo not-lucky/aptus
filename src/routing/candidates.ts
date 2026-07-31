@@ -85,5 +85,9 @@ export function resolveCandidates(canonicalName: string, indexes: CandidateIndex
 }
 
 function mutationsOf(model: ModelConfig): NativeMutations {
-  return { defaults: model.defaults, extraBody: model.extraBody, overrides: model.overrides };
+  return {
+    defaults: model.defaults ?? {},
+    extraBody: model.extraBody ?? {},
+    overrides: model.overrides ?? {},
+  };
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, stopCli, type RunningCli } from "../helpers/cli-process.ts";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
+import { postJson, type RunningCli, seededSecrets, startAptusCli, stopCli } from "../helpers/cli-process.ts";
 import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.ts";
 
 const ENV_NAMES = [
@@ -15,7 +15,8 @@ const ENV_NAMES = [
   "ANTHROPIC_KEY_A",
 ] as const;
 
-const seededEnv = (caseName: string): Record<string, string> => seededSecrets(caseName, ENV_NAMES, "aptus-route-secret");
+const seededEnv = (caseName: string): Record<string, string> =>
+  seededSecrets(caseName, ENV_NAMES, "aptus-route-secret");
 
 const BACKUP_PROVIDER_SNIPPET = `  - name: backup-chat-provider
     protocol: openai-chat

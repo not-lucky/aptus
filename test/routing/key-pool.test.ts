@@ -216,3 +216,51 @@ test("all-keys-cooling yields wait result; no-enabled-keys yields unavailable", 
   assert.equal(k1Recovered.kind, "acquired");
   assert.equal(k1Recovered.lease.keyName, "key-1");
 });
+
+test("KeyPool.preview() is read-only and invariant across strategy, cooldown, generation, and cursor", () => {
+  // 1. fill-first preview returns first enabled key even during cooldown
+  const fillPool = createKeyPool("provider-h", keys(3), "fill-first", DEFAULT_CONFIG, new TestRandomSource([0]));
+  assert.equal(fillPool.availableCount(100), 3);
+
+  // Cool key-1
+  const acq1 = fillPool.acquire(100);
+  assert.equal(acq1.kind, "acquired");
+  fillPool.observe(acq1.lease, { result: "provider", beforeClientBytes: true }, 100);
+  assert.equal(fillPool.availableCount(100), 2);
+
+  // preview() returns key-1 regardless of cooldown and does not mutate state
+  const prev1 = fillPool.preview();
+  assert.deepEqual(prev1, { keyName: "key-1", secret: "secret-1" });
+  assert.equal(fillPool.availableCount(100), 2);
+
+  // 2. round-robin preview returns key at current cursor without advancing it
+  const rrPool = createKeyPool("provider-i", keys(3), "round-robin", DEFAULT_CONFIG, new TestRandomSource([0]));
+  // Initial cursor at 0 -> key-1
+  assert.deepEqual(rrPool.preview(), { keyName: "key-1", secret: "secret-1" });
+  assert.deepEqual(rrPool.preview(), { keyName: "key-1", secret: "secret-1" });
+
+  // Advance cursor by acquiring key-1 -> cursor is at 1 (key-2)
+  const rrAcq1 = rrPool.acquire(100);
+  assert.equal(rrAcq1.kind, "acquired");
+  assert.equal(rrAcq1.lease.keyName, "key-1");
+
+  // preview() now returns key-2 repeatedly without advancing cursor
+  assert.deepEqual(rrPool.preview(), { keyName: "key-2", secret: "secret-2" });
+  assert.deepEqual(rrPool.preview(), { keyName: "key-2", secret: "secret-2" });
+
+  // Cool key-2
+  const rrAcq2 = rrPool.acquire(100);
+  assert.equal(rrAcq2.kind, "acquired");
+  assert.equal(rrAcq2.lease.keyName, "key-2");
+  rrPool.observe(rrAcq2.lease, { result: "provider", beforeClientBytes: true }, 100);
+
+  // Cursor is at 2 (key-3). preview() returns key-3
+  assert.deepEqual(rrPool.preview(), { keyName: "key-3", secret: "secret-3" });
+
+  // 3. Pool with no enabled keys returns undefined
+  const disabledPool = createKeyPool("provider-j", keys(2, [false, false]), "fill-first", DEFAULT_CONFIG);
+  assert.equal(disabledPool.preview(), undefined);
+
+  const disabledRrPool = createKeyPool("provider-k", keys(2, [false, false]), "round-robin", DEFAULT_CONFIG);
+  assert.equal(disabledRrPool.preview(), undefined);
+});

@@ -1,6 +1,8 @@
 import type { IrFailureCategory, NormalizedFailure, TraceStage, TraceTerminal } from "./operations.ts";
 import type { AptusRequestId } from "./request-id.ts";
 
+export type { AptusRequestId };
+
 /**
  * A JSON primitive scalar, array, or object value.
  */
@@ -30,6 +32,73 @@ export type Protocol = "openai-chat" | "openai-responses" | "anthropic-messages"
  * @typeParam E - Domain failure type.
  */
 export type Result<T, E> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: E };
+
+/**
+ * An owned response body stream/buffer abstraction for non-streaming and streaming responses.
+ */
+export interface OwnedBody {
+  /** Returns a readable stream of chunks. */
+  stream(): ReadableStream<Uint8Array>;
+  /** Returns the full byte array (from memory or temporary spool). */
+  bytes(): Promise<Uint8Array>;
+  /** Releases underlying disk/memory resources. */
+  dispose(): Promise<void>;
+  /** In-memory byte buffer when the body was retained in RAM (<= 64 KiB), or undefined if disk-spooled. */
+  readonly inMemoryBytes?: Uint8Array;
+}
+
+/**
+ * Immutable fact submitted to finalize request lifecycle telemetry and trace terminal.
+ */
+export interface TerminalFact {
+  /** Logical Trace terminal outcome. */
+  readonly terminal: TraceTerminal;
+  /** Bounded HTTP outcome category. */
+  readonly outcomeCategory: "complete" | "failed" | "cancelled";
+  /** Final response HTTP status code. */
+  readonly status: number;
+  /** Total provider attempts executed. */
+  readonly attempts: number;
+  /** Whether streaming mode was admitted. */
+  readonly stream: boolean;
+  /** Monotonic request duration in milliseconds. */
+  readonly durationMs: number;
+  /** Target candidate provider protocol, or "unknown". */
+  readonly targetProtocol?: Protocol | "unknown";
+  /** Selected candidate provider name, or "unknown". */
+  readonly provider?: string;
+  /** Canonical public model/route name, or "unknown". */
+  readonly canonicalPublicName?: string;
+  /** Redacted raw token usage object. */
+  readonly usage?: JsonObject;
+  /** Exact decimal USD cost estimate. */
+  readonly estimatedCostUsd?: string;
+  /**
+   * When `false`, finalization still records the accepted-request HTTP
+   * counter, duration, and in-flight decrement, but skips the
+   * `aptus.request.completed` completion log. Used for pre-Gateway failures
+   * (model extraction/authorization) that never entered the Gateway.
+   */
+  readonly emitCompleted?: boolean;
+}
+
+/**
+ * Request-scoped delivery and completion coordinator owned by HTTP admission.
+ */
+export interface TerminalCoordinator {
+  /** Promise settling when terminal delivery and telemetry finalize. */
+  readonly finalized: Promise<void>;
+  /**
+   * Marks that HTTP ingress admission succeeded and records the admitted
+   * stream label so the terminal in-flight decrement balances the ingress
+   * increment even when the terminal fact reports a different stream (dry run).
+   */
+  markIngress(stream: boolean): void;
+  /** Idempotently records client time-to-first-byte after response bytes/head are handed to Express. */
+  markClientFirstByte(): void;
+  /** Atomically claims terminal ownership and executes best-effort completion side-effects. */
+  finalize(fact: TerminalFact): Promise<{ readonly won: boolean }>;
+}
 
 /**
  * An accepted, validated client create request passed from HTTP ingress to the Gateway orchestrator.
@@ -69,6 +138,31 @@ export interface GatewayRequest {
    * Composite abort signal (combines client disconnect, timeout deadline, and shutdown signals).
    */
   readonly signal: AbortSignal;
+
+  /**
+   * Canonical public model or route name resolved during HTTP admission.
+   */
+  readonly canonicalPublicName: string;
+
+  /**
+   * Resolution kind (model or route).
+   */
+  readonly resolutionKind: "model" | "route";
+
+  /**
+   * Whether streaming was requested and admitted in the JSON body.
+   */
+  readonly stream: boolean;
+
+  /**
+   * Single terminal delivery and completion coordinator for this request.
+   */
+  readonly coordinator: TerminalCoordinator;
+
+  /**
+   * Active trace recording session for stage recording.
+   */
+  readonly trace: TraceSession;
 }
 
 /**
@@ -168,6 +262,11 @@ export interface DryRunResult {
 
 /**
  * Terminal result returned by the Gateway orchestrator to the HTTP layer.
+ *
+ * The Gateway never finalizes a normal-delivery result itself; each result
+ * carries a finalization seam that HTTP invokes after the corresponding
+ * response has been handed to Express (so duration, first-byte timing, and
+ * terminal ownership reflect actual client delivery).
  */
 export type GatewayResult =
   | {
@@ -175,7 +274,13 @@ export type GatewayResult =
       readonly kind: "complete";
       readonly status: number;
       readonly headers: HeaderMap;
-      readonly body: Uint8Array;
+      readonly body: OwnedBody;
+      /**
+       * Invoked by HTTP after the body has been fully handed to Express,
+       * finalizing the complete/failed terminal with the exact client-end
+       * duration. Absent only for test doubles that finalize out-of-band.
+       */
+      readonly onDelivered?: (durationMs: number) => Promise<void>;
     }
   | {
       /** Streaming SSE response with backpressured ReadableStream. */
@@ -183,6 +288,12 @@ export type GatewayResult =
       readonly status: number;
       readonly headers: HeaderMap;
       readonly body: ReadableStream<Uint8Array>;
+      /**
+       * Invoked by HTTP after the client stream has been fully handed to Express,
+       * finalizing the success terminal with the exact client-end duration.
+       * Absent on failures/cancellations (those finalize at their owning seam).
+       */
+      readonly onDelivered?: (durationMs: number) => Promise<void>;
     }
   | {
       /** Dry-run inspection response. */
@@ -195,6 +306,20 @@ export type GatewayResult =
       /** Normalized domain failure. */
       readonly kind: "failure";
       readonly failure: NormalizedFailure;
+      /**
+       * Invoked by HTTP after the error envelope has been handed to Express,
+       * finalizing the failed terminal with the exact delivery duration.
+       */
+      readonly finalize?: (durationMs: number) => Promise<void>;
+    }
+  | {
+      /** Internal/local unexpected fault. */
+      readonly kind: "internal_fault";
+      /**
+       * Invoked by HTTP after the safe 500 envelope has been handed to Express,
+       * finalizing the internal-fault terminal with the exact delivery duration.
+       */
+      readonly finalize?: (durationMs: number) => Promise<void>;
     };
 
 /**
@@ -332,6 +457,11 @@ export interface PreparedProviderRequest {
    * Maximum stream idle duration in milliseconds between incoming bytes.
    */
   readonly streamIdleMs: number;
+
+  /**
+   * Ordered list of JSON Pointers mutated by defaults, extraBody, overrides, or model substitution.
+   */
+  readonly mutations: readonly string[];
 }
 
 /**
@@ -577,6 +707,16 @@ export interface KeyLease {
 }
 
 /**
+ * Non-mutating key credential preview for dry-run inspection.
+ */
+export interface KeyPreview {
+  /** Selected key name safe for diagnostic output. */
+  readonly keyName: string;
+  /** Secret value for header preparation. */
+  readonly secret: string;
+}
+
+/**
  * Result of a non-blocking key acquisition attempt.
  */
 export type KeyAcquireResult =
@@ -615,6 +755,25 @@ export interface KeyPool {
    * @returns The number of currently available keys.
    */
   availableCount(nowMs: number): number;
+
+  /**
+   * Non-mutating preview of the next enabled key for dry run evaluation.
+   *
+   * @returns Key name and secret if at least one enabled key exists; otherwise `undefined`.
+   */
+  preview(): KeyPreview | undefined;
+}
+
+/**
+ * Incremental raw byte sink for streaming trace stages.
+ */
+export interface TraceByteSink {
+  /** Appends a raw chunk to the active temporary stage sink. */
+  append(chunk: Uint8Array): Promise<void>;
+  /** Fsyncs, closes, and atomically commits the stage file. */
+  complete(): Promise<void>;
+  /** Closes and discards the temporary sink without committing. */
+  discard(): Promise<void>;
 }
 
 /**
@@ -676,6 +835,14 @@ export interface TraceSession {
    * @returns Promise resolving when the file is fsynced and atomically renamed.
    */
   recordBytes(stage: TraceStage, bytes: Uint8Array): Promise<void>;
+
+  /**
+   * Opens an incremental raw byte sink that publishes atomically on completion.
+   *
+   * @param stage - Lifecycle stage identifier.
+   * @returns A {@link TraceByteSink} handle.
+   */
+  openBytes(stage: TraceStage): TraceByteSink;
 
   /**
    * Writes the final terminal marker file (`999_terminal.json`) and closes session resources.

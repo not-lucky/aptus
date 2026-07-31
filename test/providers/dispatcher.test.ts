@@ -16,6 +16,7 @@ function prepare(url: string, overrides: Partial<PreparedProviderRequest> = {}):
     stream: false,
     deadlineMs: performance.now() + 60_000,
     streamIdleMs: 60_000,
+    mutations: [],
     ...overrides,
   };
 }

@@ -17,6 +17,13 @@ export function createNoopTraceRecorder(): TraceRecorder {
     async recordBytes(): Promise<void> {
       // Intentionally empty.
     },
+    openBytes() {
+      return {
+        async append(): Promise<void> {},
+        async complete(): Promise<void> {},
+        async discard(): Promise<void> {},
+      };
+    },
     async finish(): Promise<void> {
       // Intentionally empty.
     },

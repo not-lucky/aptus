@@ -546,9 +546,7 @@ test("YAML violations: document count, parse, merge key, non-string key, custom 
 
   const customMapTag = await loadConfig(writeText("server: !customMap\n  port: 8080\n"), {});
   assert(!customMapTag.ok);
-  assert.ok(
-    errorLines(customMapTag.error).includes("CONFIG_YAML_CUSTOM_TAG /server YAML custom tags are not allowed"),
-  );
+  assert.ok(errorLines(customMapTag.error).includes("CONFIG_YAML_CUSTOM_TAG /server YAML custom tags are not allowed"));
 
   const customSeqTag = await loadConfig(
     writeText('auth:\n  clientKeys: !customSeq\n    - name: client\n      secret: "${APTUS_CLIENT_PRIMARY}"\n'),

@@ -4,13 +4,33 @@ import http from "node:http";
 import { test } from "vitest";
 import type { AptusConfig, SecretString } from "../../src/config/types.ts";
 import type { Gateway, GatewayRequest, GatewayResult } from "../../src/domain/contracts.ts";
-import { createClientApp } from "../../src/http/client-app.ts";
+import { type ClientAppOptions, createClientApp } from "../../src/http/client-app.ts";
 import { createErrorEncoder } from "../../src/http/error-encoder.ts";
 import { createOperationsApp } from "../../src/http/operations-app.ts";
+import { createLifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
+import { aptusLogger } from "../../src/observability/logging.ts";
 import { createMetricsRegistry } from "../../src/observability/metrics.ts";
+import { createNoopTraceRecorder } from "../../src/observability/trace/noop-recorder.ts";
 import { createProtocolAdapters } from "../../src/providers/adapters.ts";
+import { createOwnedMemoryBody } from "../../src/routing/spool.ts";
 
 const config = configuration();
+
+function createTestClientApp(options: Partial<ClientAppOptions> & { config: AptusConfig; gateway: Gateway }) {
+  return createClientApp({
+    revision: "test-rev",
+    adapters: createProtocolAdapters(),
+    errorEncoder: createErrorEncoder(),
+    traceRecorder: createNoopTraceRecorder(),
+    observer: createLifecycleObserver({
+      logger: aptusLogger(),
+      metrics: createMetricsRegistry(),
+      loggingEnabled: false,
+      metricsEnabled: false,
+    }),
+    ...options,
+  });
+}
 
 test("all create aliases share the injected gateway and request identity", async () => {
   const calls: GatewayRequest[] = [];
@@ -20,31 +40,28 @@ test("all create aliases share the injected gateway and request identity", async
       return complete();
     },
   };
-  await withApp(
-    createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      for (const path of [
-        "/chat/completions",
-        "/v1/chat/completions",
-        "/responses",
-        "/v1/responses",
-        "/messages",
-        "/v1/messages",
-      ]) {
-        const response = await request(
-          port,
-          path,
-          path.includes("messages") ? { "x-api-key": "client-secret" } : { authorization: "Bearer client-secret" },
-          '{"model":"primary"}',
-        );
-        assert.equal(response.status, 200, path);
-        assert.match(
-          firstHeader(response.headers, "x-aptus-request-id"),
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-        );
-      }
-    },
-  );
+  await withApp(createTestClientApp({ config, gateway }), async (port) => {
+    for (const path of [
+      "/chat/completions",
+      "/v1/chat/completions",
+      "/responses",
+      "/v1/responses",
+      "/messages",
+      "/v1/messages",
+    ]) {
+      const response = await request(
+        port,
+        path,
+        path.includes("messages") ? { "x-api-key": "client-secret" } : { authorization: "Bearer client-secret" },
+        '{"model":"primary"}',
+      );
+      assert.equal(response.status, 200, path);
+      assert.match(
+        firstHeader(response.headers, "x-aptus-request-id"),
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      );
+    }
+  });
   assert.equal(calls.length, 6);
   assert.deepEqual(
     calls.map((call) => call.endpoint),
@@ -60,30 +77,59 @@ test("catalogs are local sorted alias-free and never dispatch", async () => {
       return complete();
     },
   };
-  await withApp(
-    createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      const openAi = await request(port, "/v1/models", { authorization: "Bearer client-secret" });
-      assert.equal(openAi.status, 200);
-      assert.deepEqual(
-        JSON.parse(openAi.body).data.map((entry: { id: string }) => entry.id),
-        ["primary", "route"],
-      );
-      const anthropic = await request(port, "/models?after_id=nope&after_id=again&limit=bad", {
-        "x-api-key": "client-secret",
-      });
-      assert.equal(anthropic.status, 200);
-      const body = JSON.parse(anthropic.body);
-      assert.equal(body.has_more, false);
-      assert.equal(body.first_id, "primary");
-      assert.match(
-        firstHeader(openAi.headers, "x-aptus-request-id"),
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-      );
-      assert.equal(body.last_id, "route");
-    },
-  );
+  await withApp(createTestClientApp({ config, gateway }), async (port) => {
+    const openAi = await request(port, "/v1/models", { authorization: "Bearer client-secret" });
+    assert.equal(openAi.status, 200);
+    assert.deepEqual(
+      JSON.parse(openAi.body).data.map((entry: { id: string }) => entry.id),
+      ["primary", "route"],
+    );
+    const anthropic = await request(port, "/models?after_id=nope&after_id=again&limit=bad", {
+      "x-api-key": "client-secret",
+    });
+    assert.equal(anthropic.status, 200);
+    const body = JSON.parse(anthropic.body);
+    assert.equal(body.has_more, false);
+    assert.equal(body.first_id, "primary");
+    assert.match(
+      firstHeader(openAi.headers, "x-aptus-request-id"),
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    assert.equal(body.last_id, "route");
+  });
   assert.equal(calls, 0);
+});
+
+test("authenticated catalog records a models HTTP observation", async () => {
+  const metrics = createMetricsRegistry();
+  const observer = createLifecycleObserver({
+    logger: aptusLogger(),
+    metrics,
+    loggingEnabled: false,
+    metricsEnabled: true,
+  });
+  const gateway: Gateway = {
+    async execute() {
+      return complete();
+    },
+  };
+  const app = createClientApp({
+    revision: "test-rev",
+    config,
+    gateway,
+    adapters: createProtocolAdapters(),
+    errorEncoder: createErrorEncoder(),
+    traceRecorder: createNoopTraceRecorder(),
+    observer,
+  });
+  await withApp(app, async (port) => {
+    await request(port, "/v1/models", { authorization: "Bearer client-secret" });
+    const rendered = await metrics.render();
+    assert.match(
+      rendered,
+      /aptus_http_requests_total\{endpoint_protocol="openai-chat",endpoint="models",outcome_category="complete",stream="false"\} 1/,
+    );
+  });
 });
 
 test("unknown and disallowed names are byte-identical native not-found failures", async () => {
@@ -96,11 +142,9 @@ test("unknown and disallowed names are byte-identical native not-found failures"
     },
   };
   await withApp(
-    createClientApp({
+    createTestClientApp({
       config: restricted,
       gateway,
-      adapters: createProtocolAdapters(),
-      errorEncoder: createErrorEncoder(),
     }),
     async (port) => {
       const unknown = await request(
@@ -141,11 +185,9 @@ test("in-flight exhaustion follows body admission and does not dispatch", async 
     },
   };
   await withApp(
-    createClientApp({
+    createTestClientApp({
       config: limited,
       gateway,
-      adapters: createProtocolAdapters(),
-      errorEncoder: createErrorEncoder(),
     }),
     async (port) => {
       const first = request(
@@ -180,11 +222,9 @@ test("oversized ingress returns an unidentified native failure without dispatch"
     },
   };
   await withApp(
-    createClientApp({
+    createTestClientApp({
       config: limited,
       gateway,
-      adapters: createProtocolAdapters(),
-      errorEncoder: createErrorEncoder(),
     }),
     async (port) => {
       const response = await request(
@@ -210,11 +250,9 @@ test("unauthenticated request returns 401 before consuming concurrency limiter",
     },
   };
   await withApp(
-    createClientApp({
+    createTestClientApp({
       config: limited,
       gateway,
-      adapters: createProtocolAdapters(),
-      errorEncoder: createErrorEncoder(),
     }),
     async (port) => {
       const response = await request(
@@ -267,33 +305,27 @@ test("error encoder maps every category with request IDs", async () => {
         return { kind: "failure", failure: { category, message: "safe", retryable: false } };
       },
     };
-    await withApp(
-      createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-      async (port) => {
-        const response = await request(
-          port,
-          "/responses",
-          { authorization: "Bearer client-secret" },
-          '{"model":"primary"}',
-        );
-        assert.equal(response.status, expected[category], category);
-        assert.ok(response.headers["x-aptus-request-id"]);
-      },
-    );
+    await withApp(createTestClientApp({ config, gateway }), async (port) => {
+      const response = await request(
+        port,
+        "/responses",
+        { authorization: "Bearer client-secret" },
+        '{"model":"primary"}',
+      );
+      assert.equal(response.status, expected[category], category);
+      assert.ok(response.headers["x-aptus-request-id"]);
+    });
   }
   const gateway: Gateway = {
     async execute() {
       return { kind: "failure", failure: { category: "unavailable", message: "safe", retryable: false } };
     },
   };
-  await withApp(
-    createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      const response = await request(port, "/messages", { "x-api-key": "client-secret" }, '{"model":"primary"}');
-      assert.equal(response.status, 529);
-      assert.equal(JSON.parse(response.body).error.type, "overloaded_error");
-    },
-  );
+  await withApp(createTestClientApp({ config, gateway }), async (port) => {
+    const response = await request(port, "/messages", { "x-api-key": "client-secret" }, '{"model":"primary"}');
+    assert.equal(response.status, 529);
+    assert.equal(JSON.parse(response.body).error.type, "overloaded_error");
+  });
 });
 
 test("gateway failures use complete protocol-native error envelopes", async () => {
@@ -302,28 +334,25 @@ test("gateway failures use complete protocol-native error envelopes", async () =
       return { kind: "failure", failure: { category: "not_found", message: "safe", retryable: false } };
     },
   };
-  await withApp(
-    createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      const openAi = await request(
-        port,
-        "/chat/completions",
-        { authorization: "Bearer client-secret" },
-        '{"model":"primary"}',
-      );
-      assert.deepEqual(JSON.parse(openAi.body).error, {
-        message: "safe",
-        type: "not_found_error",
-        param: null,
-        code: null,
-      });
-      const messages = await request(port, "/messages", { "x-api-key": "client-secret" }, '{"model":"primary"}');
-      const messageBody = JSON.parse(messages.body);
-      assert.equal(messageBody.type, "error");
-      assert.equal(messageBody.error.type, "not_found_error");
-      assert.equal(messageBody.request_id, firstHeader(messages.headers, "x-aptus-request-id"));
-    },
-  );
+  await withApp(createTestClientApp({ config, gateway }), async (port) => {
+    const openAi = await request(
+      port,
+      "/chat/completions",
+      { authorization: "Bearer client-secret" },
+      '{"model":"primary"}',
+    );
+    assert.deepEqual(JSON.parse(openAi.body).error, {
+      message: "safe",
+      type: "not_found_error",
+      param: null,
+      code: null,
+    });
+    const messages = await request(port, "/messages", { "x-api-key": "client-secret" }, '{"model":"primary"}');
+    const messageBody = JSON.parse(messages.body);
+    assert.equal(messageBody.type, "error");
+    assert.equal(messageBody.error.type, "not_found_error");
+    assert.equal(messageBody.request_id, firstHeader(messages.headers, "x-aptus-request-id"));
+  });
 });
 
 test("client disconnect aborts the gateway signal without a second response", async () => {
@@ -336,26 +365,23 @@ test("client disconnect aborts the gateway signal without a second response", as
       return complete();
     },
   };
-  await withApp(
-    createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      const disconnected = Promise.withResolvers<void>();
-      const request = http.request({
-        host: "127.0.0.1",
-        port,
-        path: "/chat/completions",
-        method: "POST",
-        headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
-      });
-      request.on("error", () => disconnected.resolve());
-      request.end('{"model":"primary"}');
-      await waitFor(() => signal !== undefined);
-      request.destroy();
-      await disconnected.promise;
-      assert.equal(signal?.aborted, true);
-      completion.resolve();
-    },
-  );
+  await withApp(createTestClientApp({ config, gateway }), async (port) => {
+    const disconnected = Promise.withResolvers<void>();
+    const request = http.request({
+      host: "127.0.0.1",
+      port,
+      path: "/chat/completions",
+      method: "POST",
+      headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
+    });
+    request.on("error", () => disconnected.resolve());
+    request.end('{"model":"primary"}');
+    await waitFor(() => signal !== undefined);
+    request.destroy();
+    await disconnected.promise;
+    assert.equal(signal?.aborted, true);
+    completion.resolve();
+  });
 });
 
 test("request deadline aborts the gateway once and returns a native timeout failure", async () => {
@@ -372,28 +398,25 @@ test("request deadline aborts the gateway once and returns a native timeout fail
       });
     },
   };
-  await withApp(
-    createClientApp({ config: timed, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      const response = await request(
-        port,
-        "/chat/completions",
-        { authorization: "Bearer client-secret" },
-        '{"model":"primary"}',
-      );
-      assert.equal(response.status, 504);
-      assert.deepEqual(JSON.parse(response.body).error, {
-        message: "request deadline exceeded",
-        type: "api_error",
-        param: null,
-        code: null,
-      });
-      assert.match(
-        firstHeader(response.headers, "x-aptus-request-id"),
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-      );
-    },
-  );
+  await withApp(createTestClientApp({ config: timed, gateway }), async (port) => {
+    const response = await request(
+      port,
+      "/chat/completions",
+      { authorization: "Bearer client-secret" },
+      '{"model":"primary"}',
+    );
+    assert.equal(response.status, 504);
+    assert.deepEqual(JSON.parse(response.body).error, {
+      message: "request deadline exceeded",
+      type: "api_error",
+      param: null,
+      code: null,
+    });
+    assert.match(
+      firstHeader(response.headers, "x-aptus-request-id"),
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+  });
   assert.equal(calls, 1);
   assert.equal(aborts, 1);
 });
@@ -414,37 +437,34 @@ test("stream deadline closes after headers and cancels the owned stream", async 
       return { kind: "stream", status: 200, headers: { "content-type": "text/event-stream" }, body };
     },
   };
-  await withApp(
-    createClientApp({ config: timed, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      await new Promise<void>((resolve, reject) => {
-        const client = http.request(
-          {
-            host: "127.0.0.1",
-            port,
-            path: "/chat/completions",
-            method: "POST",
-            headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
-          },
-          (response) => {
-            assert.equal(response.statusCode, 200);
-            let body = "";
-            response.setEncoding("utf8");
-            response.on("data", (chunk: string) => {
-              body += chunk;
-            });
-            response.on("aborted", () => {
-              assert.equal(body, "chunk");
-              resolve();
-            });
-            response.on("end", () => reject(new Error("deadline stream ended instead of closing")));
-          },
-        );
-        client.on("error", reject);
-        client.end('{"model":"primary"}');
-      });
-    },
-  );
+  await withApp(createTestClientApp({ config: timed, gateway }), async (port) => {
+    await new Promise<void>((resolve, reject) => {
+      const client = http.request(
+        {
+          host: "127.0.0.1",
+          port,
+          path: "/chat/completions",
+          method: "POST",
+          headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
+        },
+        (response) => {
+          assert.equal(response.statusCode, 200);
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.on("aborted", () => {
+            assert.equal(body, "chunk");
+            resolve();
+          });
+          response.on("end", () => reject(new Error("deadline stream ended instead of closing")));
+        },
+      );
+      client.on("error", reject);
+      client.end('{"model":"primary"}');
+    });
+  });
   await cancellation.promise;
 });
 
@@ -463,31 +483,28 @@ test("stream relay cancels the owned stream when the client disconnects", async 
       return { kind: "stream", status: 200, headers: { "content-type": "text/event-stream" }, body };
     },
   };
-  await withApp(
-    createClientApp({ config, gateway, adapters: createProtocolAdapters(), errorEncoder: createErrorEncoder() }),
-    async (port) => {
-      const disconnected = Promise.withResolvers<void>();
-      const request = http.request(
-        {
-          host: "127.0.0.1",
-          port,
-          path: "/chat/completions",
-          method: "POST",
-          headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
-        },
-        (response) => {
-          response.once("data", () => {
-            request.destroy();
-            disconnected.resolve();
-          });
-        },
-      );
-      request.on("error", () => undefined);
-      request.end('{"model":"primary"}');
-      await disconnected.promise;
-      await cancellation.promise;
-    },
-  );
+  await withApp(createTestClientApp({ config, gateway }), async (port) => {
+    const disconnected = Promise.withResolvers<void>();
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/chat/completions",
+        method: "POST",
+        headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
+      },
+      (response) => {
+        response.once("data", () => {
+          request.destroy();
+          disconnected.resolve();
+        });
+      },
+    );
+    request.on("error", () => undefined);
+    request.end('{"model":"primary"}');
+    await disconnected.promise;
+    await cancellation.promise;
+  });
 });
 
 test("operations metrics honor enablement and bounded endpoint labels", async () => {
@@ -502,7 +519,6 @@ test("operations metrics honor enablement and bounded endpoint labels", async ()
       assert.equal(metrics.status, 200);
       assert.match(metrics.body, /endpoint="health_live"/);
       assert.match(metrics.body, /endpoint="health_ready"/);
-      assert.match(metrics.body, /endpoint="health"/);
       assert.match(metrics.body, /endpoint="metrics"/);
     },
   );
@@ -515,12 +531,75 @@ test("operations metrics honor enablement and bounded endpoint labels", async ()
   );
 });
 
-function complete(): GatewayResult {
+test("GET /health aliases to /health/ready and uses health_ready metric endpoint label", async () => {
+  const metrics = createMetricsRegistry();
+  const state = { draining: false, traceReady: true };
+  await withApp(
+    createOperationsApp({ config, revision: "sha256:test", state, metrics }),
+    async (port) => {
+      // 1. Ready state: /health and /health/ready both return 200 with status: "ok"
+      const resReady = await request(port, "/health/ready", {});
+      const resHealth = await request(port, "/health", {});
+      assert.equal(resReady.status, 200);
+      assert.equal(resHealth.status, 200);
+      assert.deepEqual(JSON.parse(resReady.body), {
+        status: "ok",
+        configRevision: "sha256:test",
+        traceReady: true,
+        enabledProviderCount: 1,
+      });
+      assert.deepEqual(JSON.parse(resHealth.body), {
+        status: "ok",
+        configRevision: "sha256:test",
+        traceReady: true,
+        enabledProviderCount: 1,
+      });
+
+      // 2. Degraded state: /health and /health/ready both return 503 with status: "degraded"
+      state.traceReady = false;
+      const resDegradedReady = await request(port, "/health/ready", {});
+      const resDegradedHealth = await request(port, "/health", {});
+      assert.equal(resDegradedReady.status, 503);
+      assert.equal(resDegradedHealth.status, 503);
+      assert.deepEqual(JSON.parse(resDegradedReady.body), {
+        status: "degraded",
+        configRevision: "sha256:test",
+        traceReady: false,
+        enabledProviderCount: 1,
+      });
+      assert.deepEqual(JSON.parse(resDegradedHealth.body), {
+        status: "degraded",
+        configRevision: "sha256:test",
+        traceReady: false,
+        enabledProviderCount: 1,
+      });
+
+      // 3. Render metrics: endpoint label is health_ready (never health)
+      const rendered = await metrics.render();
+      assert.match(rendered, /endpoint="health_ready"/);
+      assert.doesNotMatch(rendered, /endpoint="health"[^_\w]/);
+    },
+  );
+});
+
+test("GET /metrics returns 404 when metrics.enabled is false", async () => {
+  const disabledConfig = { ...config, metrics: { enabled: false } };
+  const state = { draining: false, traceReady: true };
+  await withApp(
+    createOperationsApp({ config: disabledConfig, revision: "sha256:test", state, metrics: createMetricsRegistry() }),
+    async (port) => {
+      const response = await request(port, "/metrics", {});
+      assert.equal(response.status, 404);
+    },
+  );
+});
+
+function complete(): import("../../src/domain/contracts.ts").GatewayResult {
   return {
     kind: "complete",
     status: 200,
     headers: { "content-type": "application/json" },
-    body: new TextEncoder().encode("{}"),
+    body: createOwnedMemoryBody(new TextEncoder().encode("{}")),
   };
 }
 

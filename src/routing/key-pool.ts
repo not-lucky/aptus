@@ -148,5 +148,20 @@ export function createKeyPool(
       }
       return count;
     },
+
+    preview() {
+      const enabled = [...statesByName.values()].filter((state) => state.config.enabled);
+      if (enabled.length === 0) {
+        return undefined;
+      }
+      if (strategy === "fill-first") {
+        const first = enabled[0];
+        return first !== undefined ? { keyName: first.config.name, secret: first.config.secret } : undefined;
+      }
+      // round-robin preview: reads at cursor without advancing it
+      const index = roundRobinCursor % enabled.length;
+      const state = enabled[index];
+      return state !== undefined ? { keyName: state.config.name, secret: state.config.secret } : undefined;
+    },
   };
 }

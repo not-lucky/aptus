@@ -3,7 +3,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { test } from "vitest";
-import { postJson, seededSecrets, startAptusCli, traceFiles, waitFor, type RunningCli } from "../helpers/cli-process.ts";
+import {
+  postJson,
+  type RunningCli,
+  seededSecrets,
+  startAptusCli,
+  traceFiles,
+  waitFor,
+} from "../helpers/cli-process.ts";
 import {
   COMPLETE_MESSAGES_BYTES,
   ERROR_MESSAGES_BYTES,
@@ -73,6 +80,7 @@ test.concurrent("process: complete Messages native path applies mutation and rel
     assert.deepEqual(recordedBody.unknown_field, { test: true });
 
     // Trace checks
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const names = traceFiles(cli.traceRoot);
     assert.ok(names.includes("000_manifest.json"));
     assert.ok(names.includes("999_terminal.json"));
@@ -135,6 +143,7 @@ test.concurrent("process: SSE Messages relays exact stream preserving pings and 
     assert.doesNotMatch(streamText, /data: \[DONE\]/);
 
     // Verify trace files hold exact bytes
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const names = readdirSync(join(cli.traceRoot, dir)).sort();
@@ -173,6 +182,8 @@ test.concurrent("process: Messages post-200 in-band error is relayed without for
     assert.doesNotMatch(new TextDecoder().decode(bytes), /event: message_stop/);
 
     // Native relay does not semantically decode stream, so cleanly relayed stream records complete at HTTP 200
+    // after HTTP hands the final byte to the client.
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminalJson = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {
@@ -207,6 +218,7 @@ test.concurrent("process: Messages terminal HTTP 404 error is relayed with faile
     assert.equal(response.status, 404);
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), ERROR_MESSAGES_BYTES);
 
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminalJson = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {

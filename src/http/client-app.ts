@@ -2,13 +2,26 @@ import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import express, { type Request, type Response } from "express";
 import type { AptusConfig } from "../config/types.ts";
-import type { Gateway, GatewayResult, HeaderMap, Protocol, ProtocolAdapter } from "../domain/contracts.ts";
-import type { ErrorEncoder, NormalizedFailure } from "../domain/operations.ts";
+import type {
+  Gateway,
+  GatewayResult,
+  HeaderMap,
+  Protocol,
+  ProtocolAdapter,
+  TerminalCoordinator,
+  TraceRecorder,
+} from "../domain/contracts.ts";
+import type { ErrorEncoder, NormalizedFailure, TraceTerminal } from "../domain/operations.ts";
 import { type AptusRequestId, createRequestId } from "../domain/request-id.ts";
+import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { Redactor } from "../observability/trace/redaction.ts";
+import { failureJson, notFoundFailure, statusFromCategory } from "../routing/failures.ts";
 import { authorizePublicName, createNameIndex, type NameIndex } from "../routing/resolution.ts";
+import { type Clock, systemClock } from "../routing/timing.ts";
 import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.ts";
 import { type AuthPurpose, authenticateClient } from "./auth.ts";
 import { authorizedCatalogEntries } from "./catalog.ts";
+import { createTerminalCoordinator } from "./coordinator.ts";
 import {
   encodeInternalFailure,
   encodeUnidentifiedFailure,
@@ -22,20 +35,7 @@ import type { RequestCancellationRegistry } from "./request-cancellation.ts";
 export type ClientEndpoint = "chat_completions" | "responses" | "messages" | "models";
 
 /** Lifecycle outcome of a client request for telemetry. */
-export type ClientOutcome = "accepted" | "rejected" | "complete" | "failed" | "cancelled";
-
-/**
- * Narrow HTTP-side telemetry observer, structurally decoupled from the
- * observability module. It records `aptus_http_requests_total` outcomes.
- */
-export interface HttpRequestObserver {
-  observeRequest(fields: {
-    readonly endpointProtocol: Protocol;
-    readonly endpoint: ClientEndpoint;
-    readonly outcome: ClientOutcome;
-    readonly stream: boolean;
-  }): void;
-}
+export type ClientOutcome = "complete" | "failed" | "cancelled";
 
 /**
  * Initialization options for constructing the authenticated client Express application.
@@ -43,16 +43,24 @@ export interface HttpRequestObserver {
 export interface ClientAppOptions {
   /** Active configuration snapshot. */
   readonly config: AptusConfig;
+  /** SHA-256 config revision digest recorded in trace manifests. */
+  readonly revision: string;
   /** Gateway domain contract for dispatching admitted requests. */
   readonly gateway: Gateway;
   /** Dictionary of protocol adapters keyed by protocol identifier. */
   readonly adapters: Readonly<Record<Protocol, ProtocolAdapter>>;
   /** Protocol-native error encoder for serializing domain failures. */
   readonly errorEncoder: ErrorEncoder;
+  /** Trace recorder for opening per-request trace sessions. */
+  readonly traceRecorder: TraceRecorder;
+  /** Shared telemetry observer for structured logs and metrics. */
+  readonly observer: GatewayObservability;
+  /** Optional monotonic and wall clock source. */
+  readonly clock?: Clock;
+  /** Optional field-aware secret redactor. */
+  readonly redactor?: Redactor;
   /** Optional concurrency limiter (defaults to server config `maxInFlight`). */
   readonly limiter?: AdmissionLimiter;
-  /** Optional metrics observer for client endpoint outcomes. */
-  readonly observer?: HttpRequestObserver;
   /** Optional cancellation registry for managing active request abort signals during shutdown. */
   readonly cancellations?: RequestCancellationRegistry;
 }
@@ -66,7 +74,7 @@ type CreateEndpoint = "/chat/completions" | "/responses" | "/messages";
  * - `POST /chat/completions` & `POST /v1/chat/completions`: OpenAI chat completions
  * - `POST /responses` & `POST /v1/responses`: OpenAI responses API
  * - `POST /messages` & `POST /v1/messages`: Anthropic messages API
- * - `GET /models` & `GET /v1/models`: Model catalog listing (OpenAI list format for Bearer auth, Anthropic format for x-api-key)
+ * - `GET /models` & `GET /v1/models`: Model catalog listing
  *
  * @param options - Application construction options.
  * @returns Configured Express application.
@@ -75,11 +83,14 @@ export function createClientApp(options: ClientAppOptions): express.Express {
   const app = express();
   const limiter = options.limiter ?? createAdmissionLimiter(options.config.server.maxInFlight);
   const nameIndex = createNameIndex(options.config);
+  const modelsByName = new Set(options.config.models.map((m) => m.name));
+
   mountCreate(
     app,
     options,
     limiter,
     nameIndex,
+    modelsByName,
     ["/chat/completions", "/v1/chat/completions"],
     "openai-chat",
     "/chat/completions",
@@ -91,6 +102,7 @@ export function createClientApp(options: ClientAppOptions): express.Express {
     options,
     limiter,
     nameIndex,
+    modelsByName,
     ["/responses", "/v1/responses"],
     "openai-responses",
     "/responses",
@@ -102,6 +114,7 @@ export function createClientApp(options: ClientAppOptions): express.Express {
     options,
     limiter,
     nameIndex,
+    modelsByName,
     ["/messages", "/v1/messages"],
     "anthropic-messages",
     "/messages",
@@ -121,13 +134,17 @@ function mountCreate(
   options: ClientAppOptions,
   limiter: AdmissionLimiter,
   nameIndex: NameIndex,
+  modelsByName: ReadonlySet<string>,
   paths: readonly string[],
   protocol: Protocol,
   endpoint: CreateEndpoint,
   label: ClientEndpoint,
   authPurpose: AuthPurpose,
 ): void {
-  app.post([...paths], createController(options, limiter, nameIndex, protocol, endpoint, label, authPurpose));
+  app.post(
+    [...paths],
+    createController(options, limiter, nameIndex, modelsByName, protocol, endpoint, label, authPurpose),
+  );
 }
 
 /**
@@ -137,11 +154,14 @@ function createController(
   options: ClientAppOptions,
   limiter: AdmissionLimiter,
   nameIndex: NameIndex,
+  modelsByName: ReadonlySet<string>,
   protocol: Protocol,
   endpoint: CreateEndpoint,
   label: ClientEndpoint,
   authPurpose: AuthPurpose,
 ): (request: Request, response: Response) => Promise<void> {
+  const clock = options.clock ?? systemClock;
+
   return async (request, response) => {
     const controller = new AbortController();
     const requestAborted = (): void => controller.abort();
@@ -150,15 +170,17 @@ function createController(
     };
     request.once("aborted", requestAborted);
     response.once("close", responseClosed);
+
     let deadline: NodeJS.Timeout | undefined;
     let deadlineExpired = false;
     let aptusRequestId: AptusRequestId | undefined;
     let release: (() => void) | undefined;
     let unregisterCancellation: (() => void) | undefined;
-    // Narrow telemetry helper recording `aptus_http_requests_total` outcomes.
-    const observeOutcome = (outcome: ClientOutcome, stream = false): void => {
-      options.observer?.observeRequest({ endpointProtocol: protocol, endpoint: label, outcome, stream });
-    };
+    let coordinator: TerminalCoordinator | undefined;
+    let streamRequested = false;
+    let startedMs = clock.nowMonotonicMs();
+    let canonicalPublicName: string | undefined;
+
     try {
       // 1. Client authentication: Validate Bearer token or x-api-key before reading body or taking lease.
       const authentication = authenticateClient(
@@ -168,7 +190,6 @@ function createController(
         request.rawHeaders,
       );
       if (authentication === undefined) {
-        observeOutcome("rejected");
         writeEncoded(response, encodeUnidentifiedFailure(protocol, authenticationFailure()));
         return;
       }
@@ -176,18 +197,39 @@ function createController(
       // 2. Concurrency lease: Reject with 429 if maxInFlight limit is exceeded.
       release = limiter.tryAcquire();
       if (release === undefined) {
-        observeOutcome("rejected");
         writeEncoded(response, encodeUnidentifiedFailure(protocol, rateLimitFailure()));
         return;
       }
+
       unregisterCancellation = options.cancellations?.register(controller);
       aptusRequestId = createRequestId();
+      startedMs = clock.nowMonotonicMs();
+
       deadline = setTimeout(() => {
         deadlineExpired = true;
         controller.abort();
       }, options.config.server.requestDeadlineMs);
 
-      // 3. Ingress admission: Stream body, enforce byte limits, validate UTF-8 & duplicate-free JSON, bounded by deadline.
+      // Start Trace session
+      const trace = await options.traceRecorder.start({
+        aptusRequestId,
+        startedAtLocal: formatTraceDirectoryTimestamp(clock.nowWall()),
+        configRevision: options.revision,
+        sourceProtocol: protocol,
+      });
+
+      // Create request-scoped terminal coordinator
+      coordinator = createTerminalCoordinator({
+        aptusRequestId,
+        endpointProtocol: protocol,
+        startedMs,
+        trace,
+        observer: options.observer,
+        clock,
+        redactor: options.redactor,
+      });
+
+      // 3. Ingress admission: Stream body, enforce byte limits, validate UTF-8 & duplicate-free JSON.
       const admissionRace = await raceWithAbort(
         admitJsonObject(
           request as IncomingMessage,
@@ -196,37 +238,123 @@ function createController(
         ),
         controller.signal,
       );
+
       if (admissionRace.aborted || controller.signal.aborted) {
         if (deadlineExpired && !response.headersSent) {
           writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
+          coordinator.markClientFirstByte();
         } else if (!response.destroyed) {
           response.destroy();
         }
-        observeOutcome(deadlineExpired ? "failed" : "cancelled");
+        const terminal = deadlineExpired
+          ? ({ kind: "failed", failure: timeoutFailure() } as const)
+          : ({ kind: "cancelled", by: "client" } as const);
+        await coordinator.finalize({
+          terminal,
+          outcomeCategory: deadlineExpired ? "failed" : "cancelled",
+          status: deadlineExpired ? 504 : 499,
+          attempts: 0,
+          stream: false,
+          durationMs: clock.nowMonotonicMs() - startedMs,
+          canonicalPublicName: "unknown",
+        });
+        await coordinator.finalized;
         return;
       }
+
       const admission = admissionRace.value;
       if (!admission.ok) {
-        observeOutcome("rejected");
-        writeEncoded(response, encodeUnidentifiedFailure(protocol, { ...admission.failure, retryable: false }));
+        const failure = { ...admission.failure, retryable: false };
+        writeEncoded(response, encodeUnidentifiedFailure(protocol, failure));
+        // Close the already-started Trace session so rejected bodies do not
+        // leak manifest-only directories that retention can never age-evict.
+        await coordinator.finalize({
+          terminal: { kind: "failed", failure },
+          outcomeCategory: "failed",
+          status: statusFromCategory(failure.category, protocol),
+          attempts: 0,
+          stream: false,
+          durationMs: clock.nowMonotonicMs() - startedMs,
+          canonicalPublicName: "unknown",
+        });
+        await coordinator.finalized;
         return;
       }
 
-      // 4. Model extraction & resolution: Extract model field and verify client authorization.
-      const publicName = options.adapters[protocol].readPublicModel(admission.body);
-      if (!publicName.ok) {
-        writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: publicName.error }));
-        observeOutcome("failed");
-        return;
-      }
-      if (authorizePublicName(nameIndex, authentication.name, publicName.value) === undefined) {
-        writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: notFoundFailure() }));
-        observeOutcome("failed");
+      streamRequested = admission.body.stream === true;
+
+      // 4. Request admission telemetry & trace ingress
+      options.observer.requestIngress({
+        aptusRequestId,
+        endpointProtocol: protocol,
+        endpoint: label,
+        stream: streamRequested,
+      });
+      coordinator.markIngress(streamRequested);
+      options.observer.observe({
+        type: "request_ingress",
+        aptusRequestId,
+        sourceProtocol: protocol,
+        stream: streamRequested,
+      });
+      await trace.recordJson("client_request", { headers: admission.headers, body: admission.body });
+
+      const scheme = authentication.kind === "api-key" ? "x-api-key" : "bearer";
+      await trace.recordJson("authentication", { scheme, clientKeyName: authentication.name });
+      options.observer.authResult({ aptusRequestId, scheme, result: "ok" });
+
+      // 5. Model extraction & resolution
+      const publicNameResult = options.adapters[protocol].readPublicModel(admission.body);
+      if (!publicNameResult.ok) {
+        await trace.recordJson("resolution", { failure: failureJson(publicNameResult.error) });
+        writeEncoded(
+          response,
+          options.errorEncoder.encode({ protocol, aptusRequestId, failure: publicNameResult.error }),
+        );
+        coordinator.markClientFirstByte();
+        await coordinator.finalize({
+          terminal: { kind: "failed", failure: publicNameResult.error },
+          outcomeCategory: "failed",
+          status: 400,
+          attempts: 0,
+          stream: streamRequested,
+          durationMs: clock.nowMonotonicMs() - startedMs,
+          canonicalPublicName: "unknown",
+          emitCompleted: false,
+        });
+        await coordinator.finalized;
         return;
       }
 
-      // 5. Gateway execution: Dispatch request through domain gateway.
-      observeOutcome("accepted", admission.body.stream === true);
+      canonicalPublicName = authorizePublicName(nameIndex, authentication.name, publicNameResult.value);
+      if (canonicalPublicName === undefined) {
+        const failure = notFoundFailure();
+        await trace.recordJson("resolution", { requested: publicNameResult.value });
+        writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure }));
+        coordinator.markClientFirstByte();
+        await coordinator.finalize({
+          terminal: { kind: "failed", failure },
+          outcomeCategory: "failed",
+          status: 404,
+          attempts: 0,
+          stream: streamRequested,
+          durationMs: clock.nowMonotonicMs() - startedMs,
+          canonicalPublicName: "unknown",
+          emitCompleted: false,
+        });
+        await coordinator.finalized;
+        return;
+      }
+
+      const resolutionKind = modelsByName.has(canonicalPublicName) ? "model" : "route";
+      await trace.recordJson("resolution", {
+        publicName: publicNameResult.value,
+        canonicalPublicName,
+        kind: resolutionKind,
+      });
+      options.observer.nameResolved({ aptusRequestId, canonicalPublicName, kind: resolutionKind });
+
+      // 6. Gateway execution
       const gatewayResult = await raceWithAbort(
         options.gateway.execute({
           aptusRequestId,
@@ -236,41 +364,82 @@ function createController(
           body: admission.body,
           clientKeyName: authentication.name,
           signal: controller.signal,
+          canonicalPublicName,
+          resolutionKind,
+          stream: streamRequested,
+          coordinator,
+          trace,
         }),
         controller.signal,
       );
+
       if (gatewayResult.aborted || controller.signal.aborted) {
         if (deadlineExpired && !response.headersSent) {
           writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
+          coordinator.markClientFirstByte();
         } else if (!response.destroyed) {
           response.destroy();
         }
-        observeOutcome(deadlineExpired ? "failed" : "cancelled");
+        const terminal = deadlineExpired
+          ? ({ kind: "failed", failure: timeoutFailure() } as const)
+          : ({ kind: "cancelled", by: "client" } as const);
+        await coordinator.finalize({
+          terminal,
+          outcomeCategory: deadlineExpired ? "failed" : "cancelled",
+          status: deadlineExpired ? 504 : 499,
+          attempts: 0,
+          stream: streamRequested,
+          durationMs: clock.nowMonotonicMs() - startedMs,
+          canonicalPublicName,
+        });
+        await coordinator.finalized;
         return;
       }
 
-      // 6. Response serialization: Stream or write complete body to client.
-      const writeResult = await writeGatewayResult(
+      // 7. Response serialization and delivery
+      const delivery = await writeGatewayResult(
         response,
         gatewayResult.value,
         protocol,
         aptusRequestId,
         options.errorEncoder,
         controller.signal,
+        coordinator,
+        canonicalPublicName,
+        startedMs,
+        clock,
+        trace,
       );
-      if (writeResult === "aborted") {
-        if (deadlineExpired && !response.headersSent) {
-          writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
-        } else if (!response.destroyed) {
-          response.destroy();
-        }
-        observeOutcome(deadlineExpired ? "failed" : "cancelled");
-        return;
+
+      if (delivery === "aborted" && !response.destroyed) {
+        response.destroy();
       }
-      observeOutcome(
-        gatewayResult.value.kind === "failure" ? "failed" : "complete",
-        gatewayResult.value.kind === "stream",
-      );
+
+      // Fallback finalization in case gateway didn't finalize (e.g., test mocks)
+      const terminal: TraceTerminal =
+        delivery === "aborted"
+          ? deadlineExpired
+            ? { kind: "failed", failure: timeoutFailure() }
+            : { kind: "cancelled", by: "client" }
+          : { kind: "complete", status: response.statusCode || 200 };
+      await coordinator.finalize({
+        terminal,
+        outcomeCategory:
+          delivery === "aborted"
+            ? deadlineExpired
+              ? "failed"
+              : "cancelled"
+            : response.statusCode >= 400
+              ? "failed"
+              : "complete",
+        status: delivery === "aborted" ? (deadlineExpired ? 504 : 499) : response.statusCode || 200,
+        attempts: 1,
+        stream: streamRequested,
+        durationMs: clock.nowMonotonicMs() - startedMs,
+        canonicalPublicName,
+      });
+
+      await coordinator.finalized;
     } catch {
       if (!response.headersSent && !response.destroyed) {
         if (deadlineExpired && aptusRequestId !== undefined) {
@@ -284,11 +453,19 @@ function createController(
           );
         }
       } else if (!response.destroyed) {
-        // A stream read rejection after headers were sent must close the client
-        // connection (no forged success terminator) instead of leaving it open.
         response.destroy();
       }
-      observeOutcome("failed");
+      if (coordinator !== undefined) {
+        await coordinator.finalize({
+          terminal: { kind: "incomplete", reason: "internal_fault" },
+          outcomeCategory: "failed",
+          status: 500,
+          attempts: 0,
+          stream: streamRequested,
+          durationMs: clock.nowMonotonicMs() - startedMs,
+          canonicalPublicName: canonicalPublicName ?? "unknown",
+        });
+      }
     } finally {
       clearTimeout(deadline);
       request.off("aborted", requestAborted);
@@ -315,39 +492,26 @@ function catalogController(
     );
     const aptusRequestId = createRequestId();
     if (authentication === undefined) {
-      options.observer?.observeRequest({
-        endpointProtocol: "openai-chat",
-        endpoint: "models",
-        outcome: "rejected",
-        stream: false,
-      });
       writeEncoded(
         response,
         options.errorEncoder.encode({ protocol: "openai-chat", aptusRequestId, failure: authenticationFailure() }),
       );
       return;
     }
-    // Bearer token returns OpenAI list format; x-api-key returns Anthropic list format.
+
     const protocol: Protocol = authentication.kind === "bearer" ? "openai-chat" : "anthropic-messages";
     const body = options.adapters[protocol].buildModelList({
       entries: authorizedCatalogEntries(options.config, nameIndex, authentication.name, protocol),
     });
-    options.observer?.observeRequest({
-      endpointProtocol: protocol,
-      endpoint: "models",
-      outcome: "complete",
-      stream: false,
-    });
+
+    options.observer.catalogCompleted({ endpointProtocol: protocol });
+
     response.set("x-aptus-request-id", aptusRequestId).type("application/json").status(200).send(JSON.stringify(body));
   };
 }
 
 function authenticationFailure(): NormalizedFailure {
   return { category: "authentication", message: "invalid authentication credentials", retryable: false };
-}
-
-function notFoundFailure(): NormalizedFailure {
-  return { category: "not_found", message: "model not found", retryable: false };
 }
 
 function rateLimitFailure(): NormalizedFailure {
@@ -408,9 +572,22 @@ async function writeGatewayResult(
   aptusRequestId: AptusRequestId,
   errorEncoder: ErrorEncoder,
   signal: AbortSignal,
+  coordinator: import("../domain/contracts.ts").TerminalCoordinator,
+  canonicalPublicName: string,
+  startedMs: number,
+  clock: Clock,
+  trace: import("../domain/contracts.ts").TraceSession,
 ): Promise<"complete" | "aborted"> {
   if (result.kind === "failure") {
     writeEncoded(response, errorEncoder.encode({ protocol, aptusRequestId, failure: result.failure }));
+    coordinator.markClientFirstByte();
+    await result.finalize?.(clock.nowMonotonicMs() - startedMs);
+    return "complete";
+  }
+  if (result.kind === "internal_fault") {
+    writeEncoded(response, encodeInternalFailure(protocol, aptusRequestId));
+    coordinator.markClientFirstByte();
+    await result.finalize?.(clock.nowMonotonicMs() - startedMs);
     return "complete";
   }
   if (result.kind === "dry_run") {
@@ -419,16 +596,66 @@ async function writeGatewayResult(
       .type(result.contentType)
       .status(result.status)
       .send(JSON.stringify(result.body));
+    coordinator.markClientFirstByte();
+    await coordinator.finalize({
+      terminal: { kind: "dry_run" },
+      outcomeCategory: "complete",
+      status: 200,
+      attempts: 0,
+      stream: false,
+      durationMs: clock.nowMonotonicMs() - startedMs,
+      canonicalPublicName,
+      targetProtocol: result.body.targetProtocol,
+      provider: result.body.candidate.provider,
+    });
     return "complete";
   }
+
   response.status(result.status).set(filterResponseHeaders(result.headers)).set("x-aptus-request-id", aptusRequestId);
+
   if (result.kind === "complete") {
-    response.end(result.body);
-    return "complete";
+    const reader = result.body.stream().getReader();
+    const isDisk = result.body.inMemoryBytes === undefined;
+    const clientSink = isDisk ? trace.openBytes("client_response") : undefined;
+    let delivery: "complete" | "aborted" = "complete";
+    try {
+      while (true) {
+        const chunk = await raceWithAbort(reader.read(), signal);
+        if (chunk.aborted) {
+          delivery = "aborted";
+          await clientSink?.discard().catch(() => undefined);
+          break;
+        }
+        if (chunk.value.done) break;
+        if (!response.write(chunk.value.value)) {
+          const drained = await raceWithAbort(once(response, "drain"), signal);
+          if (drained.aborted) {
+            delivery = "aborted";
+            await clientSink?.discard().catch(() => undefined);
+            break;
+          }
+        }
+        coordinator.markClientFirstByte();
+        if (clientSink !== undefined) {
+          await clientSink.append(chunk.value.value);
+        }
+      }
+      if (delivery === "complete") {
+        coordinator.markClientFirstByte();
+        await clientSink?.complete().catch(() => undefined);
+        response.end();
+        await result.onDelivered?.(clock.nowMonotonicMs() - startedMs);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    await result.body.dispose();
+    return delivery;
   }
 
   // Handle streaming response with backpressure management.
   const reader = result.body.getReader();
+  const clientSink = trace.openBytes("client_stream");
   const cancelStream = (): void => {
     void reader.cancel();
   };
@@ -437,16 +664,29 @@ async function writeGatewayResult(
   try {
     while (true) {
       const chunk = await raceWithAbort(reader.read(), signal);
-      if (chunk.aborted) return "aborted";
+      if (chunk.aborted) {
+        await clientSink.discard().catch(() => undefined);
+        return "aborted";
+      }
       if (chunk.value.done) break;
+      coordinator.markClientFirstByte();
       // Write chunk; if socket buffer is full (false), wait for 'drain' event before reading next chunk.
       if (!response.write(chunk.value.value)) {
         const drained = await raceWithAbort(once(response, "drain"), signal);
-        if (drained.aborted) return "aborted";
+        if (drained.aborted) {
+          await clientSink.discard().catch(() => undefined);
+          return "aborted";
+        }
       }
+      await clientSink.append(chunk.value.value);
     }
+    await clientSink.complete().catch(() => undefined);
     response.end();
+    await result.onDelivered?.(clock.nowMonotonicMs() - startedMs);
     return "complete";
+  } catch (err) {
+    await clientSink.discard().catch(() => undefined);
+    throw err;
   } finally {
     signal.removeEventListener("abort", cancelStream);
     response.off("close", cancelStream);
@@ -462,4 +702,20 @@ function writeEncoded(
   encoded: { readonly status: number; readonly headers: HeaderMap; readonly body: Uint8Array },
 ): void {
   if (!response.headersSent) response.status(encoded.status).set(encoded.headers).end(encoded.body);
+}
+
+/**
+ * Formats a local timestamp into the trace directory prefix:
+ * `YYYY-MM-DDTHH-mm-ss.SSS±HHMM` (colons are avoided for filesystem safety).
+ */
+function formatTraceDirectoryTimestamp(date: Date): string {
+  const pad = (value: number, width = 2): string => String(value).padStart(width, "0");
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absolute = Math.abs(offsetMinutes);
+  return (
+    `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}` +
+    `${sign}${pad(Math.floor(absolute / 60))}${pad(absolute % 60)}`
+  );
 }

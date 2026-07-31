@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import type { JsonValue, TraceContext, TraceRecorder, TraceSession } from "../../domain/contracts.ts";
+import type { JsonValue, TraceByteSink, TraceContext, TraceRecorder, TraceSession } from "../../domain/contracts.ts";
 import type { TraceManifest, TraceStage, TraceTerminal } from "../../domain/operations.ts";
 import { createRedactor, type Redactor } from "./redaction.ts";
 
 const encoder = new TextEncoder();
+
+/**
+ * Bounded safe error codes for trace degradation telemetry.
+ */
+export type SafeErrorCode = "permission_denied" | "no_space" | "not_found" | "io_error";
 
 /**
  * Initialization options for the filesystem-backed {@link TraceRecorder}.
@@ -15,9 +20,16 @@ export interface FileTraceRecorderOptions {
   readonly root: string;
   /** Resolved client and provider secrets to redact from parsed trace fields. */
   readonly secrets: ReadonlySet<string>;
-  /** Invoked when a runtime trace write fails (readiness degradation). */
-  readonly onFailure: (safeErrorCode: string) => void;
-  /** Invoked when a later trace write succeeds (readiness recovery). */
+  /**
+   * Invoked on every runtime trace write failure with the affected request ID
+   * (`undefined` for the startup/manifest bootstrap). It must record the
+   * `aptus.trace.failure` event and increment the failure counter; it is not
+   * edge-triggered.
+   */
+  readonly onFailure: (operation: string, safeErrorCode: SafeErrorCode, aptusRequestId?: string) => void;
+  /** Edge-triggered readiness degradation (invoked once until recovery). */
+  readonly onDegrade: () => void;
+  /** Edge-triggered readiness recovery (invoked once after a successful write). */
   readonly onRecover: () => void;
 }
 
@@ -43,23 +55,31 @@ export function createFileTraceRecorder(options: FileTraceRecorderOptions): Trac
   const redactor = createRedactor(options.secrets);
   let degraded = false;
 
-  // Idempotent, recorder-wide readiness transitions (span individual sessions).
-  const onFailure = (safeErrorCode: string): void => {
-    if (degraded) return;
-    degraded = true;
-    options.onFailure(safeErrorCode);
+  // Every failure emits per-failure telemetry; readiness transitions are
+  // edge-triggered separately (degrade once, recover once).
+  const fail = (operation: string, code: SafeErrorCode, aptusRequestId?: string): void => {
+    if (!degraded) {
+      degraded = true;
+      options.onDegrade();
+    }
+    options.onFailure(operation, code, aptusRequestId);
   };
-  const onSuccess = (): void => {
-    if (!degraded) return;
-    degraded = false;
-    options.onRecover();
+  const succeed = (): void => {
+    if (degraded) {
+      degraded = false;
+      options.onRecover();
+    }
   };
 
   return {
     async start(context: TraceContext): Promise<TraceSession> {
       const directory = join(options.root, `${context.startedAtLocal}_${context.aptusRequestId}`);
-      const session = makeSession(directory, context, redactor, onFailure, onSuccess);
-      await session.writeManifest();
+      const session = makeSession(directory, context, redactor, fail, succeed);
+      try {
+        await session.writeManifest();
+      } catch (err) {
+        fail("trace_start", safeErrorCode(err), context.aptusRequestId);
+      }
       return session;
     },
   };
@@ -72,23 +92,33 @@ function makeSession(
   directory: string,
   context: TraceContext,
   redactor: Redactor,
-  onFailure: (safeErrorCode: string) => void,
+  onFailure: (operation: string, code: SafeErrorCode, aptusRequestId?: string) => void,
   onSuccess: () => void,
 ): FileTraceSession {
   let sequence = 1;
   let finished = false;
   let incompleteWritten = false;
+  let queue: Promise<void> = Promise.resolve();
+
+  function enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const next = queue.then(op, op);
+    queue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
 
   /**
    * Commits one file atomically. On failure, degrades readiness and writes a
    * best-effort `trace_failure` + `incomplete` terminal exactly once.
    */
-  async function commit(filename: string, data: Uint8Array): Promise<void> {
+  async function commit(filename: string, data: Uint8Array, operation: string): Promise<void> {
     try {
       await atomicWrite(directory, filename, data);
       onSuccess();
     } catch (error) {
-      onFailure(safeErrorCode(error));
+      onFailure(operation, safeErrorCode(error), context.aptusRequestId);
       await writeIncompleteOnce();
     }
   }
@@ -125,47 +155,138 @@ function makeSession(
   }
 
   async function writeManifest(): Promise<void> {
-    try {
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      if (process.platform !== "win32") await chmod(directory, 0o700);
-    } catch (error) {
-      onFailure(safeErrorCode(error));
-      await writeIncompleteOnce();
-      return;
-    }
-    const manifest: TraceManifest = {
-      schemaVersion: 1,
-      aptusRequestId: context.aptusRequestId,
-      startedAt: new Date().toISOString(),
-      sourceProtocol: context.sourceProtocol,
-      configRevision: context.configRevision,
-      redaction: "credentials-and-resolved-secrets",
-      payloadProtection: "filesystem-permissions-only",
-    };
-    await commit("000_manifest.json", encoder.encode(`${JSON.stringify(manifest)}\n`));
+    return enqueue(async () => {
+      try {
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        if (process.platform !== "win32") await chmod(directory, 0o700);
+      } catch (error) {
+        onFailure("trace_start", safeErrorCode(error), context.aptusRequestId);
+        await writeIncompleteOnce();
+        return;
+      }
+      const manifest: TraceManifest = {
+        schemaVersion: 1,
+        aptusRequestId: context.aptusRequestId,
+        startedAt: new Date().toISOString(),
+        sourceProtocol: context.sourceProtocol,
+        configRevision: context.configRevision,
+        redaction: "credentials-and-resolved-secrets",
+        payloadProtection: "filesystem-permissions-only",
+      };
+      await commit("000_manifest.json", encoder.encode(`${JSON.stringify(manifest)}\n`), "trace_write");
+    });
   }
 
   return {
     writeManifest,
 
-    async recordJson(stage: TraceStage, value: JsonValue): Promise<void> {
-      if (finished) return;
-      const filename = `${pad(sequence)}_${stage}.json`;
-      sequence++;
-      await commit(filename, encoder.encode(`${JSON.stringify(redactor.redactJson(value))}\n`));
+    recordJson(stage: TraceStage, value: JsonValue): Promise<void> {
+      return enqueue(async () => {
+        if (finished) return;
+        const filename = `${pad(sequence)}_${stage}.json`;
+        sequence++;
+        const redacted = redactor.redactJson(value);
+        await commit(filename, encoder.encode(`${JSON.stringify(redacted)}\n`), "trace_write");
+      });
     },
 
-    async recordBytes(stage: TraceStage, bytes: Uint8Array): Promise<void> {
-      if (finished) return;
-      const filename = `${pad(sequence)}_${stage}.${bytesExtension(stage)}`;
-      sequence++;
-      await commit(filename, bytes);
+    recordBytes(stage: TraceStage, bytes: Uint8Array): Promise<void> {
+      return enqueue(async () => {
+        if (finished) return;
+        const filename = `${pad(sequence)}_${stage}.${bytesExtension(stage)}`;
+        sequence++;
+        await commit(filename, bytes, "trace_write");
+      });
     },
 
-    async finish(result: TraceTerminal): Promise<void> {
-      if (finished) return;
-      finished = true;
-      await commit("999_terminal.json", encoder.encode(`${JSON.stringify(result)}\n`));
+    openBytes(stage: TraceStage): TraceByteSink {
+      if (finished) {
+        return {
+          append: async () => {},
+          complete: async () => {},
+          discard: async () => {},
+        };
+      }
+      const seq = sequence++;
+      const tempPath = join(directory, `.aptus-${randomUUID()}.tmp`);
+      let handlePromise: Promise<import("node:fs/promises").FileHandle> | undefined;
+      let closed = false;
+
+      async function getHandle() {
+        if (handlePromise === undefined) {
+          handlePromise = (async () => {
+            await mkdir(directory, { recursive: true, mode: 0o700 }).catch(() => undefined);
+            return open(tempPath, "wx", 0o600);
+          })();
+        }
+        return handlePromise;
+      }
+
+      return {
+        append(chunk: Uint8Array): Promise<void> {
+          return enqueue(async () => {
+            if (closed || finished) return;
+            try {
+              const handle = await getHandle();
+              await handle.writeFile(chunk);
+            } catch (err) {
+              onFailure("trace_write", safeErrorCode(err), context.aptusRequestId);
+              await writeIncompleteOnce();
+            }
+          });
+        },
+
+        complete(): Promise<void> {
+          return enqueue(async () => {
+            if (closed) return;
+            closed = true;
+            if (finished) {
+              await unlink(tempPath).catch(() => undefined);
+              return;
+            }
+            try {
+              if (handlePromise !== undefined) {
+                const handle = await handlePromise;
+                await handle.sync();
+                await handle.close();
+                const filename = `${pad(seq)}_${stage}.${bytesExtension(stage)}`;
+                await rename(tempPath, join(directory, filename));
+                await fsyncDirectory(directory);
+                onSuccess();
+              }
+            } catch (err) {
+              await unlink(tempPath).catch(() => undefined);
+              onFailure("trace_write", safeErrorCode(err), context.aptusRequestId);
+              await writeIncompleteOnce();
+            }
+          });
+        },
+
+        discard(): Promise<void> {
+          return enqueue(async () => {
+            if (closed) return;
+            closed = true;
+            try {
+              if (handlePromise !== undefined) {
+                const handle = await handlePromise;
+                await handle.close().catch(() => undefined);
+                await unlink(tempPath).catch(() => undefined);
+              }
+            } catch {
+              // Ignore discard errors
+            }
+          });
+        },
+      };
+    },
+
+    finish(result: TraceTerminal): Promise<void> {
+      return enqueue(async () => {
+        if (finished) return;
+        finished = true;
+        const redacted = redactor.redactJson(result as unknown as JsonValue);
+        await commit("999_terminal.json", encoder.encode(`${JSON.stringify(redacted)}\n`), "trace_finish");
+      });
     },
   };
 }
@@ -227,10 +348,12 @@ function pad(sequence: number): string {
  * Extracts a safe, bounded error code for degradation logging (never a raw
  * path or secret-bearing message).
  */
-function safeErrorCode(error: unknown): string {
+export function safeErrorCode(error: unknown): SafeErrorCode {
   if (error !== null && typeof error === "object" && "code" in error) {
     const code = (error as { code?: unknown }).code;
-    if (typeof code === "string" && code !== "") return code;
+    if (code === "EACCES" || code === "EPERM") return "permission_denied";
+    if (code === "ENOSPC" || code === "EDQUOT") return "no_space";
+    if (code === "ENOENT") return "not_found";
   }
   return "io_error";
 }

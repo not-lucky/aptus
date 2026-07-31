@@ -232,11 +232,11 @@ test.concurrent("process: complete sample boots, probes, reports readiness, exit
     }),
   );
   const env = seededEnv("boot");
-  const child: ChildProcess = spawn(
-    process.execPath,
-    [CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const child: ChildProcess = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+    cwd: dir,
+    env: mergedEnv(env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk: Buffer) => {
@@ -319,11 +319,11 @@ test.concurrent("process: client ingress catalogs and operations metrics are liv
     }),
   );
   const env = seededEnv("http");
-  const child = spawn(
-    process.execPath,
-    [CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+    cwd: dir,
+    env: mergedEnv(env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk: Buffer) => {
@@ -500,11 +500,11 @@ test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
     }),
   );
   const env = seededEnv("sigint");
-  const child = spawn(
-    process.execPath,
-    [CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+    cwd: dir,
+    env: mergedEnv(env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   child.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
@@ -535,11 +535,11 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
     }),
   );
   const env = seededEnv("drain");
-  const child = spawn(
-    process.execPath,
-    [CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+    cwd: dir,
+    env: mergedEnv(env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   child.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
@@ -604,11 +604,11 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
     }),
   );
   const env = seededEnv("abort");
-  const child = spawn(
-    process.execPath,
-    [CLI, "--config", join(dir, "aptus.yaml")],
-    { cwd: dir, env: mergedEnv(env), stdio: ["ignore", "pipe", "pipe"] },
-  );
+  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+    cwd: dir,
+    env: mergedEnv(env),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   child.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString();
