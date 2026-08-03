@@ -4,12 +4,18 @@ import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { completeYaml } from "../config/yaml.ts";
+import type { ThreeOriginHarness } from "./three-origin-harness.ts";
 
 const REPO = resolve(import.meta.dirname, "..", "..");
 const CLI = join(REPO, "src", "bootstrap", "cli.ts");
 
 /**
  * One running Aptus CLI process with its parsed ready line.
+ *
+ * `stdout` is a live getter over the accumulated stdout+stderr buffer, so
+ * post-startup structured log events (`aptus.request.cancelled`,
+ * `aptus.shutdown.started`, `aptus.shutdown.completed`, …) are observable
+ * after `startAptusCli` returns.
  */
 export interface RunningCli {
   readonly child: ChildProcess;
@@ -105,27 +111,96 @@ export async function startAptusCli(options: StartCliOptions): Promise<RunningCl
     child,
     clientPort: Number(match[2]),
     operationsPort: Number(match[1]),
-    stdout: output,
+    // Live getter: post-startup output accumulates into the same buffer.
+    get stdout() {
+      return output;
+    },
     traceRoot,
   };
 }
 
 /**
- * Kills the CLI process and waits briefly for it to disappear.
+ * Waits for a child process to exit and returns its exit code and signal.
+ *
+ * @param child - The child process to await.
+ * @returns Exit code and signal (signal is `null` for a clean `process.exit`).
+ */
+export async function waitForExit(
+  child: ChildProcess,
+): Promise<{ readonly code: number | null; readonly signal: string | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, signal: child.signalCode };
+  }
+  const [code, signal] = await new Promise<[number | null, string | null]>((resolve) => {
+    child.once("exit", (exitCode, exitSignal) => resolve([exitCode, exitSignal]));
+  });
+  return { code, signal };
+}
+
+/**
+ * Options for spawning the CLI against all three origins of a three-origin harness.
+ */
+export interface StartThreeOriginCliOptions {
+  /** Tmp-directory and env-prefix tag for the spawned process. */
+  readonly casePrefix: string;
+  /** Per-test case name appended to the tag. */
+  readonly caseName: string;
+  /** Environment variable names the config interpolates; seeded with deterministic secrets. */
+  readonly envNames: readonly string[];
+  /** Value prefix for the seeded secrets. */
+  readonly secretPrefix: string;
+  /** Extra exact-anchor replacements layered on top of the three base URLs. */
+  readonly replacements?: Record<string, string>;
+}
+
+/**
+ * Spawns the CLI with the Chat, Responses, and Messages origins wired to the
+ * three loopback providers of a {@link ThreeOriginHarness}.
+ *
+ * The base-URL anchors must be replaced in order: the Chat anchor (with a
+ * trailing slash) first, so the bare Responses anchor matches exactly once
+ * afterwards.
+ */
+export function startThreeOriginCli(
+  harness: ThreeOriginHarness,
+  options: StartThreeOriginCliOptions,
+): Promise<RunningCli> {
+  return startAptusCli({
+    casePrefix: options.casePrefix,
+    caseName: options.caseName,
+    envNames: options.envNames,
+    secretPrefix: options.secretPrefix,
+    replacements: {
+      "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${harness.chatOrigin.baseUrl}`,
+      "    baseUrl: https://api.openai.com/v1": `    baseUrl: ${harness.responsesOrigin.baseUrl}`,
+      "    baseUrl: https://api.anthropic.com": `    baseUrl: ${harness.messagesOrigin.baseUrl}`,
+      ...options.replacements,
+    },
+  });
+}
+
+/**
+ * Kills the CLI process and waits for it to exit.
  */
 export async function stopCli(cli: RunningCli): Promise<void> {
   cli.child.kill("SIGKILL");
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await waitForExit(cli.child);
 }
 
 /**
  * Polls a condition until it holds, failing when the child exits or 20s pass.
+ *
+ * The condition may be async (e.g. an HTTP probe); each iteration awaits it.
  */
-export async function waitFor(condition: () => boolean, label: string, child: ChildProcess): Promise<void> {
+export async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  label: string,
+  child: ChildProcess,
+): Promise<void> {
   const deadline = Date.now() + 20_000;
-  while (!condition()) {
+  while (!(await condition())) {
     if (Date.now() > deadline || child.exitCode !== null) throw new Error(`timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 

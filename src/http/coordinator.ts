@@ -33,6 +33,7 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
   let ingressEmitted = false;
   let ingressStream = false;
   let wonClaim = false;
+  let currentAttempts = 0;
 
   let resolveFinalized!: () => void;
   const finalized = new Promise<void>((resolve) => {
@@ -53,15 +54,33 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
       }
     },
 
+    recordAttempt(attemptNumber: number): void {
+      if (attemptNumber > currentAttempts) {
+        currentAttempts = attemptNumber;
+      }
+    },
+
+    getAttempts(): number {
+      return currentAttempts;
+    },
+
     async finalize(fact: TerminalFact): Promise<{ won: boolean }> {
       if (wonClaim) {
         return { won: false };
       }
       wonClaim = true;
 
+      const attempts = fact.attempts > 0 ? fact.attempts : currentAttempts;
+
       try {
-        // 1. Finish Trace terminal
-        await trace.finish(fact.terminal).catch(() => undefined);
+        // 1. Finish Trace terminal with fallback to shutdown_abort on shutdown cancellation failure
+        try {
+          await trace.finish(fact.terminal);
+        } catch {
+          if (fact.terminal.kind === "cancelled" && fact.terminal.by === "shutdown") {
+            await trace.finish({ kind: "incomplete", reason: "shutdown_abort" }).catch(() => undefined);
+          }
+        }
 
         // 2-4. Accepted-request telemetry (in-flight decrement, request_terminal
         // fact, and aptus.request.completed) only fires after HTTP ingress
@@ -117,7 +136,7 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
               canonicalPublicName,
               outcomeCategory: fact.outcomeCategory,
               status: fact.status,
-              attempts: fact.attempts,
+              attempts,
               stream: fact.stream,
               durationMs: fact.durationMs,
               firstByteMs,
@@ -136,11 +155,11 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
 
           // 5. Emit `aptus.response.first_byte` once first-byte timing is known
           // and at least one provider attempt actually produced the response.
-          if (firstByteMs !== undefined && fact.attempts > 0) {
+          if (firstByteMs !== undefined && attempts > 0) {
             try {
               observer.firstByte({
                 aptusRequestId,
-                attemptNumber: fact.attempts,
+                attemptNumber: attempts,
                 durationMs: firstByteMs,
               });
             } catch {

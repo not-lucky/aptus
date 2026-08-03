@@ -79,12 +79,25 @@ test.concurrent("process: complete Messages native path applies mutation and rel
     assert.equal(recordedBody.max_tokens, 1024);
     assert.deepEqual(recordedBody.unknown_field, { test: true });
 
-    // Trace checks
+    // Exactly one dispatch occurred on the wired origin.
+    assert.equal(origin.dispatchCount(), 1);
+
+    // The native complete path records the exact ordered stage sequence.
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
-    const names = traceFiles(cli.traceRoot);
-    assert.ok(names.includes("000_manifest.json"));
-    assert.ok(names.includes("999_terminal.json"));
-    assert.ok(names.some((name) => /^\d{3}_provider_response\.json$/.test(name)));
+    assert.deepEqual(traceFiles(cli.traceRoot), [
+      "000_manifest.json",
+      "001_client_request.json",
+      "002_authentication.json",
+      "003_resolution.json",
+      "004_preflight.json",
+      "005_key_selection.json",
+      "006_mutation.json",
+      "007_provider_request.json",
+      "008_provider_response_head.json",
+      "009_provider_response.json",
+      "010_client_response.json",
+      "999_terminal.json",
+    ]);
 
     // Second request to alias /messages with x-api-key authorization header and omitted max_tokens (to verify config default 4096)
     origin.enqueue({ status: 200, body: COMPLETE_MESSAGES_BYTES });
@@ -96,6 +109,7 @@ test.concurrent("process: complete Messages native path applies mutation and rel
     );
     assert.equal(responseAlias.status, 200);
     assert.deepEqual(new Uint8Array(await responseAlias.arrayBuffer()), COMPLETE_MESSAGES_BYTES);
+    assert.equal(origin.dispatchCount(), 2);
 
     const recorded2 = origin.lastRequest();
     assert.ok(recorded2);
@@ -141,6 +155,7 @@ test.concurrent("process: SSE Messages relays exact stream preserving pings and 
     assert.match(streamText, /event: message_delta/);
     assert.match(streamText, /event: message_stop/);
     assert.doesNotMatch(streamText, /data: \[DONE\]/);
+    assert.equal(origin.dispatchCount(), 1);
 
     // Verify trace files hold exact bytes
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
@@ -180,6 +195,7 @@ test.concurrent("process: Messages post-200 in-band error is relayed without for
     const bytes = new Uint8Array(await response.arrayBuffer());
     assert.deepEqual(bytes, SSE_MESSAGES_POST200_ERROR_BYTES);
     assert.doesNotMatch(new TextDecoder().decode(bytes), /event: message_stop/);
+    assert.equal(origin.dispatchCount(), 1);
 
     // Native relay does not semantically decode stream, so cleanly relayed stream records complete at HTTP 200
     // after HTTP hands the final byte to the client.
@@ -217,6 +233,7 @@ test.concurrent("process: Messages terminal HTTP 404 error is relayed with faile
     );
     assert.equal(response.status, 404);
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), ERROR_MESSAGES_BYTES);
+    assert.equal(origin.dispatchCount(), 1);
 
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
@@ -271,6 +288,7 @@ test.concurrent("process: Messages client abort mid-stream cancels provider body
     });
 
     await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close", cli.child);
+    assert.equal(origin.dispatchCount(), 1);
   } finally {
     await origin.close();
     cli.child.kill("SIGKILL");

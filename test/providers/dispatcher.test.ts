@@ -228,7 +228,7 @@ test("abort cancels the provider body and errors the stream", async () => {
     const deadline = Date.now() + 1_000;
     while (origin.lastRequest()?.closedAtMs === undefined) {
       assert.ok(Date.now() < deadline, "origin socket did not close");
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setImmediate(resolve));
     }
   });
 });

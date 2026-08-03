@@ -379,6 +379,7 @@ test("client disconnect aborts the gateway signal without a second response", as
     await waitFor(() => signal !== undefined);
     request.destroy();
     await disconnected.promise;
+    await waitFor(() => signal?.aborted === true);
     assert.equal(signal?.aborted, true);
     completion.resolve();
   });
@@ -507,6 +508,71 @@ test("stream relay cancels the owned stream when the client disconnects", async 
   });
 });
 
+test("complete body delivery records cancellation telemetry when client disconnects mid-delivery", async () => {
+  const cancelledCalls: Array<{ aptusRequestId: string; phase: string; by: string }> = [];
+  const observer = createLifecycleObserver({
+    logger: aptusLogger(),
+    metrics: createMetricsRegistry(),
+    loggingEnabled: false,
+    metricsEnabled: false,
+  });
+  const origCancelled = observer.cancelled.bind(observer);
+  observer.cancelled = (fields) => {
+    cancelledCalls.push(fields);
+    origCancelled(fields);
+  };
+
+  const gateway: Gateway = {
+    async execute() {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"message":"hello'));
+        },
+      });
+      const ownedBody: import("../../src/domain/contracts.ts").OwnedBody = {
+        inMemoryBytes: undefined,
+        stream: () => stream,
+        bytes: async () => new Uint8Array(),
+        dispose: async () => {},
+      };
+      return {
+        kind: "complete",
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: ownedBody,
+      };
+    },
+  };
+
+  await withApp(createTestClientApp({ config, gateway, observer }), async (port) => {
+    const disconnected = Promise.withResolvers<void>();
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/chat/completions",
+        method: "POST",
+        headers: { authorization: "Bearer client-secret", "content-type": "application/json" },
+      },
+      (response) => {
+        response.once("data", () => {
+          request.destroy();
+          disconnected.resolve();
+        });
+      },
+    );
+    request.on("error", () => undefined);
+    request.end('{"model":"primary"}');
+    await disconnected.promise;
+    await waitFor(() => cancelledCalls.length > 0);
+  });
+
+  assert.equal(cancelledCalls.length, 1);
+  assert.equal(cancelledCalls[0]?.phase, "relay");
+  assert.equal(cancelledCalls[0]?.by, "client");
+});
+
+
 test("operations metrics honor enablement and bounded endpoint labels", async () => {
   const state = { draining: false, traceReady: true };
   await withApp(
@@ -619,7 +685,7 @@ async function waitFor(condition: () => boolean, timeoutMs = 1_000): Promise<voi
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 

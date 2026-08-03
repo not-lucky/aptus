@@ -92,6 +92,20 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/**
+ * Extracts the bound client and operations ports from the `aptus ready:` line.
+ *
+ * Most process tests bind `port: 0` (OS-allocated ephemeral ports) so that
+ * concurrent test processes never race on a fixed `freePort()`-chosen port
+ * (a TOCTOU window between reserving the port and the child binding it). The
+ * actual bound ports are read back from the ready line instead.
+ */
+function parseReadyPorts(stdout: string): { clientPort: number; operationsPort: number } {
+  const match = /aptus ready: operations http:\/\/[^:]+:(\d+), client http:\/\/[^:]+:(\d+)/.exec(stdout);
+  assert.ok(match, `ready line parsed: ${stdout}`);
+  return { clientPort: Number(match[2]), operationsPort: Number(match[1]) };
+}
+
 function assertConnectionRefused(port: number): Promise<void> {
   return new Promise((resolveResult, rejectResult) => {
     const socket = net.connect(port, "127.0.0.1");
@@ -216,19 +230,17 @@ async function waitFor(condition: () => boolean | Promise<boolean>, label: strin
   const deadline = Date.now() + timeoutMs;
   while (!(await condition())) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
-    await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 10));
   }
 }
 
 test.concurrent("process: complete sample boots, probes, reports readiness, exits 0 on SIGTERM", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aptus-process-boot-"));
-  const clientPort = await freePort();
-  const operationsPort = await freePort();
   writeFileSync(
     join(dir, "aptus.yaml"),
     completeYaml({
-      "  port: 8080": `  port: ${clientPort}`,
-      "  port: 9090": `  port: ${operationsPort}`,
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
     }),
   );
   const env = seededEnv("boot");
@@ -251,6 +263,7 @@ test.concurrent("process: complete sample boots, probes, reports readiness, exit
   const readyRegex = /^aptus ready: operations http:\/\/[^ ]+, client http:\/\/[^ ]+$/m;
   try {
     await waitFor(() => readyRegex.test(stdout), "ready line");
+    const { operationsPort } = parseReadyPorts(stdout);
     assert.doesNotMatch(stdout + stderr, /aptus-test-secret-/);
 
     // The startup probe ran in the config-relative Trace root and cleaned up.
@@ -391,14 +404,12 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
 
   // 1. --config wins over APTUS_CONFIG
   const dirA = mkdtempSync(join(tmpdir(), "aptus-process-path-a-"));
-  const clientPortA = await freePort();
-  const operationsPortA = await freePort();
   const configA = join(dirA, "custom.yaml");
   writeFileSync(
     configA,
     completeYaml({
-      "  port: 8080": `  port: ${clientPortA}`,
-      "  port: 9090": `  port: ${operationsPortA}`,
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
     }),
   );
   const childA = spawn(process.execPath, [CLI, "--config", configA], {
@@ -422,14 +433,12 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
 
   // 2. APTUS_CONFIG is used when --config is omitted
   const dirB = mkdtempSync(join(tmpdir(), "aptus-process-path-b-"));
-  const clientPortB = await freePort();
-  const operationsPortB = await freePort();
   const configB = join(dirB, "env.yaml");
   writeFileSync(
     configB,
     completeYaml({
-      "  port: 8080": `  port: ${clientPortB}`,
-      "  port: 9090": `  port: ${operationsPortB}`,
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
     }),
   );
   const childB = spawn(process.execPath, [CLI], {
@@ -453,13 +462,11 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
 
   // 3. Default ./aptus.yaml in working directory
   const dirC = mkdtempSync(join(tmpdir(), "aptus-process-path-c-"));
-  const clientPortC = await freePort();
-  const operationsPortC = await freePort();
   writeFileSync(
     join(dirC, "aptus.yaml"),
     completeYaml({
-      "  port: 8080": `  port: ${clientPortC}`,
-      "  port: 9090": `  port: ${operationsPortC}`,
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
     }),
   );
   const childC = spawn(process.execPath, [CLI], {
@@ -490,13 +497,11 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
 
 test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aptus-process-sigint-"));
-  const clientPort = await freePort();
-  const operationsPort = await freePort();
   writeFileSync(
     join(dir, "aptus.yaml"),
     completeYaml({
-      "  port: 8080": `  port: ${clientPort}`,
-      "  port: 9090": `  port: ${operationsPort}`,
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
     }),
   );
   const env = seededEnv("sigint");
@@ -524,14 +529,12 @@ test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
 
 test.concurrent("process: shutdown drain with held request updates readiness to 503 degraded and completes on socket close", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aptus-process-drain-"));
-  const clientPort = await freePort();
-  const operationsPort = await freePort();
   writeFileSync(
     join(dir, "aptus.yaml"),
     completeYaml({
-      "  port: 8080": `  port: ${clientPort}`,
-      "  port: 9090": `  port: ${operationsPort}`,
-      "  shutdownDrainMs: 30000": "  shutdownDrainMs: 2000",
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
+      "  shutdownDrainMs: 30000": "  shutdownDrainMs: 10000",
     }),
   );
   const env = seededEnv("drain");
@@ -549,6 +552,7 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
   let socket: net.Socket | undefined;
   try {
     await waitFor(() => /^aptus ready: /m.test(stdout), "ready line");
+    const { clientPort, operationsPort } = parseReadyPorts(stdout);
 
     // Hold a partial HTTP request on the client port. The connect and write
     // must complete before SIGTERM, or the drain has nothing to hold and exits
@@ -557,12 +561,13 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
     await new Promise<void>((resolveConnect, rejectConnect) => {
       socket?.once("connect", () => {
         socket?.write(
-          'POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial',
+          `POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nAuthorization: Bearer ${env.APTUS_CLIENT_PRIMARY}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial`,
+          () => resolveConnect(),
         );
-        resolveConnect();
       });
       socket?.once("error", rejectConnect);
     });
+    await waitFor(() => readdirSync(join(dir, "traces")).length > 0, "trace created");
 
     child.kill("SIGTERM");
 
@@ -593,13 +598,11 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
 
 test.concurrent("process: second signal during shutdown drain aborts wait immediately and exits 0", async () => {
   const dir = mkdtempSync(join(tmpdir(), "aptus-process-abort-"));
-  const clientPort = await freePort();
-  const operationsPort = await freePort();
   writeFileSync(
     join(dir, "aptus.yaml"),
     completeYaml({
-      "  port: 8080": `  port: ${clientPort}`,
-      "  port: 9090": `  port: ${operationsPort}`,
+      "  port: 8080": "  port: 0",
+      "  port: 9090": "  port: 0",
       "  shutdownDrainMs: 30000": "  shutdownDrainMs: 10000",
     }),
   );
@@ -618,6 +621,7 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
   let socket: net.Socket | undefined;
   try {
     await waitFor(() => /^aptus ready: /m.test(stdout), "ready line");
+    const { clientPort, operationsPort } = parseReadyPorts(stdout);
 
     // Hold a partial HTTP request on the client port. The connect and write
     // must complete before SIGTERM, or the drain has nothing to hold and exits
@@ -626,12 +630,13 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
     await new Promise<void>((resolveConnect, rejectConnect) => {
       socket?.once("connect", () => {
         socket?.write(
-          'POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial',
+          `POST /v1/chat/completions HTTP/1.1\r\nHost: aptus-test\r\nAuthorization: Bearer ${env.APTUS_CLIENT_PRIMARY}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"partial`,
+          () => resolveConnect(),
         );
-        resolveConnect();
       });
       socket?.once("error", rejectConnect);
     });
+    await waitFor(() => readdirSync(join(dir, "traces")).length > 0, "trace created");
 
     child.kill("SIGTERM");
 

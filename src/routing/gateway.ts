@@ -16,7 +16,7 @@ import type {
 import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import { createRedactor, type Redactor } from "../observability/trace/redaction.ts";
-import { type AttemptContext, executeAttempt } from "./attempt.ts";
+import { type AttemptContext, classifyAbortReason, executeAttempt } from "./attempt.ts";
 import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
 import {
   failureFromObservation,
@@ -397,7 +397,11 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       sleeper: deps.sleeper,
       deadlineMs,
       streamIdleMs,
-      nextAttemptNumber: () => ++attemptNumber,
+      nextAttemptNumber: () => {
+        const n = ++attemptNumber;
+        request.coordinator.recordAttempt(n);
+        return n;
+      },
     };
 
     candidateLoop: for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
@@ -448,8 +452,9 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
 
         if (outcome.kind === "cancelled") {
           const durationMs = clock.nowMonotonicMs() - started;
+          const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
           await request.coordinator.finalize({
-            terminal: { kind: "cancelled", by: "client" },
+            terminal: { kind: "cancelled", by },
             outcomeCategory: "cancelled",
             status: 499,
             attempts: attemptNumber,
@@ -457,7 +462,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
             durationMs,
             canonicalPublicName: request.canonicalPublicName,
           });
-          return { kind: "failure", failure: timeoutFailure() };
+          return { kind: "cancelled", by };
         }
         if (outcome.kind === "deadline_exceeded") {
           return terminalFailure(timeoutFailure(), candidate);
@@ -531,6 +536,24 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         try {
           body = await spoolResponseBody(response.body);
         } catch {
+          if (request.signal.aborted) {
+            const durationMs = clock.nowMonotonicMs() - started;
+            const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
+            await request.trace.recordJson("cancellation", { phase: "relay", by });
+            deps.observer.cancelled({ aptusRequestId, phase: "relay", by });
+            await request.coordinator.finalize({
+              terminal: { kind: "cancelled", by },
+              outcomeCategory: "cancelled",
+              status: 499,
+              attempts: attemptNumber,
+              stream: request.stream,
+              durationMs,
+              targetProtocol: candidate.provider.protocol,
+              provider: candidate.provider.name,
+              canonicalPublicName: request.canonicalPublicName,
+            });
+            return { kind: "cancelled", by };
+          }
           if (observation.result === "success") {
             const failure = interruptedFailure();
             lastCandidateFailure = failure;

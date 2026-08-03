@@ -63,12 +63,27 @@ export function installSignalHandlers(runtime: Runtime): void {
       return;
     }
     shuttingDown = true;
-    void runtime.shutdown.run().then(() => {
+    void runtime.shutdown.run().then(async () => {
+      // LogTape's console sink writes through process.stdout/process.stderr,
+      // which queue asynchronously when piped. Flush both streams before
+      // exiting so the trailing `aptus.shutdown.completed` line (and any other
+      // final log records) is deterministically observable by supervisors.
+      await flushStream(process.stdout);
+      await flushStream(process.stderr);
       process.exit(0);
     });
   };
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
+}
+
+/**
+ * Drains all pending writes on a stream by queueing an empty write and
+ * waiting for its completion callback (writes are serialized per stream, so
+ * the callback fires only after every previously queued write flushed).
+ */
+async function flushStream(stream: NodeJS.WriteStream): Promise<void> {
+  await new Promise<void>((resolve) => stream.write("", () => resolve()));
 }
 
 void main().catch(() => {

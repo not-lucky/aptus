@@ -33,7 +33,17 @@ export function listen(app: express.Express, host: string, port: number): Promis
     const onError = (err: Error): void => {
       reject(err);
     };
-    const server = app.listen(port, host, () => {
+    const server = app.listen(port, host, (error?: unknown) => {
+      // Express 5 wires the listen callback as a one-time `error` listener in
+      // addition to the `listening` path, so a bind failure (e.g. EADDRINUSE)
+      // invokes this callback with the error instead of rejecting the raw
+      // event. Reject with the real error here: the server never bound, so
+      // `server.address()` would be `null` and misreport the failure as a
+      // "no TCP address" defect.
+      if (error !== undefined) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
       server.off("error", onError);
       const address = server.address();
       if (address === null || typeof address === "string") {

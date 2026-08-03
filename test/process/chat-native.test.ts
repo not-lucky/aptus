@@ -73,12 +73,26 @@ test.concurrent("process: complete Chat native path applies mutation and relays 
     assert.equal(recordedBody.store, false);
     assert.deepEqual(recordedBody.unknown, [1, 2]);
 
-    // Trace has the documented stage sequence and terminal.
+    // Exactly one dispatch occurred on the wired origin.
+    assert.equal(origin.dispatchCount(), 1);
+
+    // The native complete path records the exact ordered stage sequence with
+    // no gaps, no retry/fallback/candidate_skip stages, and no IR events.
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
-    const names = traceFiles(cli.traceRoot);
-    assert.ok(names.includes("000_manifest.json"));
-    assert.ok(names.includes("999_terminal.json"));
-    assert.ok(names.some((name) => /^\d{3}_provider_response\.json$/.test(name)));
+    assert.deepEqual(traceFiles(cli.traceRoot), [
+      "000_manifest.json",
+      "001_client_request.json",
+      "002_authentication.json",
+      "003_resolution.json",
+      "004_preflight.json",
+      "005_key_selection.json",
+      "006_mutation.json",
+      "007_provider_request.json",
+      "008_provider_response_head.json",
+      "009_provider_response.json",
+      "010_client_response.json",
+      "999_terminal.json",
+    ]);
 
     // Metrics expose the attempt, request, and trace counters.
     const metrics = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
@@ -114,6 +128,27 @@ test.concurrent("process: SSE Chat relays a byte-identical stream preserving [DO
     const bytes = new Uint8Array(await response.arrayBuffer());
     assert.deepEqual(bytes, SSE_CHAT_BYTES);
     assert.match(new TextDecoder().decode(bytes), /data: \[DONE\]/);
+
+    // Exactly one dispatch occurred on the wired origin.
+    assert.equal(origin.dispatchCount(), 1);
+
+    // The native SSE path records the exact ordered stage sequence with the
+    // byte sinks and no IR/retry/fallback stages.
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    assert.deepEqual(traceFiles(cli.traceRoot), [
+      "000_manifest.json",
+      "001_client_request.json",
+      "002_authentication.json",
+      "003_resolution.json",
+      "004_preflight.json",
+      "005_key_selection.json",
+      "006_mutation.json",
+      "007_provider_request.json",
+      "008_provider_response_head.json",
+      "009_provider_stream.sse",
+      "010_client_stream.sse",
+      "999_terminal.json",
+    ]);
 
     // Both stream trace files hold the exact bytes.
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
@@ -190,6 +225,7 @@ test.concurrent("process: client abort mid-stream cancels the provider body", as
 
     // The origin observed the socket close from the cancellation.
     await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close", cli.child);
+    assert.equal(origin.dispatchCount(), 1);
   } finally {
     await origin.close();
     cli.child.kill("SIGKILL");

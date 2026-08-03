@@ -64,6 +64,12 @@ export interface AttemptContext {
   nextAttemptNumber(): number;
 }
 
+export function classifyAbortReason(signal: AbortSignal): "timeout" | "shutdown" | "client" {
+  if (signal.reason === "timeout") return "timeout";
+  if (signal.reason === "shutdown") return "shutdown";
+  return "client";
+}
+
 /**
  * Executes exactly one attempt on a candidate: key acquisition (rotating to an
  * available key, waiting out cooldowns inside the deadline), native request
@@ -83,7 +89,11 @@ export async function executeAttempt(
   ctx: AttemptContext,
 ): Promise<AttemptOutcome> {
   if (request.signal.aborted) {
-    await recordCancellation(ctx, request, "routing");
+    const reason = classifyAbortReason(request.signal);
+    if (reason === "timeout") {
+      return { kind: "deadline_exceeded" };
+    }
+    await recordCancellation(ctx, request, "routing", reason);
     return { kind: "cancelled", phase: "routing" };
   }
 
@@ -165,6 +175,21 @@ export async function executeAttempt(
   } catch (error) {
     const durationMs = ctx.clock.nowMonotonicMs() - dispatchStarted;
     if (request.signal.aborted) {
+      const reason = classifyAbortReason(request.signal);
+      if (reason === "timeout") {
+        finishAttempt(
+          ctx,
+          request,
+          candidate,
+          lease,
+          attemptNumber,
+          { result: "timeout", beforeClientBytes: true },
+          undefined,
+          durationMs,
+          prepared.stream,
+        );
+        return { kind: "deadline_exceeded" };
+      }
       finishAttempt(
         ctx,
         request,
@@ -176,7 +201,7 @@ export async function executeAttempt(
         durationMs,
         prepared.stream,
       );
-      await recordCancellation(ctx, request, "dispatch");
+      await recordCancellation(ctx, request, "dispatch", reason);
       return { kind: "cancelled", phase: "dispatch" };
     }
     const failure = dispatchFailure(error);
@@ -272,7 +297,11 @@ async function acquireLease(
     try {
       await ctx.sleeper.sleep(acquired.untilMs - nowMs, request.signal);
     } catch {
-      await recordCancellation(ctx, request, "wait");
+      const reason = classifyAbortReason(request.signal);
+      if (reason === "timeout") {
+        return { kind: "deadline" };
+      }
+      await recordCancellation(ctx, request, "wait", reason);
       return { kind: "cancelled", phase: "wait" };
     }
   }
@@ -314,9 +343,14 @@ function finishAttempt(
   return cooldownMs;
 }
 
-async function recordCancellation(ctx: AttemptContext, request: GatewayRequest, phase: string): Promise<void> {
-  await ctx.trace.recordJson("cancellation", { phase, by: "client" });
-  ctx.observer.cancelled({ aptusRequestId: request.aptusRequestId, phase, by: "client" });
+async function recordCancellation(
+  ctx: AttemptContext,
+  request: GatewayRequest,
+  phase: string,
+  by: "shutdown" | "client",
+): Promise<void> {
+  await ctx.trace.recordJson("cancellation", { phase, by });
+  ctx.observer.cancelled({ aptusRequestId: request.aptusRequestId, phase, by });
 }
 
 /**

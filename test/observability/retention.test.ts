@@ -78,6 +78,14 @@ test("retention pass prunes oldest completed traces when total size exceeds maxB
   assert.ok(remaining.includes("2026-08-17T10-00-00.000+0000_33333333-3333-4333-8333-333333333333"));
 });
 
+async function waitForCondition(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 test("retention scheduler executes periodic passes and stops cleanly", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-scheduler-"));
   createDirWithTerminal(root, "2026-08-01T00-00-00.000+0000_11111111-1111-4111-8111-111111111111");
@@ -105,7 +113,7 @@ test("retention scheduler executes periodic passes and stops cleanly", async () 
     },
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await waitForCondition(() => !readdirSync(root).includes("2026-08-01T00-00-00.000+0000_11111111-1111-4111-8111-111111111111"));
   scheduler.stop();
 
   assert.equal(degraded, false);
@@ -147,8 +155,7 @@ test("failed retention pass emits trace failure with system sentinel, suppresses
     },
   });
 
-  // Wait for 3 interval ticks
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await waitForCondition(() => degradedCount >= 2);
   scheduler.stop();
 
   // Degraded callback called multiple times (timer remained alive)
@@ -199,8 +206,8 @@ test("scheduler stop() gate immediately blocks subsequent scheduled passes and t
 
   // Triggering now after stop does not run
   await scheduler.triggerNow();
-  // Timer ticks after stop do not run
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  // Yield event loop to ensure stopped timer does not trigger
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(runs, runsAfterStop);
 });

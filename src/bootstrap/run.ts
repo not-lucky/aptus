@@ -100,6 +100,7 @@ export async function startRuntime(
   });
 
   const cancellations = createRequestCancellationRegistry();
+  const shutdownController = new AbortController();
 
   // 1. Bind operations listener first.
   const operations = await bind(
@@ -127,6 +128,7 @@ export async function startRuntime(
         traceRecorder,
         observer,
         cancellations,
+        shutdownSignal: shutdownController.signal,
         redactor,
       }),
     "/server",
@@ -169,11 +171,14 @@ export async function startRuntime(
         client: client.value.server,
         operations: operations.value.server,
         drainMs: config.server.shutdownDrainMs,
+        shutdownController,
+        retentionScheduler,
+        cancellations,
+        observer,
         onDraining: () => {
           state.draining = true;
-          retentionScheduler?.stop();
         },
-        onAbortActive: () => cancellations.abortAll(),
+        onAbortActive: () => cancellations.abortAll("shutdown"),
         onShutdown: async () => {
           await dispatcher.close?.();
         },

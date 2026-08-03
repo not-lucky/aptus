@@ -118,12 +118,25 @@ test.concurrent("process: complete Responses native path applies mutation and re
     assert.equal(recordedBody.temperature, 0.2);
     assert.deepEqual(recordedBody.unknown_custom, [42]);
 
-    // Trace validation
+    // Exactly one dispatch occurred on the wired origin.
+    assert.equal(origin.dispatchCount(), 1);
+
+    // The native complete path records the exact ordered stage sequence.
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
-    const names = traceFiles(cli.traceRoot);
-    assert.ok(names.includes("000_manifest.json"));
-    assert.ok(names.includes("999_terminal.json"));
-    assert.ok(names.some((name) => /^\d{3}_provider_response\.json$/.test(name)));
+    assert.deepEqual(traceFiles(cli.traceRoot), [
+      "000_manifest.json",
+      "001_client_request.json",
+      "002_authentication.json",
+      "003_resolution.json",
+      "004_preflight.json",
+      "005_key_selection.json",
+      "006_mutation.json",
+      "007_provider_request.json",
+      "008_provider_response_head.json",
+      "009_provider_response.json",
+      "010_client_response.json",
+      "999_terminal.json",
+    ]);
 
     // Second request to alias /v1/responses
     origin.enqueue({ status: 200, body: COMPLETE_RESPONSES_BYTES });
@@ -135,6 +148,7 @@ test.concurrent("process: complete Responses native path applies mutation and re
     );
     assert.equal(responseV1.status, 200);
     assert.deepEqual(new Uint8Array(await responseV1.arrayBuffer()), COMPLETE_RESPONSES_BYTES);
+    assert.equal(origin.dispatchCount(), 2);
   } finally {
     await origin.close();
     cli.child.kill("SIGKILL");
@@ -172,6 +186,7 @@ test.concurrent("process: SSE Responses relays exact named events with no [DONE]
     assert.match(streamText, /event: response\.unknown_event/);
     assert.match(streamText, /event: response\.completed/);
     assert.doesNotMatch(streamText, /data: \[DONE\]/);
+    assert.equal(origin.dispatchCount(), 1);
 
     // Verify stream trace files
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
@@ -199,7 +214,8 @@ test.concurrent("process: Responses stream terminal variants (failed, incomplete
       { name: "in-band error", bytes: SSE_RESPONSES_ERROR_BYTES },
     ];
 
-    for (const term of terminals) {
+    for (let index = 0; index < terminals.length; index++) {
+      const term = terminals[index]!;
       origin.enqueue({
         status: 200,
         headers: { "content-type": "text/event-stream" },
@@ -217,6 +233,7 @@ test.concurrent("process: Responses stream terminal variants (failed, incomplete
       const received = new Uint8Array(await response.arrayBuffer());
       assert.deepEqual(received, term.bytes);
       assert.doesNotMatch(new TextDecoder().decode(received), /data: \[DONE\]/);
+      assert.equal(origin.dispatchCount(), index + 1);
     }
   } finally {
     await origin.close();
@@ -243,6 +260,7 @@ test.concurrent("process: Responses terminal non-2xx HTTP error is relayed with 
     );
     assert.equal(response.status, 400);
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), ERROR_RESPONSES_BYTES);
+    assert.equal(origin.dispatchCount(), 1);
 
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
@@ -297,6 +315,7 @@ test.concurrent("process: Responses client abort mid-stream cancels provider bod
     });
 
     await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close", cli.child);
+    assert.equal(origin.dispatchCount(), 1);
   } finally {
     await origin.close();
     cli.child.kill("SIGKILL");

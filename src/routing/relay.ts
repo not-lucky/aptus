@@ -13,7 +13,8 @@ import type {
 import type { TraceTerminal } from "../domain/operations.ts";
 import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
-import { failureFromObservation, interruptedFailure, streamFailure } from "./failures.ts";
+import { classifyAbortReason } from "./attempt.ts";
+import { failureFromObservation, interruptedFailure, streamFailure, timeoutFailure } from "./failures.ts";
 import type { Clock } from "./timing.ts";
 import { createStreamUsageCollector, extractCompleteUsage } from "./usage.ts";
 
@@ -263,18 +264,36 @@ export function relayStream(response: ProviderResponse, context: RelayContext): 
 
           const durationMs = context.clock.nowMonotonicMs() - context.started;
           if (context.requestSignal.aborted) {
+            const reason = classifyAbortReason(context.requestSignal);
             await providerSink.discard().catch(() => undefined);
-            await context.coordinator.finalize({
-              terminal: { kind: "cancelled", by: "client" },
-              outcomeCategory: "cancelled",
-              status: 499,
-              attempts: context.attemptCount,
-              stream: true,
-              durationMs,
-              targetProtocol: context.targetProtocol,
-              provider: context.providerName,
-              canonicalPublicName: context.canonicalName,
-            });
+            if (reason === "timeout") {
+              await context.coordinator.finalize({
+                terminal: { kind: "failed", failure: timeoutFailure() },
+                outcomeCategory: "failed",
+                status: 504,
+                attempts: context.attemptCount,
+                stream: true,
+                durationMs,
+                targetProtocol: context.targetProtocol,
+                provider: context.providerName,
+                canonicalPublicName: context.canonicalName,
+              });
+            } else {
+              const by = reason === "shutdown" ? "shutdown" : "client";
+              await context.trace.recordJson("cancellation", { phase: "relay", by });
+              context.observer.cancelled({ aptusRequestId: context.aptusRequestId, phase: "relay", by });
+              await context.coordinator.finalize({
+                terminal: { kind: "cancelled", by },
+                outcomeCategory: "cancelled",
+                status: 499,
+                attempts: context.attemptCount,
+                stream: true,
+                durationMs,
+                targetProtocol: context.targetProtocol,
+                provider: context.providerName,
+                canonicalPublicName: context.canonicalName,
+              });
+            }
           } else {
             await providerSink.complete().catch(() => undefined);
             const failure = streamFailure(error);
@@ -299,17 +318,35 @@ export function relayStream(response: ProviderResponse, context: RelayContext): 
         void reader.cancel();
         void providerSink.discard().catch(() => undefined);
         const durationMs = context.clock.nowMonotonicMs() - context.started;
-        void context.coordinator.finalize({
-          terminal: { kind: "cancelled", by: "client" },
-          outcomeCategory: "cancelled",
-          status: 499,
-          attempts: context.attemptCount,
-          stream: true,
-          durationMs,
-          targetProtocol: context.targetProtocol,
-          provider: context.providerName,
-          canonicalPublicName: context.canonicalName,
-        });
+        const reason = classifyAbortReason(context.requestSignal);
+        if (reason === "timeout") {
+          void context.coordinator.finalize({
+            terminal: { kind: "failed", failure: timeoutFailure() },
+            outcomeCategory: "failed",
+            status: 504,
+            attempts: context.attemptCount,
+            stream: true,
+            durationMs,
+            targetProtocol: context.targetProtocol,
+            provider: context.providerName,
+            canonicalPublicName: context.canonicalName,
+          });
+        } else {
+          const by = reason === "shutdown" ? "shutdown" : "client";
+          void context.trace.recordJson("cancellation", { phase: "relay", by });
+          context.observer.cancelled({ aptusRequestId: context.aptusRequestId, phase: "relay", by });
+          void context.coordinator.finalize({
+            terminal: { kind: "cancelled", by },
+            outcomeCategory: "cancelled",
+            status: 499,
+            attempts: context.attemptCount,
+            stream: true,
+            durationMs,
+            targetProtocol: context.targetProtocol,
+            provider: context.providerName,
+            canonicalPublicName: context.canonicalName,
+          });
+        }
       },
     }),
     onDelivered: async (durationMs) => {

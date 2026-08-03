@@ -4,7 +4,31 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 /**
  * Response delivery modes supported by the provider origin.
  */
-export type ResponseMode = "complete" | "sse" | "pre-header-disconnect" | "post-header-disconnect" | "held-open";
+export type ResponseMode =
+  | "complete"
+  | "sse"
+  | "pre-header-disconnect"
+  | "post-header-disconnect"
+  | "held-open"
+  | "deferred";
+
+/**
+ * Shared mutable completer state for `deferred`-mode responses: the test-side
+ * handle writes `complete`; the origin-side server assigns it when serving.
+ * A `pendingBody` delivered before the response is served is released on serve.
+ */
+interface DeferredState {
+  complete?: (body?: string | Uint8Array) => void;
+  pendingBody?: string | Uint8Array;
+}
+
+/**
+ * Test-side handle for a `deferred`-mode response: releases the held body.
+ */
+export interface DeferredResponseHandle {
+  /** Sends the body and ends the response (the head is already sent on serve). */
+  complete(body?: string | Uint8Array): void;
+}
 
 /**
  * A queued response the origin serves (FIFO) to the next request.
@@ -20,6 +44,8 @@ export interface QueuedResponse {
   readonly redirect?: { readonly location: string; readonly count: number };
   /** Delays the response head (and everything after it) to exercise dispatch deadlines. */
   readonly headDelayMs?: number;
+  /** Internal completer state for `deferred` mode (wired by `enqueueDeferred`). */
+  readonly deferredState?: DeferredState;
 }
 
 /**
@@ -45,6 +71,13 @@ export interface ProviderOrigin {
   readonly port: number;
   /** Queues the next response to serve. */
   enqueue(response: QueuedResponse): void;
+  /**
+   * Queues a response whose head is served on dispatch but whose body stays
+   * held until the returned handle's `complete()` releases it. Deterministic
+   * substitute for `headDelayMs` when the test must complete the request at a
+   * chosen moment (e.g. after a shutdown signal lands).
+   */
+  enqueueDeferred(response: { readonly status: number; readonly headers?: Record<string, string> }): DeferredResponseHandle;
   /** Number of requests received so far. */
   dispatchCount(): number;
   /** All recorded requests in arrival order. */
@@ -82,6 +115,16 @@ export async function createProviderOrigin(options?: { basePath?: string }): Pro
     port,
     enqueue(response) {
       queue.push(response);
+    },
+    enqueueDeferred(response) {
+      const state: DeferredState = {};
+      queue.push({ ...response, mode: "deferred", deferredState: state });
+      return {
+        complete(body) {
+          state.pendingBody = body;
+          state.complete?.(state.pendingBody);
+        },
+      };
     },
     dispatchCount: () => recorded.length,
     requests: () => recorded,
@@ -194,6 +237,19 @@ async function serveResponse(
     res.end();
   } else if (mode === "post-header-disconnect") {
     res.destroy();
+  } else if (mode === "deferred") {
+    // The head is already sent; hold the body until the test-side handle
+    // releases it (or a pending body queued before serving is delivered).
+    await new Promise<void>((resolve) => {
+      const release = (body?: string | Uint8Array): void => {
+        res.end(toBuffer(body ?? ""));
+        resolve();
+      };
+      item.deferredState!.complete = release;
+      if (item.deferredState!.pendingBody !== undefined) {
+        release(item.deferredState!.pendingBody);
+      }
+    });
   }
   // held-open: never end; the socket stays open until the client disconnects.
 }

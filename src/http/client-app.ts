@@ -63,6 +63,8 @@ export interface ClientAppOptions {
   readonly limiter?: AdmissionLimiter;
   /** Optional cancellation registry for managing active request abort signals during shutdown. */
   readonly cancellations?: RequestCancellationRegistry;
+  /** Optional process-global shutdown abort signal composed into each request. */
+  readonly shutdownSignal?: AbortSignal;
 }
 
 type CreateEndpoint = "/chat/completions" | "/responses" | "/messages";
@@ -163,10 +165,10 @@ function createController(
   const clock = options.clock ?? systemClock;
 
   return async (request, response) => {
-    const controller = new AbortController();
-    const requestAborted = (): void => controller.abort();
+    const perRequest = new AbortController();
+    const requestAborted = (): void => perRequest.abort("client");
     const responseClosed = (): void => {
-      if (!response.writableEnded) controller.abort();
+      if (!response.writableEnded) perRequest.abort("client");
     };
     request.once("aborted", requestAborted);
     response.once("close", responseClosed);
@@ -180,6 +182,18 @@ function createController(
     let streamRequested = false;
     let startedMs = clock.nowMonotonicMs();
     let canonicalPublicName: string | undefined;
+
+    const signal = options.shutdownSignal
+      ? AbortSignal.any([perRequest.signal, options.shutdownSignal])
+      : perRequest.signal;
+
+    const getCancellationBy = (): "shutdown" | "client" => {
+      return signal.reason === "shutdown" ? "shutdown" : "client";
+    };
+
+    const isTimeout = (): boolean => {
+      return deadlineExpired || signal.reason === "timeout";
+    };
 
     try {
       // 1. Client authentication: Validate Bearer token or x-api-key before reading body or taking lease.
@@ -201,13 +215,12 @@ function createController(
         return;
       }
 
-      unregisterCancellation = options.cancellations?.register(controller);
       aptusRequestId = createRequestId();
       startedMs = clock.nowMonotonicMs();
 
       deadline = setTimeout(() => {
         deadlineExpired = true;
-        controller.abort();
+        perRequest.abort("timeout");
       }, options.config.server.requestDeadlineMs);
 
       // Start Trace session
@@ -229,6 +242,8 @@ function createController(
         redactor: options.redactor,
       });
 
+      unregisterCancellation = options.cancellations?.register(perRequest, coordinator.finalized);
+
       // 3. Ingress admission: Stream body, enforce byte limits, validate UTF-8 & duplicate-free JSON.
       const admissionRace = await raceWithAbort(
         admitJsonObject(
@@ -236,24 +251,30 @@ function createController(
           options.config.server.bodyLimitBytes,
           options.config.server.trustedProxyCidrs,
         ),
-        controller.signal,
+        signal,
       );
 
-      if (admissionRace.aborted || controller.signal.aborted) {
-        if (deadlineExpired && !response.headersSent) {
+      if (admissionRace.aborted || signal.aborted) {
+        const timeout = isTimeout();
+        if (timeout && !response.headersSent) {
           writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
           coordinator.markClientFirstByte();
         } else if (!response.destroyed) {
           response.destroy();
         }
-        const terminal = deadlineExpired
+        const by = getCancellationBy();
+        if (!timeout) {
+          options.observer.cancelled({ aptusRequestId, phase: "admission", by });
+          await trace.recordJson("cancellation", { phase: "admission", by });
+        }
+        const terminal = timeout
           ? ({ kind: "failed", failure: timeoutFailure() } as const)
-          : ({ kind: "cancelled", by: "client" } as const);
+          : ({ kind: "cancelled", by } as const);
         await coordinator.finalize({
           terminal,
-          outcomeCategory: deadlineExpired ? "failed" : "cancelled",
-          status: deadlineExpired ? 504 : 499,
-          attempts: 0,
+          outcomeCategory: timeout ? "failed" : "cancelled",
+          status: timeout ? 504 : 499,
+          attempts: coordinator.getAttempts(),
           stream: false,
           durationMs: clock.nowMonotonicMs() - startedMs,
           canonicalPublicName: "unknown",
@@ -272,7 +293,7 @@ function createController(
           terminal: { kind: "failed", failure },
           outcomeCategory: "failed",
           status: statusFromCategory(failure.category, protocol),
-          attempts: 0,
+          attempts: coordinator.getAttempts(),
           stream: false,
           durationMs: clock.nowMonotonicMs() - startedMs,
           canonicalPublicName: "unknown",
@@ -316,7 +337,7 @@ function createController(
           terminal: { kind: "failed", failure: publicNameResult.error },
           outcomeCategory: "failed",
           status: 400,
-          attempts: 0,
+          attempts: coordinator.getAttempts(),
           stream: streamRequested,
           durationMs: clock.nowMonotonicMs() - startedMs,
           canonicalPublicName: "unknown",
@@ -336,7 +357,7 @@ function createController(
           terminal: { kind: "failed", failure },
           outcomeCategory: "failed",
           status: 404,
-          attempts: 0,
+          attempts: coordinator.getAttempts(),
           stream: streamRequested,
           durationMs: clock.nowMonotonicMs() - startedMs,
           canonicalPublicName: "unknown",
@@ -363,31 +384,33 @@ function createController(
           headers: admission.headers,
           body: admission.body,
           clientKeyName: authentication.name,
-          signal: controller.signal,
+          signal,
           canonicalPublicName,
           resolutionKind,
           stream: streamRequested,
           coordinator,
           trace,
         }),
-        controller.signal,
+        signal,
       );
 
-      if (gatewayResult.aborted || controller.signal.aborted) {
-        if (deadlineExpired && !response.headersSent) {
+      if (gatewayResult.aborted || signal.aborted) {
+        const timeout = isTimeout();
+        if (timeout && !response.headersSent) {
           writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
           coordinator.markClientFirstByte();
         } else if (!response.destroyed) {
           response.destroy();
         }
-        const terminal = deadlineExpired
+        const by = getCancellationBy();
+        const terminal = timeout
           ? ({ kind: "failed", failure: timeoutFailure() } as const)
-          : ({ kind: "cancelled", by: "client" } as const);
+          : ({ kind: "cancelled", by } as const);
         await coordinator.finalize({
           terminal,
-          outcomeCategory: deadlineExpired ? "failed" : "cancelled",
-          status: deadlineExpired ? 504 : 499,
-          attempts: 0,
+          outcomeCategory: timeout ? "failed" : "cancelled",
+          status: timeout ? 504 : 499,
+          attempts: coordinator.getAttempts(),
           stream: streamRequested,
           durationMs: clock.nowMonotonicMs() - startedMs,
           canonicalPublicName,
@@ -403,7 +426,7 @@ function createController(
         protocol,
         aptusRequestId,
         options.errorEncoder,
-        controller.signal,
+        signal,
         coordinator,
         canonicalPublicName,
         startedMs,
@@ -415,25 +438,37 @@ function createController(
         response.destroy();
       }
 
-      // Fallback finalization in case gateway didn't finalize (e.g., test mocks)
+      // Fallback finalization in case gateway didn't finalize (e.g., test mocks).
+      // Emit cancellation telemetry only when the gateway could not observe the
+      // abort itself: complete-body delivery reads the owned body here, so a
+      // mid-delivery disconnect is invisible to the Gateway. `cancelled` results
+      // (attempt/spool seams) and stream relays already emitted their single
+      // `aptus.request.cancelled` + trace cancellation stage before returning,
+      // so emitting again here would duplicate both.
+      const timeout = isTimeout();
+      const by = getCancellationBy();
+      if (delivery === "aborted" && !timeout && gatewayResult.value.kind === "complete") {
+        options.observer.cancelled({ aptusRequestId, phase: "relay", by });
+        await trace.recordJson("cancellation", { phase: "relay", by });
+      }
       const terminal: TraceTerminal =
         delivery === "aborted"
-          ? deadlineExpired
+          ? timeout
             ? { kind: "failed", failure: timeoutFailure() }
-            : { kind: "cancelled", by: "client" }
+            : { kind: "cancelled", by }
           : { kind: "complete", status: response.statusCode || 200 };
       await coordinator.finalize({
         terminal,
         outcomeCategory:
           delivery === "aborted"
-            ? deadlineExpired
+            ? timeout
               ? "failed"
               : "cancelled"
             : response.statusCode >= 400
               ? "failed"
               : "complete",
-        status: delivery === "aborted" ? (deadlineExpired ? 504 : 499) : response.statusCode || 200,
-        attempts: 1,
+        status: delivery === "aborted" ? (timeout ? 504 : 499) : response.statusCode || 200,
+        attempts: coordinator.getAttempts(),
         stream: streamRequested,
         durationMs: clock.nowMonotonicMs() - startedMs,
         canonicalPublicName,
@@ -442,9 +477,9 @@ function createController(
       await coordinator.finalized;
     } catch {
       if (!response.headersSent && !response.destroyed) {
-        if (deadlineExpired && aptusRequestId !== undefined) {
+        if (isTimeout() && aptusRequestId !== undefined) {
           writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
-        } else if (!controller.signal.aborted) {
+        } else if (!signal.aborted) {
           writeEncoded(
             response,
             aptusRequestId === undefined
@@ -460,7 +495,7 @@ function createController(
           terminal: { kind: "incomplete", reason: "internal_fault" },
           outcomeCategory: "failed",
           status: 500,
-          attempts: 0,
+          attempts: coordinator.getAttempts(),
           stream: streamRequested,
           durationMs: clock.nowMonotonicMs() - startedMs,
           canonicalPublicName: canonicalPublicName ?? "unknown",
@@ -578,6 +613,12 @@ async function writeGatewayResult(
   clock: Clock,
   trace: import("../domain/contracts.ts").TraceSession,
 ): Promise<"complete" | "aborted"> {
+  if (result.kind === "cancelled") {
+    if (!response.destroyed) {
+      response.destroy();
+    }
+    return "aborted";
+  }
   if (result.kind === "failure") {
     writeEncoded(response, errorEncoder.encode({ protocol, aptusRequestId, failure: result.failure }));
     coordinator.markClientFirstByte();

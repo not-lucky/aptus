@@ -96,6 +96,10 @@ export interface TerminalCoordinator {
   markIngress(stream: boolean): void;
   /** Idempotently records client time-to-first-byte after response bytes/head are handed to Express. */
   markClientFirstByte(): void;
+  /** Records the current attempt number for authoritative attempt-count tracking on cancellation. */
+  recordAttempt(attemptNumber: number): void;
+  /** Retrieves the highest recorded attempt count. */
+  getAttempts(): number;
   /** Atomically claims terminal ownership and executes best-effort completion side-effects. */
   finalize(fact: TerminalFact): Promise<{ readonly won: boolean }>;
 }
@@ -320,6 +324,11 @@ export type GatewayResult =
        * finalizing the internal-fault terminal with the exact delivery duration.
        */
       readonly finalize?: (durationMs: number) => Promise<void>;
+    }
+  | {
+      /** Request cancelled by client disconnect or shutdown. */
+      readonly kind: "cancelled";
+      readonly by: "client" | "shutdown";
     };
 
 /**

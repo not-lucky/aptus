@@ -296,6 +296,70 @@ test.concurrent("process: retry wait past the request deadline expires with a 50
   }
 });
 
+test.concurrent("process: classified timeout (504) with fallbackOn: [timeout] moves to the next candidate", async () => {
+  const primary = await createProviderOrigin({ basePath: "/v1" });
+  const backup = await createProviderOrigin({ basePath: "/v1" });
+
+  try {
+    const caseName = "timeout-fallback";
+    const cli = await startRoutesCli(primary, backup, caseName, THREE_KEY_ROUTE);
+    try {
+      // classifyNativeStatus maps HTTP 504 to the timeout category, which the
+      // reliable-chat route's fallbackOn includes. The next candidate is the
+      // same-protocol backup model served by the backup origin.
+      primary.enqueue({
+        status: 504,
+        headers: { "content-type": "application/json" },
+        body: '{"error":"upstream timeout"}',
+      });
+      backup.enqueue({ status: 200, headers: { "content-type": "application/json" }, body: COMPLETE_CHAT_BYTES });
+
+      const res = await chatRequest(cli.clientPort, caseName);
+      assert.equal(res.status, 200);
+      assert.equal(((await res.json()) as { id: string }).id, "chatcmpl-abc123");
+      assert.equal(primary.dispatchCount(), 1);
+      assert.equal(backup.dispatchCount(), 1);
+    } finally {
+      await stopCli(cli);
+    }
+  } finally {
+    await Promise.all([primary.close(), backup.close()]);
+  }
+});
+
+test.concurrent("process: classified timeout (504) without fallbackOn: [timeout] never falls back", async () => {
+  const primary = await createProviderOrigin({ basePath: "/v1" });
+  const backup = await createProviderOrigin({ basePath: "/v1" });
+
+  try {
+    const caseName = "timeout-no-fallback";
+    const cli = await startRoutesCli(primary, backup, caseName, {
+      ...THREE_KEY_ROUTE,
+      // Remove timeout from the fallback policy: the classified 504 must not
+      // move to the backup candidate even though one exists.
+      "    fallbackOn: [rate_limit, unavailable, provider, timeout]":
+        "    fallbackOn: [rate_limit, unavailable, provider]",
+    });
+    try {
+      primary.enqueue({
+        status: 504,
+        headers: { "content-type": "application/json" },
+        body: '{"error":"upstream timeout"}',
+      });
+      backup.enqueue({ status: 200, headers: { "content-type": "application/json" }, body: COMPLETE_CHAT_BYTES });
+
+      const res = await chatRequest(cli.clientPort, caseName);
+      assert.equal(res.status, 504);
+      assert.equal(primary.dispatchCount(), 1);
+      assert.equal(backup.dispatchCount(), 0);
+    } finally {
+      await stopCli(cli);
+    }
+  } finally {
+    await Promise.all([primary.close(), backup.close()]);
+  }
+});
+
 test.concurrent("process: post-header disconnect on a stream cannot fall back after client bytes", async () => {
   const primary = await createProviderOrigin({ basePath: "/v1" });
   const backup = await createProviderOrigin({ basePath: "/v1" });
