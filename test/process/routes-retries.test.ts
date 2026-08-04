@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
-import { postJson, type RunningCli, seededSecrets, startAptusCli, stopCli } from "../helpers/cli-process.ts";
+import { postJson, type RunningInProcessAptus, seededSecrets, startAptusInProcess } from "../helpers/cli-process.ts";
 import { createProviderOrigin, type ProviderOrigin } from "../helpers/provider-origin.ts";
 
 const ENV_NAMES = [
@@ -77,8 +77,8 @@ function startRoutesCli(
   backup: ProviderOrigin,
   caseName: string,
   overrides: Record<string, string> = {},
-): Promise<RunningCli> {
-  return startAptusCli({
+): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
     casePrefix: "aptus-routes",
     caseName,
     envNames: ENV_NAMES,
@@ -152,7 +152,7 @@ test.concurrent("process: two 429s with three keys rotate keys before wait and s
         "Bearer aptus-route-secret-two-429-rotate-4",
       );
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -180,7 +180,7 @@ test.concurrent("process: 503 retries exhausted on primary origin falls back to 
       assert.equal(primary.dispatchCount(), 3);
       assert.equal(backup.dispatchCount(), 1);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -205,7 +205,7 @@ test.concurrent("process: pre-header disconnect falls back to backup origin", as
       assert.equal(primary.dispatchCount(), 1);
       assert.equal(backup.dispatchCount(), 1);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -230,7 +230,7 @@ test.concurrent("process: protocol-mismatch-only route returns 400 with zero ori
       assert.equal(primary.dispatchCount(), 0);
       assert.equal(backup.dispatchCount(), 0);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -257,7 +257,7 @@ test.concurrent("process: stalled response head times out with no retry and a 50
       assert.equal(primary.dispatchCount(), 1);
       assert.equal(backup.dispatchCount(), 0);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -289,7 +289,7 @@ test.concurrent("process: retry wait past the request deadline expires with a 50
       assert.equal(primary.dispatchCount(), 1);
       assert.equal(backup.dispatchCount(), 0);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -320,7 +320,7 @@ test.concurrent("process: classified timeout (504) with fallbackOn: [timeout] mo
       assert.equal(primary.dispatchCount(), 1);
       assert.equal(backup.dispatchCount(), 1);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -353,7 +353,7 @@ test.concurrent("process: classified timeout (504) without fallbackOn: [timeout]
       assert.equal(primary.dispatchCount(), 1);
       assert.equal(backup.dispatchCount(), 0);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);
@@ -385,7 +385,7 @@ test.concurrent("process: post-header disconnect on a stream cannot fall back af
       assert.equal(primary.dispatchCount(), 1);
       assert.equal(backup.dispatchCount(), 0);
     } finally {
-      await stopCli(cli);
+      await cli.stop();
     }
   } finally {
     await Promise.all([primary.close(), backup.close()]);

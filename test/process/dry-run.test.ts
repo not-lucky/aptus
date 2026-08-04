@@ -6,9 +6,9 @@ import { MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
 import { createChatOrigin, type ChatOrigin } from "../helpers/chat-origin.ts";
 import {
   postJson,
-  type RunningCli,
+  type RunningInProcessAptus,
   seededSecrets,
-  startAptusCli,
+  startAptusInProcess,
   traceFiles,
   waitFor,
 } from "../helpers/cli-process.ts";
@@ -24,8 +24,8 @@ const ENV_NAMES = [
 
 const seededEnv = (caseName: string) => seededSecrets(caseName, ENV_NAMES, "aptus-dry-run");
 
-function startCli(origin: ChatOrigin, caseName: string): Promise<RunningCli> {
-  return startAptusCli({
+function startCli(origin: ChatOrigin, caseName: string): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
     casePrefix: "aptus-dry-run",
     caseName,
     envNames: ENV_NAMES,
@@ -80,7 +80,7 @@ test.concurrent("process: dry run with stream:true returns vendor JSON and zero 
     assert.equal(origin.dispatchCount(), 0);
 
     // Trace terminal records the dry-run outcome.
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminal = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {
@@ -99,6 +99,6 @@ test.concurrent("process: dry run with stream:true returns vendor JSON and zero 
     assert.match(text, /aptus_in_flight_requests\{endpoint_protocol="openai-chat",stream="true"\} 0/);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });

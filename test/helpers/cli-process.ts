@@ -3,6 +3,9 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { startRuntime } from "../../src/bootstrap/run.ts";
+import { formatStartupError } from "../../src/config/errors.ts";
+import { loadConfig } from "../../src/config/load.ts";
 import { completeYaml } from "../config/yaml.ts";
 import { TEST_CLI_BUNDLE } from "./cli-bundle.ts";
 import type { ThreeOriginHarness } from "./three-origin-harness.ts";
@@ -59,15 +62,15 @@ export function seededSecrets<const T extends readonly string[]>(
 }
 
 /**
- * Spawns the CLI with a generated config and waits for its ready line.
- *
- * The complete-sample YAML is always rewritten to free ports and a trace root
- * inside a fresh tmp directory; `replacements` adds case-specific anchors on
- * top. The child runs with only the seeded secrets (plus a clean copy of the
- * parent env) set; stdout and stderr are captured into `stdout` for ready-line
- * parsing and failure diagnostics.
+ * Builds the per-test tmp directory, config file, and seeded env shared by the
+ * process and in-process CLI harnesses.
  */
-export async function startAptusCli(options: StartCliOptions): Promise<RunningCli> {
+function prepareAptusEnvironment(options: StartCliOptions): {
+  dir: string;
+  traceRoot: string;
+  configPath: string;
+  mergedEnv: NodeJS.ProcessEnv;
+} {
   const dir = mkdtempSync(join(tmpdir(), `${options.casePrefix}-${options.caseName}-`));
   const traceRoot = join(dir, "traces");
   const env = seededSecrets(options.caseName, options.envNames, options.secretPrefix);
@@ -83,13 +86,28 @@ export async function startAptusCli(options: StartCliOptions): Promise<RunningCl
     "utf8",
   );
 
-  const merged: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of options.envNames) delete merged[name];
-  for (const [key, value] of Object.entries(env)) merged[key] = value;
+  const mergedEnv: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of options.envNames) delete mergedEnv[name];
+  for (const [key, value] of Object.entries(env)) mergedEnv[key] = value;
+
+  return { dir, traceRoot, configPath: join(dir, "aptus.yaml"), mergedEnv };
+}
+
+/**
+ * Spawns the CLI with a generated config and waits for its ready line.
+ *
+ * The complete-sample YAML is always rewritten to free ports and a trace root
+ * inside a fresh tmp directory; `replacements` adds case-specific anchors on
+ * top. The child runs with only the seeded secrets (plus a clean copy of the
+ * parent env) set; stdout and stderr are captured into `stdout` for ready-line
+ * parsing and failure diagnostics.
+ */
+export async function startAptusCli(options: StartCliOptions): Promise<RunningCli> {
+  const { dir, traceRoot, mergedEnv } = prepareAptusEnvironment(options);
 
   const child = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
-    env: merged,
+    env: mergedEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -114,6 +132,53 @@ export async function startAptusCli(options: StartCliOptions): Promise<RunningCl
       return output;
     },
     traceRoot,
+  };
+}
+
+/**
+ * One in-process Aptus runtime (no subprocess) with its bound ports.
+ *
+ * Used by behavioral tests that only need a running app to send HTTP at — the
+ * app boots via `loadConfig` + `startRuntime` inside the test worker instead of
+ * spawning the bundled CLI, removing the per-test process boot cost.
+ */
+export interface RunningInProcessAptus {
+  readonly clientPort: number;
+  readonly operationsPort: number;
+  readonly traceRoot: string;
+  /** Tears down listeners, the dispatcher, and the retention scheduler. */
+  stop(): Promise<void>;
+}
+
+/**
+ * Boots Aptus in-process with a generated config and returns its bound ports.
+ *
+ * Mirrors {@link startAptusCli} but uses the exported composition root directly,
+ * so each test avoids a ~170ms Node subprocess boot plus spawn overhead.
+ */
+export async function startAptusInProcess(options: StartCliOptions): Promise<RunningInProcessAptus> {
+  const { traceRoot, configPath, mergedEnv } = prepareAptusEnvironment(options);
+
+  const loaded = await loadConfig(configPath, mergedEnv);
+  if (!loaded.ok) {
+    throw new Error(`in-process config load failed: ${loaded.error.map(formatStartupError).join("; ")}`);
+  }
+  const runtime = await startRuntime(loaded.value.config, loaded.value.revision, { logSink: () => {} });
+  if (!runtime.ok) {
+    throw new Error(`in-process runtime start failed: ${runtime.error.map(formatStartupError).join("; ")}`);
+  }
+
+  const { client, operations, shutdown } = runtime.value;
+  return {
+    clientPort: client.port,
+    operationsPort: operations.port,
+    traceRoot,
+    stop: async () => {
+      // Force-close any lingering in-flight requests so teardown never waits for the drain window.
+      const runPromise = shutdown.run();
+      shutdown.abort();
+      await runPromise;
+    },
   };
 }
 
@@ -178,11 +243,24 @@ export function startThreeOriginCli(
 }
 
 /**
- * Kills the CLI process and waits for it to exit.
+ * In-process counterpart of {@link startThreeOriginCli}.
  */
-export async function stopCli(cli: RunningCli): Promise<void> {
-  cli.child.kill("SIGKILL");
-  await waitForExit(cli.child);
+export function startThreeOriginInProcess(
+  harness: ThreeOriginHarness,
+  options: StartThreeOriginCliOptions,
+): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
+    casePrefix: options.casePrefix,
+    caseName: options.caseName,
+    envNames: options.envNames,
+    secretPrefix: options.secretPrefix,
+    replacements: {
+      "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${harness.chatOrigin.baseUrl}`,
+      "    baseUrl: https://api.openai.com/v1": `    baseUrl: ${harness.responsesOrigin.baseUrl}`,
+      "    baseUrl: https://api.anthropic.com": `    baseUrl: ${harness.messagesOrigin.baseUrl}`,
+      ...options.replacements,
+    },
+  });
 }
 
 /**
@@ -193,11 +271,12 @@ export async function stopCli(cli: RunningCli): Promise<void> {
 export async function waitFor(
   condition: () => boolean | Promise<boolean>,
   label: string,
-  child: ChildProcess,
+  child?: ChildProcess,
 ): Promise<void> {
   const deadline = Date.now() + 20_000;
   while (!(await condition())) {
-    if (Date.now() > deadline || child.exitCode !== null) throw new Error(`timed out waiting for ${label}`);
+    const childExited = child !== undefined && child.exitCode !== null;
+    if (Date.now() > deadline || childExited) throw new Error(`timed out waiting for ${label}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

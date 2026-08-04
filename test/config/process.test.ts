@@ -67,7 +67,8 @@ function spawnCli(args: readonly string[], env: Record<string, string>, cwd: str
       stderr += chunk.toString();
     });
     child.on("error", rejectResult);
-    child.on("exit", (code, signal) => resolveResult({ code, signal, stdout, stderr }));
+    // `close` (not `exit`) so stdout/stderr are fully drained before resolving.
+    child.on("close", (code, signal) => resolveResult({ code, signal, stdout, stderr }));
   });
 }
 

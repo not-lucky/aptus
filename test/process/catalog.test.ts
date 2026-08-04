@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
-import { postJson, seededSecrets, startThreeOriginCli } from "../helpers/cli-process.ts";
+import { postJson, seededSecrets, startThreeOriginInProcess } from "../helpers/cli-process.ts";
 import { createThreeOriginHarness } from "../helpers/three-origin-harness.ts";
 
 const ENV_NAMES = [
@@ -30,7 +30,7 @@ const RESTRICTED_CLIENT_SNIPPET =
 test.concurrent("process: Bearer and x-api-key catalogs are served locally with zero provider dispatch", async () => {
   const harness = await createThreeOriginHarness();
   const env = seededEnv("populated");
-  const cli = await startThreeOriginCli(harness, {
+  const cli = await startThreeOriginInProcess(harness, {
     casePrefix: "aptus-catalog",
     caseName: "populated",
     envNames: ENV_NAMES,
@@ -79,14 +79,14 @@ test.concurrent("process: Bearer and x-api-key catalogs are served locally with 
     assert.equal(harness.messagesOrigin.dispatchCount(), 0);
   } finally {
     await harness.closeAll();
-    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
 test.concurrent("process: restricted allow:[] client gets an empty catalog and 404 on create with zero dispatch", async () => {
   const harness = await createThreeOriginHarness();
   const env = seededEnv("empty");
-  const cli = await startThreeOriginCli(harness, {
+  const cli = await startThreeOriginInProcess(harness, {
     casePrefix: "aptus-catalog",
     caseName: "empty",
     envNames: ENV_NAMES,
@@ -134,6 +134,6 @@ test.concurrent("process: restricted allow:[] client gets an empty catalog and 4
     assert.equal(harness.messagesOrigin.dispatchCount(), 0);
   } finally {
     await harness.closeAll();
-    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });

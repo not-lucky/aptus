@@ -1,3 +1,4 @@
+import type { Sink } from "@logtape/logtape";
 import type express from "express";
 import { type StartupError, startupError } from "../config/errors.ts";
 import type { AptusConfig } from "../config/types.ts";
@@ -33,6 +34,14 @@ export interface Runtime {
 }
 
 /**
+ * Options for {@link startRuntime}.
+ */
+export interface StartRuntimeOptions {
+  /** Overrides the console log sink (tests inject a no-op sink to keep output quiet). */
+  readonly logSink?: Sink;
+}
+
+/**
  * Concrete application composition root.
  *
  * This is the only module that imports concrete adapters and wires them behind
@@ -47,11 +56,12 @@ export interface Runtime {
 export async function startRuntime(
   config: AptusConfig,
   revision: string,
+  options: StartRuntimeOptions = {},
 ): Promise<Result<Runtime, readonly StartupError[]>> {
   // Trace readiness starts true because the startup probe passed during loadConfig.
   const state: RuntimeState = { draining: false, traceReady: true };
 
-  configureLogging(config.logging);
+  configureLogging(config.logging, options.logSink);
   const logger = aptusLogger();
 
   const providerNames = new Set(config.providers.map((p) => p.name));

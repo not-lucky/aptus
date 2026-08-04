@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { test } from "vitest";
 import {
   postJson,
-  type RunningCli,
+  type RunningInProcessAptus,
   seededSecrets,
-  startAptusCli,
+  startAptusInProcess,
   traceFiles,
   waitFor,
 } from "../helpers/cli-process.ts";
@@ -70,8 +70,8 @@ const RESPONSES_MODEL_SNIPPET = `  - name: responses-main
       cacheWriteUsdPerMillionTokens: null
 `;
 
-function startCli(origin: ProviderOrigin, caseName: string): Promise<RunningCli> {
-  return startAptusCli({
+function startCli(origin: ProviderOrigin, caseName: string): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
     casePrefix: "aptus-responses",
     caseName,
     envNames: ENV_NAMES,
@@ -122,7 +122,7 @@ test.concurrent("process: complete Responses native path applies mutation and re
     assert.equal(origin.dispatchCount(), 1);
 
     // The native complete path records the exact ordered stage sequence.
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     assert.deepEqual(traceFiles(cli.traceRoot), [
       "000_manifest.json",
       "001_client_request.json",
@@ -151,7 +151,7 @@ test.concurrent("process: complete Responses native path applies mutation and re
     assert.equal(origin.dispatchCount(), 2);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -199,7 +199,7 @@ test.concurrent("process: SSE Responses relays exact named events with no [DONE]
     assert.deepEqual(new Uint8Array(readFileSync(join(cli.traceRoot, dir, clientStream))), SSE_RESPONSES_BYTES);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -237,7 +237,7 @@ test.concurrent("process: Responses stream terminal variants (failed, incomplete
     }
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -262,7 +262,7 @@ test.concurrent("process: Responses terminal non-2xx HTTP error is relayed with 
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), ERROR_RESPONSES_BYTES);
     assert.equal(origin.dispatchCount(), 1);
 
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminalJson = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {
@@ -273,7 +273,7 @@ test.concurrent("process: Responses terminal non-2xx HTTP error is relayed with 
     assert.equal(terminalJson.failure?.category, "invalid_request");
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -314,10 +314,10 @@ test.concurrent("process: Responses client abort mid-stream cancels provider bod
       request.end(JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, stream: true }));
     });
 
-    await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close", cli.child);
+    await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close");
     assert.equal(origin.dispatchCount(), 1);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });

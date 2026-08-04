@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { test } from "vitest";
 import {
   postJson,
-  type RunningCli,
+  type RunningInProcessAptus,
   seededSecrets,
-  startAptusCli,
+  startAptusInProcess,
   traceFiles,
   waitFor,
 } from "../helpers/cli-process.ts";
@@ -31,8 +31,8 @@ const ENV_NAMES = [
 
 const seededEnv = (caseName: string) => seededSecrets(caseName, ENV_NAMES, "aptus-messages");
 
-function startCli(origin: ProviderOrigin, caseName: string): Promise<RunningCli> {
-  return startAptusCli({
+function startCli(origin: ProviderOrigin, caseName: string): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
     casePrefix: "aptus-messages",
     caseName,
     envNames: ENV_NAMES,
@@ -83,7 +83,7 @@ test.concurrent("process: complete Messages native path applies mutation and rel
     assert.equal(origin.dispatchCount(), 1);
 
     // The native complete path records the exact ordered stage sequence.
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     assert.deepEqual(traceFiles(cli.traceRoot), [
       "000_manifest.json",
       "001_client_request.json",
@@ -117,7 +117,7 @@ test.concurrent("process: complete Messages native path applies mutation and rel
     assert.equal(recordedBody2.max_tokens, 4096);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -158,7 +158,7 @@ test.concurrent("process: SSE Messages relays exact stream preserving pings and 
     assert.equal(origin.dispatchCount(), 1);
 
     // Verify trace files hold exact bytes
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const names = readdirSync(join(cli.traceRoot, dir)).sort();
@@ -169,7 +169,7 @@ test.concurrent("process: SSE Messages relays exact stream preserving pings and 
     assert.deepEqual(new Uint8Array(readFileSync(join(cli.traceRoot, dir, clientStream))), SSE_MESSAGES_BYTES);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -199,7 +199,7 @@ test.concurrent("process: Messages post-200 in-band error is relayed without for
 
     // Native relay does not semantically decode stream, so cleanly relayed stream records complete at HTTP 200
     // after HTTP hands the final byte to the client.
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminalJson = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {
@@ -210,7 +210,7 @@ test.concurrent("process: Messages post-200 in-band error is relayed without for
     assert.equal(terminalJson.status, 200);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -235,7 +235,7 @@ test.concurrent("process: Messages terminal HTTP 404 error is relayed with faile
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), ERROR_MESSAGES_BYTES);
     assert.equal(origin.dispatchCount(), 1);
 
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     const dir = readdirSync(cli.traceRoot).find((name) => !name.startsWith("."));
     assert.ok(dir);
     const terminalJson = JSON.parse(readFileSync(join(cli.traceRoot, dir, "999_terminal.json"), "utf8")) as {
@@ -246,7 +246,7 @@ test.concurrent("process: Messages terminal HTTP 404 error is relayed with faile
     assert.equal(terminalJson.failure?.category, "not_found");
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -287,10 +287,10 @@ test.concurrent("process: Messages client abort mid-stream cancels provider body
       request.end(JSON.stringify({ ...MINIMAL_MESSAGES_REQUEST, stream: true }));
     });
 
-    await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close", cli.child);
+    await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close");
     assert.equal(origin.dispatchCount(), 1);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });

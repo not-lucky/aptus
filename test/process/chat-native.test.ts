@@ -7,9 +7,9 @@ import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../he
 import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.ts";
 import {
   postJson,
-  type RunningCli,
+  type RunningInProcessAptus,
   seededSecrets,
-  startAptusCli,
+  startAptusInProcess,
   traceFiles,
   waitFor,
 } from "../helpers/cli-process.ts";
@@ -30,8 +30,8 @@ const bearer = (secret: string): { name: string; value: string } => ({
   value: `Bearer ${secret}`,
 });
 
-function startCli(origin: ChatOrigin, caseName: string): Promise<RunningCli> {
-  return startAptusCli({
+function startCli(origin: ChatOrigin, caseName: string): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
     casePrefix: "aptus-native",
     caseName,
     envNames: ENV_NAMES,
@@ -78,7 +78,7 @@ test.concurrent("process: complete Chat native path applies mutation and relays 
 
     // The native complete path records the exact ordered stage sequence with
     // no gaps, no retry/fallback/candidate_skip stages, and no IR events.
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     assert.deepEqual(traceFiles(cli.traceRoot), [
       "000_manifest.json",
       "001_client_request.json",
@@ -102,7 +102,7 @@ test.concurrent("process: complete Chat native path applies mutation and relays 
     assert.match(text, /aptus_trace_write_failures_total/);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -134,7 +134,7 @@ test.concurrent("process: SSE Chat relays a byte-identical stream preserving [DO
 
     // The native SSE path records the exact ordered stage sequence with the
     // byte sinks and no IR/retry/fallback stages.
-    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write", cli.child);
+    await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     assert.deepEqual(traceFiles(cli.traceRoot), [
       "000_manifest.json",
       "001_client_request.json",
@@ -161,7 +161,7 @@ test.concurrent("process: SSE Chat relays a byte-identical stream preserving [DO
     assert.deepEqual(new Uint8Array(readFileSync(join(cli.traceRoot, dir, clientStream))), SSE_CHAT_BYTES);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -182,7 +182,7 @@ test.concurrent("process: redirect loop is rejected as a provider failure withou
     assert.equal(origin.dispatchCount(), 2);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -224,10 +224,10 @@ test.concurrent("process: client abort mid-stream cancels the provider body", as
     });
 
     // The origin observed the socket close from the cancellation.
-    await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close", cli.child);
+    await waitFor(() => origin.lastRequest()?.closedAtMs !== undefined, "origin socket close");
     assert.equal(origin.dispatchCount(), 1);
   } finally {
     await origin.close();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });

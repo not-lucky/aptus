@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
-import { postJson, seededSecrets, startThreeOriginCli, waitFor } from "../helpers/cli-process.ts";
+import { postJson, seededSecrets, startThreeOriginInProcess, waitFor } from "../helpers/cli-process.ts";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
 import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness } from "../helpers/three-origin-harness.ts";
@@ -41,7 +41,7 @@ const RESPONSES_MODEL_SNIPPET = `  - name: responses-main
 test.concurrent("process: both path aliases per protocol aggregate into one endpoint metric label", async () => {
   const harness = await createThreeOriginHarness();
   const env = seededEnv("aliases");
-  const cli = await startThreeOriginCli(harness, {
+  const cli = await startThreeOriginInProcess(harness, {
     casePrefix: "aptus-aliases",
     caseName: "aliases",
     envNames: ENV_NAMES,
@@ -97,7 +97,6 @@ test.concurrent("process: both path aliases per protocol aggregate into one endp
         return endpointSeries.every((pattern) => pattern.test(text));
       },
       "three endpoint series with complete counts",
-      cli.child,
     );
     const series = text.split("\n").filter((line) => line.startsWith("aptus_http_requests_total"));
     assert.equal(series.length, 3, `expected exactly 3 endpoint series:\n${series.join("\n")}`);
@@ -111,6 +110,6 @@ test.concurrent("process: both path aliases per protocol aggregate into one endp
     assert.equal(harness.messagesOrigin.dispatchCount(), 2);
   } finally {
     await harness.closeAll();
-    if (cli.child.exitCode === null && cli.child.signalCode === null) cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });

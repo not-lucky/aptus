@@ -3,7 +3,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
-import { postJson, type RunningCli, seededSecrets, startAptusCli, waitFor } from "../helpers/cli-process.ts";
+import {
+  postJson,
+  type RunningInProcessAptus,
+  seededSecrets,
+  startAptusInProcess,
+  waitFor,
+} from "../helpers/cli-process.ts";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
 import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
@@ -68,8 +74,8 @@ const MULTI_ROUTE_SNIPPET = `  - name: multi-protocol-route
         maxOutputTokens: null
 `;
 
-function startCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningCli> {
-  return startAptusCli({
+function startCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningInProcessAptus> {
+  return startAptusInProcess({
     casePrefix: "aptus-parity",
     caseName,
     envNames: ENV_NAMES,
@@ -143,7 +149,7 @@ test.concurrent("process: concurrent requests across 3 simultaneous origins succ
     assert.equal(harness.messagesOrigin.dispatchCount(), 1);
   } finally {
     await harness.closeAll();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
 
@@ -230,7 +236,6 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
         );
       },
       "protocol metrics",
-      cli.child,
     );
 
     // Candidate skips: Chat skipped the Messages candidate; Responses skipped Messages and Chat.
@@ -268,6 +273,6 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
     assert.match(metricsText, /aptus_http_requests_total\{[^}]*endpoint_protocol="anthropic-messages"[^}]*\}/);
   } finally {
     await harness.closeAll();
-    cli.child.kill("SIGKILL");
+    await cli.stop();
   }
 });
