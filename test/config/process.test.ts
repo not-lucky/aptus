@@ -4,13 +4,11 @@ import { once } from "node:events";
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "vitest";
 import { createChatOrigin } from "../helpers/chat-origin.ts";
+import { TEST_CLI_BUNDLE } from "../helpers/cli-bundle.ts";
 import { completeYaml } from "./yaml.ts";
-
-const REPO = resolve(import.meta.dirname, "..", "..");
-const CLI = join(REPO, "src", "bootstrap", "cli.ts");
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
@@ -55,7 +53,7 @@ interface CliResult {
 
 function spawnCli(args: readonly string[], env: Record<string, string>, cwd: string): Promise<CliResult> {
   return new Promise((resolveResult, rejectResult) => {
-    const child = spawn(process.execPath, [CLI, ...args], {
+    const child = spawn(process.execPath, [TEST_CLI_BUNDLE, ...args], {
       cwd,
       env: mergedEnv(env),
       stdio: ["ignore", "pipe", "pipe"],
@@ -244,7 +242,7 @@ test.concurrent("process: complete sample boots, probes, reports readiness, exit
     }),
   );
   const env = seededEnv("boot");
-  const child: ChildProcess = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+  const child: ChildProcess = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
@@ -332,7 +330,7 @@ test.concurrent("process: client ingress catalogs and operations metrics are liv
     }),
   );
   const env = seededEnv("http");
-  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+  const child = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
@@ -412,7 +410,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": "  port: 0",
     }),
   );
-  const childA = spawn(process.execPath, [CLI, "--config", configA], {
+  const childA = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", configA], {
     cwd: dirA,
     env: mergedEnv({ ...env, APTUS_CONFIG: "/nonexistent/aptus.yaml" }),
     stdio: ["ignore", "pipe", "pipe"],
@@ -441,7 +439,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": "  port: 0",
     }),
   );
-  const childB = spawn(process.execPath, [CLI], {
+  const childB = spawn(process.execPath, [TEST_CLI_BUNDLE], {
     cwd: dirB,
     env: mergedEnv({ ...env, APTUS_CONFIG: configB }),
     stdio: ["ignore", "pipe", "pipe"],
@@ -469,7 +467,7 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
       "  port: 9090": "  port: 0",
     }),
   );
-  const childC = spawn(process.execPath, [CLI], {
+  const childC = spawn(process.execPath, [TEST_CLI_BUNDLE], {
     cwd: dirC,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
@@ -505,7 +503,7 @@ test.concurrent("process: boots and exits 0 gracefully on SIGINT", async () => {
     }),
   );
   const env = seededEnv("sigint");
-  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+  const child = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
@@ -538,7 +536,7 @@ test.concurrent("process: shutdown drain with held request updates readiness to 
     }),
   );
   const env = seededEnv("drain");
-  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+  const child = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
@@ -607,7 +605,7 @@ test.concurrent("process: second signal during shutdown drain aborts wait immedi
     }),
   );
   const env = seededEnv("abort");
-  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+  const child = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
     env: mergedEnv(env),
     stdio: ["ignore", "pipe", "pipe"],

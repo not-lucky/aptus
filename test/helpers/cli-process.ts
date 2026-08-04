@@ -2,12 +2,10 @@ import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { completeYaml } from "../config/yaml.ts";
+import { TEST_CLI_BUNDLE } from "./cli-bundle.ts";
 import type { ThreeOriginHarness } from "./three-origin-harness.ts";
-
-const REPO = resolve(import.meta.dirname, "..", "..");
-const CLI = join(REPO, "src", "bootstrap", "cli.ts");
 
 /**
  * One running Aptus CLI process with its parsed ready line.
@@ -89,7 +87,7 @@ export async function startAptusCli(options: StartCliOptions): Promise<RunningCl
   for (const name of options.envNames) delete merged[name];
   for (const [key, value] of Object.entries(env)) merged[key] = value;
 
-  const child = spawn(process.execPath, [CLI, "--config", join(dir, "aptus.yaml")], {
+  const child = spawn(process.execPath, [TEST_CLI_BUNDLE, "--config", join(dir, "aptus.yaml")], {
     cwd: dir,
     env: merged,
     stdio: ["ignore", "pipe", "pipe"],

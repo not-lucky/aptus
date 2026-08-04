@@ -81,32 +81,29 @@ test.concurrent("process: both path aliases per protocol aggregate into one endp
       await response.arrayBuffer();
     }
 
-    // Exactly one endpoint series per protocol, counting both aliases.
+    // Exactly one endpoint series per protocol, counting both aliases. Wait for
+    // the final counts (not merely three series) so a request whose metric is
+    // still being recorded cannot race ahead of the assertions below.
+    const endpointSeries = [
+      /aptus_http_requests_total\{endpoint_protocol="openai-chat",endpoint="chat_completions",outcome_category="complete",stream="false"\} 2/,
+      /aptus_http_requests_total\{endpoint_protocol="openai-responses",endpoint="responses",outcome_category="complete",stream="false"\} 2/,
+      /aptus_http_requests_total\{endpoint_protocol="anthropic-messages",endpoint="messages",outcome_category="complete",stream="false"\} 2/,
+    ];
     let text = "";
     await waitFor(
       async () => {
         const response = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
         text = await response.text();
-        const lines = text.split("\n").filter((line) => line.startsWith("aptus_http_requests_total"));
-        return lines.length === 3;
+        return endpointSeries.every((pattern) => pattern.test(text));
       },
-      "three endpoint series",
+      "three endpoint series with complete counts",
       cli.child,
     );
     const series = text.split("\n").filter((line) => line.startsWith("aptus_http_requests_total"));
     assert.equal(series.length, 3, `expected exactly 3 endpoint series:\n${series.join("\n")}`);
-    assert.match(
-      text,
-      /aptus_http_requests_total\{endpoint_protocol="openai-chat",endpoint="chat_completions",outcome_category="complete",stream="false"\} 2/,
-    );
-    assert.match(
-      text,
-      /aptus_http_requests_total\{endpoint_protocol="openai-responses",endpoint="responses",outcome_category="complete",stream="false"\} 2/,
-    );
-    assert.match(
-      text,
-      /aptus_http_requests_total\{endpoint_protocol="anthropic-messages",endpoint="messages",outcome_category="complete",stream="false"\} 2/,
-    );
+    assert.match(text, endpointSeries[0]!);
+    assert.match(text, endpointSeries[1]!);
+    assert.match(text, endpointSeries[2]!);
 
     // Both aliases dispatched to the same origin per protocol.
     assert.equal(harness.chatOrigin.dispatchCount(), 2);
