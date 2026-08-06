@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
-import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
+import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
 import {
   postJson,
   type RunningInProcessAptus,
@@ -11,7 +11,7 @@ import {
   waitFor,
 } from "../helpers/cli-process.ts";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
-import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
+import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST, SSE_RESPONSES_BYTES } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
 
 const ENV_NAMES = [
@@ -158,18 +158,19 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
   const env = seededEnv("skips");
   const cli = await startCli(harness, "skips");
   try {
-    // 1. Ingress Chat request targeting multi-protocol-route [claude-main (M), gpt-main (C), responses-main (R)]
-    // Should skip candidate 0 (claude-main) with zero dispatch, then match and dispatch candidate 1 (gpt-main)
-    harness.chatOrigin.enqueue({ status: 200, body: COMPLETE_CHAT_BYTES });
+    // 1. Ingress streaming Chat request targeting multi-protocol-route [claude-main (M), gpt-main (C), responses-main (R)]
+    // Should skip candidate 0 (claude-main) with zero dispatch due to unsupported stream translation,
+    // then match and dispatch candidate 1 (gpt-main) natively
+    harness.chatOrigin.enqueue({ status: 200, body: SSE_CHAT_BYTES });
 
     const chatResponse = await postJson(
       cli.clientPort,
       "/chat/completions",
       { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
-      JSON.stringify({ ...MINIMAL_CHAT_REQUEST, model: "multi-protocol-route" }),
+      JSON.stringify({ ...MINIMAL_CHAT_REQUEST, stream: true, model: "multi-protocol-route" }),
     );
     assert.equal(chatResponse.status, 200);
-    assert.deepEqual(new Uint8Array(await chatResponse.arrayBuffer()), COMPLETE_CHAT_BYTES);
+    assert.deepEqual(new Uint8Array(await chatResponse.arrayBuffer()), SSE_CHAT_BYTES);
 
     assert.equal(harness.chatOrigin.dispatchCount(), 1, "chatOrigin should have 1 request");
     assert.equal(harness.messagesOrigin.dispatchCount(), 0, "messagesOrigin should have 0 requests");
@@ -185,7 +186,7 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
       provider: "anthropic-primary",
       targetProtocol: "anthropic-messages",
       category: "unsupported_capability",
-      capability: "anthropic-messages",
+      capability: "semantic-stream-lifecycle",
     });
 
     // 2. Ingress Messages request targeting multi-protocol-route
@@ -205,18 +206,18 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
     assert.equal(harness.messagesOrigin.dispatchCount(), 1, "messagesOrigin should now have 1 request");
     assert.equal(harness.responsesOrigin.dispatchCount(), 0, "responsesOrigin should still have 0 requests");
 
-    // 3. Ingress Responses request targeting multi-protocol-route
-    // Should skip candidate 0 (claude-main) and candidate 1 (gpt-main) with zero dispatch, then match candidate 2 (responses-main)
-    harness.responsesOrigin.enqueue({ status: 200, body: COMPLETE_RESPONSES_BYTES });
+    // 3. Ingress streaming Responses request targeting multi-protocol-route
+    // Should skip candidate 0 (claude-main) and candidate 1 (gpt-main) with zero dispatch due to unsupported stream translation, then match candidate 2 (responses-main) natively
+    harness.responsesOrigin.enqueue({ status: 200, body: SSE_RESPONSES_BYTES });
 
     const responsesResponse = await postJson(
       cli.clientPort,
       "/responses",
       { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
-      JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, model: "multi-protocol-route" }),
+      JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, stream: true, model: "multi-protocol-route" }),
     );
     assert.equal(responsesResponse.status, 200);
-    assert.deepEqual(new Uint8Array(await responsesResponse.arrayBuffer()), COMPLETE_RESPONSES_BYTES);
+    assert.deepEqual(new Uint8Array(await responsesResponse.arrayBuffer()), SSE_RESPONSES_BYTES);
 
     assert.equal(harness.chatOrigin.dispatchCount(), 1, "chatOrigin should still have 1 request");
     assert.equal(harness.messagesOrigin.dispatchCount(), 1, "messagesOrigin should still have 1 request");

@@ -5,8 +5,7 @@ import type { KeyLease } from "../../src/domain/contracts.ts";
 import { createKeyPool } from "../../src/routing/key-pool.ts";
 
 // Deterministic linear congruential generator so property failures reproduce
-// exactly from the fixed seed below (docs/testing-and-implementation.md,
-// "Pure contract tests": seeded/fixed random values).
+// exactly from the fixed seed below ("Pure contract tests": seeded/fixed random values).
 const RANDOM_SEED = 0x41505455;
 
 function createSeededRandom(seed: number): () => number {

@@ -74,14 +74,19 @@ const FORBIDDEN_EDGES: ReadonlyArray<readonly [string, string]> = [
   ["src/domain/", "src/translation/"],
   ["src/domain/", "src/observability/"],
   ["src/http/", "src/providers/"],
+  ["src/http/", "src/translation/"],
   ["src/providers/openai-chat/", "src/providers/openai-responses/"],
   ["src/providers/openai-chat/", "src/providers/anthropic-messages/"],
   ["src/providers/openai-responses/", "src/providers/openai-chat/"],
   ["src/providers/openai-responses/", "src/providers/anthropic-messages/"],
   ["src/providers/anthropic-messages/", "src/providers/openai-chat/"],
   ["src/providers/anthropic-messages/", "src/providers/openai-responses/"],
+  ["src/providers/", "src/translation/"],
   ["src/routing/", "src/providers/"],
   ["src/observability/", "src/routing/"],
+  ["src/observability/", "src/translation/"],
+  ["src/translation/", "src/routing/"],
+  ["src/translation/", "src/http/"],
 ];
 
 /** Forbidden edge predicates that cannot be expressed as prefix pairs. */
@@ -93,8 +98,13 @@ function isForbiddenEdge(source: string, target: string): string | undefined {
   if (isUnder(target, "src/bootstrap/") && !isUnder(source, "src/bootstrap/")) {
     return "src/* -> src/bootstrap/";
   }
-  if (isUnder(target, "src/translation/") && !isUnder(source, "src/translation/")) {
-    return "src/* -> src/translation/";
+  if (
+    isUnder(target, "src/translation/") &&
+    !isUnder(source, "src/translation/") &&
+    !isUnder(source, "src/routing/") &&
+    !isUnder(source, "src/bootstrap/")
+  ) {
+    return "src/* (except routing, bootstrap) -> src/translation/";
   }
   if (isUnder(target, "src/testing/") && !isUnder(source, "src/testing/")) {
     return "src/* -> src/testing/";

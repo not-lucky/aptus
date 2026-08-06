@@ -16,6 +16,8 @@ import type {
 import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import { createRedactor, type Redactor } from "../observability/trace/redaction.ts";
+import type { TranslationCoordinator } from "../translation/contracts.ts";
+import { unsupportedCapabilityFailure as translationUnsupportedCapability } from "../translation/failures.ts";
 import { type AttemptContext, classifyAbortReason, executeAttempt } from "./attempt.ts";
 import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
 import {
@@ -27,7 +29,7 @@ import {
   unsupportedCapabilityFailure,
 } from "./failures.ts";
 import { createKeyPool } from "./key-pool.ts";
-import { type RelayContext, relayComplete, relayStream } from "./relay.ts";
+import { type RelayContext, relayComplete, relayStream, relayTranslatedComplete } from "./relay.ts";
 import { createNameIndex, type NameIndex } from "./resolution.ts";
 import { shouldFallback, shouldRetry } from "./retry-policy.ts";
 import { spoolResponseBody } from "./spool.ts";
@@ -39,6 +41,7 @@ import {
   systemRandomSource,
   systemSleeper,
 } from "./timing.ts";
+import { executeTranslatedAttempt, executeTranslatedDryRun } from "./translated-attempt.ts";
 
 /**
  * Construction options for the Gateway composition seam.
@@ -64,6 +67,8 @@ export interface GatewayOptions {
   readonly random?: RandomSource;
   /** Optional field-aware secret redactor. */
   readonly redactor?: Redactor;
+  /** Optional cross-protocol translation coordinator. */
+  readonly translation?: TranslationCoordinator;
 }
 
 /**
@@ -83,6 +88,7 @@ interface RunDependencies {
   readonly routesByName: ReadonlyMap<string, RouteConfig>;
   readonly providers: ReadonlyMap<string, ProviderEntry>;
   readonly redactor: Redactor;
+  readonly translation?: TranslationCoordinator;
 }
 
 /**
@@ -131,6 +137,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     routesByName,
     providers,
     redactor,
+    translation: options.translation,
   };
 
   return { execute: (request) => runRequest(request, deps) };
@@ -244,6 +251,64 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       return true;
     };
 
+    /** Records one candidate skip in Trace and telemetry (shared by both execution paths). */
+    const emitCandidateSkip = async (candidate: CandidateDescriptor, failure: NormalizedFailure): Promise<void> => {
+      await request.trace.recordJson("candidate_skip", {
+        candidateIndex: candidate.index,
+        provider: candidate.provider.name,
+        targetProtocol: candidate.provider.protocol,
+        category: failure.category,
+        capability: failure.capability ?? null,
+      });
+      deps.observer.candidateSkipped({
+        aptusRequestId,
+        endpointProtocol: request.protocol,
+        canonicalPublicName: request.canonicalPublicName,
+        candidateIndex: candidate.index,
+        provider: candidate.provider.name,
+        targetProtocol: candidate.provider.protocol,
+        category: failure.category,
+        capability: failure.capability,
+      });
+      deps.observer.observe({
+        type: "candidate_skipped",
+        aptusRequestId,
+        candidateIndex: candidate.index,
+        provider: candidate.provider.name,
+        targetProtocol: candidate.provider.protocol,
+        failure,
+      });
+    };
+
+    /**
+     * Gates a cross-protocol candidate: returns the capability failure that
+     * blocks it (no translation bundle or streaming request), or the active
+     * coordinator when the candidate may proceed to translation.
+     *
+     * A no-translation skip is a generic "no compatible provider" condition and
+     * does not become the lastCandidateFailure (so a prior real failure or the
+     * client-protocol generic surfaces as terminal). A stream skip names the
+     * actual capability and does become the terminal when every candidate is
+     * skipped.
+     */
+    const translationGate = (
+      candidate: CandidateDescriptor,
+    ):
+      | { readonly kind: "blocked"; readonly failure: NormalizedFailure; readonly terminal: boolean }
+      | { readonly kind: "proceed"; readonly translation: TranslationCoordinator } => {
+      if (deps.translation === undefined) {
+        return { kind: "blocked", failure: unsupportedCapabilityFailure(candidate.provider.protocol), terminal: false };
+      }
+      if (request.stream) {
+        return {
+          kind: "blocked",
+          failure: translationUnsupportedCapability("semantic-stream-lifecycle"),
+          terminal: true,
+        };
+      }
+      return { kind: "proceed", translation: deps.translation };
+    };
+
     // ==========================================
     // DRY RUN PATH (zero dispatch, read-only key)
     // ==========================================
@@ -252,35 +317,65 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         const candidate = candidates[candidateIndex];
         if (candidate === undefined) continue;
 
-        // Protocol preflight check
+        // Protocol preflight check / Translation branch
         if (candidate.provider.protocol !== request.protocol) {
-          const skip = unsupportedCapabilityFailure(candidate.provider.protocol);
-          await request.trace.recordJson("candidate_skip", {
-            candidateIndex: candidate.index,
-            provider: candidate.provider.name,
+          const gate = translationGate(candidate);
+          if (gate.kind === "blocked") {
+            await emitCandidateSkip(candidate, gate.failure);
+            if (gate.terminal) lastCandidateFailure = gate.failure;
+            continue;
+          }
+          const translation = gate.translation;
+
+          await request.trace.recordJson("translation_ingress", {
+            sourceProtocol: request.protocol,
             targetProtocol: candidate.provider.protocol,
-            category: skip.category,
-            capability: skip.capability ?? null,
+            publicName: request.canonicalPublicName,
           });
-          deps.observer.candidateSkipped({
-            aptusRequestId,
-            endpointProtocol: request.protocol,
-            canonicalPublicName: request.canonicalPublicName,
-            candidateIndex: candidate.index,
-            provider: candidate.provider.name,
-            targetProtocol: candidate.provider.protocol,
-            category: skip.category,
-            capability: skip.capability,
-          });
-          deps.observer.observe({
-            type: "candidate_skipped",
-            aptusRequestId,
-            candidateIndex: candidate.index,
-            provider: candidate.provider.name,
-            targetProtocol: candidate.provider.protocol,
-            failure: skip,
-          });
-          continue;
+
+          const dryRunOutcome = await executeTranslatedDryRun(
+            candidate,
+            request,
+            {
+              adapters: deps.adapters,
+              dispatcher: deps.dispatcher,
+              trace: request.trace,
+              observer: deps.observer,
+              clock,
+              sleeper: deps.sleeper,
+              deadlineMs,
+              streamIdleMs,
+              nextAttemptNumber: () => ++attemptNumber,
+            },
+            translation,
+            deps.redactor,
+          );
+
+          if (dryRunOutcome.kind === "skipped") {
+            if (dryRunOutcome.failure.category === "unsupported_capability") {
+              await emitCandidateSkip(candidate, dryRunOutcome.failure);
+              lastCandidateFailure = dryRunOutcome.failure;
+              continue;
+            }
+            // A request-level translation failure (e.g. malformed payload) is
+            // not a candidate incompatibility: no other candidate can serve it.
+            return terminalFailure(dryRunOutcome.failure, candidate);
+          }
+
+          if (dryRunOutcome.kind === "key_unavailable") {
+            lastCandidateFailure = dryRunOutcome.failure;
+            if (await tryFallback(candidate, candidateIndex, dryRunOutcome.failure.category)) {
+              continue;
+            }
+            return terminalFailure(dryRunOutcome.failure, candidate);
+          }
+
+          return {
+            kind: "dry_run",
+            status: 200,
+            contentType: "application/vnd.aptus.dry-run+json",
+            body: dryRunOutcome.result,
+          };
         }
 
         await request.trace.recordJson("preflight", {
@@ -406,37 +501,122 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
 
     candidateLoop: for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
       const candidate = candidates[candidateIndex];
-      if (candidate === undefined) continue;
-
-      // Protocol preflight check
+      if (candidate === undefined) continue; // Protocol preflight check / Translation branch
       if (candidate.provider.protocol !== request.protocol) {
-        const skip = unsupportedCapabilityFailure(candidate.provider.protocol);
-        await request.trace.recordJson("candidate_skip", {
-          candidateIndex: candidate.index,
-          provider: candidate.provider.name,
+        const gate = translationGate(candidate);
+        if (gate.kind === "blocked") {
+          await emitCandidateSkip(candidate, gate.failure);
+          if (gate.terminal) lastCandidateFailure = gate.failure;
+          continue;
+        }
+        const translation = gate.translation;
+
+        await request.trace.recordJson("translation_ingress", {
+          sourceProtocol: request.protocol,
           targetProtocol: candidate.provider.protocol,
-          category: skip.category,
-          capability: skip.capability ?? null,
+          publicName: request.canonicalPublicName,
         });
-        deps.observer.candidateSkipped({
-          aptusRequestId,
-          endpointProtocol: request.protocol,
-          canonicalPublicName: request.canonicalPublicName,
-          candidateIndex: candidate.index,
-          provider: candidate.provider.name,
-          targetProtocol: candidate.provider.protocol,
-          category: skip.category,
-          capability: skip.capability,
-        });
-        deps.observer.observe({
-          type: "candidate_skipped",
-          aptusRequestId,
-          candidateIndex: candidate.index,
-          provider: candidate.provider.name,
-          targetProtocol: candidate.provider.protocol,
-          failure: skip,
-        });
-        continue;
+
+        let candidateAttemptCount = 0;
+
+        while (true) {
+          const outcome = await executeTranslatedAttempt(candidate, request, attemptContext, translation);
+
+          if (outcome.kind === "cancelled") {
+            const durationMs = clock.nowMonotonicMs() - started;
+            const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
+            await request.coordinator.finalize({
+              terminal: { kind: "cancelled", by },
+              outcomeCategory: "cancelled",
+              status: 499,
+              attempts: attemptNumber,
+              stream: request.stream,
+              durationMs,
+              targetProtocol: candidate.provider.protocol,
+              provider: candidate.provider.name,
+              canonicalPublicName: request.canonicalPublicName,
+            });
+            return { kind: "cancelled", by };
+          }
+          if (outcome.kind === "deadline_exceeded") {
+            return terminalFailure(timeoutFailure(), candidate);
+          }
+          if (outcome.kind === "prepare_failed") {
+            if (outcome.failure.category === "unsupported_capability") {
+              await emitCandidateSkip(candidate, outcome.failure);
+              lastCandidateFailure = outcome.failure;
+              continue candidateLoop;
+            }
+            // A request-level translation failure (e.g. malformed payload) is
+            // not a candidate incompatibility: no other candidate can serve it.
+            return terminalFailure(outcome.failure, candidate);
+          }
+          if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
+            const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
+            lastCandidateFailure = failure;
+            if (await tryFallback(candidate, candidateIndex, failure.category)) {
+              continue candidateLoop;
+            }
+            return terminalFailure(failure, candidate);
+          }
+
+          if (outcome.kind === "response") {
+            candidateAttemptCount++;
+            const { response, observation, cooldownMs } = outcome;
+            const category = observation.result as IrFailureCategory;
+            const canRetry = shouldRetry({
+              status: observation.status,
+              category,
+              beforeClientBytes: observation.beforeClientBytes,
+              candidateAttemptCount,
+              retryOn: candidate.retryOn,
+            });
+
+            if (canRetry) {
+              await response.body.cancel().catch(() => undefined);
+              const delayMs = cooldownMs ?? 0;
+              await request.trace.recordJson("retry", {
+                attemptNumber: outcome.attemptNumber,
+                provider: candidate.provider.name,
+                category,
+                delayMs,
+              });
+              deps.observer.retryScheduled({
+                aptusRequestId,
+                attemptNumber: outcome.attemptNumber,
+                provider: candidate.provider.name,
+                targetProtocol: candidate.provider.protocol,
+                category,
+                delayMs,
+              });
+              deps.observer.observe({
+                type: "retry_scheduled",
+                aptusRequestId,
+                attemptNumber: outcome.attemptNumber,
+                delayMs,
+                category,
+              });
+              continue;
+            }
+
+            lastCandidateFailure = failureFromObservation(observation);
+            if (await tryFallback(candidate, candidateIndex, category)) {
+              await response.body.cancel().catch(() => undefined);
+              continue candidateLoop;
+            }
+            await response.body.cancel().catch(() => undefined);
+            return terminalFailure(lastCandidateFailure, candidate);
+          }
+
+          if (outcome.kind === "translated_response") {
+            return relayTranslatedComplete(
+              outcome.response,
+              outcome.body,
+              outcome.outcome,
+              relayContextFor(candidate, outcome.attemptNumber),
+            );
+          }
+        }
       }
 
       await request.trace.recordJson("preflight", {

@@ -2,6 +2,7 @@ import type {
   AttemptObservation,
   GatewayRequest,
   GatewayResult,
+  JsonObject,
   JsonValue,
   OwnedBody,
   Protocol,
@@ -13,12 +14,15 @@ import type {
 import type { TraceTerminal } from "../domain/operations.ts";
 import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { TranslateCompleteOutcomeResult } from "../translation/contracts.ts";
 import { classifyAbortReason } from "./attempt.ts";
 import { failureFromObservation, interruptedFailure, streamFailure, timeoutFailure } from "./failures.ts";
+import { createOwnedMemoryBody } from "./spool.ts";
 import type { Clock } from "./timing.ts";
 import { createStreamUsageCollector, extractCompleteUsage } from "./usage.ts";
 
 const utf8Decoder = new TextDecoder();
+const utf8Encoder = new TextEncoder();
 
 /**
  * Context for relaying one attempt's owned response to HTTP.
@@ -165,6 +169,82 @@ export async function relayComplete(
           await context.trace.recordBytes("client_response", rawBytes);
         }
       }
+      await context.coordinator.finalize({ ...fact, durationMs });
+    },
+  };
+}
+
+/**
+ * Relays an egress-encoded cross-protocol translated response to HTTP.
+ *
+ * Emits the client-native body and headers, records `client_response` trace,
+ * and derives terminal usage and cost estimation from the semantic IrOutcome.
+ *
+ * @param _response - Raw provider response (disposed).
+ * @param rawProviderBody - Raw provider body (disposed).
+ * @param outcome - Translated outcome containing client body, status, headers, and IrOutcome.
+ * @param context - Relay execution context.
+ * @returns Complete {@link GatewayResult}.
+ */
+export async function relayTranslatedComplete(
+  _response: ProviderResponse,
+  rawProviderBody: OwnedBody,
+  outcome: TranslateCompleteOutcomeResult,
+  context: RelayContext,
+): Promise<GatewayResult> {
+  await rawProviderBody.dispose().catch(() => undefined);
+
+  const clientBytes = utf8Encoder.encode(JSON.stringify(outcome.body));
+  const clientBody = createOwnedMemoryBody(clientBytes);
+
+  let rawUsage: JsonObject | undefined;
+  let estimatedCostUsd: string | undefined;
+
+  if (outcome.irOutcome.usage !== undefined) {
+    rawUsage = {
+      input_tokens: outcome.irOutcome.usage.input,
+      output_tokens: outcome.irOutcome.usage.output,
+      ...(outcome.irOutcome.usage.total !== undefined ? { total_tokens: outcome.irOutcome.usage.total } : {}),
+    };
+
+    if (context.pricing !== null) {
+      try {
+        estimatedCostUsd = estimateCostUsd(context.pricing, {
+          input: outcome.irOutcome.usage.input,
+          output: outcome.irOutcome.usage.output,
+          total: outcome.irOutcome.usage.total,
+        });
+      } catch {
+        // Suppress cost if estimation fails
+      }
+    }
+  }
+
+  const fact: Omit<TerminalFact, "durationMs"> = {
+    terminal: {
+      kind: "complete",
+      status: outcome.status,
+      ...(rawUsage !== undefined ? { usage: rawUsage } : {}),
+      ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+    },
+    outcomeCategory: "complete",
+    status: outcome.status,
+    attempts: context.attemptCount,
+    stream: false,
+    targetProtocol: context.targetProtocol,
+    provider: context.providerName,
+    canonicalPublicName: context.canonicalName,
+    usage: rawUsage,
+    estimatedCostUsd,
+  };
+
+  return {
+    kind: "complete",
+    status: outcome.status,
+    headers: outcome.headers,
+    body: clientBody,
+    onDelivered: async (durationMs: number) => {
+      await context.trace.recordJson("client_response", outcome.body);
       await context.coordinator.finalize({ ...fact, durationMs });
     },
   };

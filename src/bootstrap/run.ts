@@ -19,6 +19,7 @@ import { startRetentionScheduler, type TraceRetentionScheduler } from "../observ
 import { createProtocolAdapters } from "../providers/adapters.ts";
 import { createUndiciDispatcher } from "../providers/shared/dispatcher.ts";
 import { createGateway } from "../routing/gateway.ts";
+import { createDefaultTranslationCoordinator } from "../translation/index.ts";
 import { createGracefulShutdown, type GracefulShutdown } from "./shutdown.ts";
 
 /**
@@ -99,6 +100,7 @@ export async function startRuntime(
 
   const adapters = createProtocolAdapters();
   const dispatcher = createUndiciDispatcher();
+  const translation = createDefaultTranslationCoordinator();
   const gateway = createGateway({
     config,
     revision,
@@ -107,6 +109,7 @@ export async function startRuntime(
     traceRecorder,
     observer,
     redactor,
+    translation,
   });
 
   const cancellations = createRequestCancellationRegistry();

@@ -222,7 +222,7 @@ test.concurrent("process: protocol-mismatch-only route returns 400 with zero ori
       "    candidates: [gpt-main, claude-main]": "    candidates: [claude-main]",
     });
     try {
-      const res = await chatRequest(cli.clientPort, caseName);
+      const res = await chatRequest(cli.clientPort, caseName, "reliable-chat", true);
       assert.equal(res.status, 400);
       const body = (await res.json()) as { error?: { type?: string } };
       assert.equal(body.error?.type, "invalid_request_error");

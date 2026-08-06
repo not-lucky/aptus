@@ -249,7 +249,7 @@ export async function executeAttempt(
   };
 }
 
-type LeaseResult =
+export type LeaseResult =
   | { readonly kind: "lease"; readonly lease: KeyLease }
   | { readonly kind: "unavailable" }
   | { readonly kind: "deadline" }
@@ -260,7 +260,7 @@ type LeaseResult =
  * request deadline allows it. Rotation is implicit: `acquire` always prefers an
  * available key, so a wait happens only when every enabled key is cooling down.
  */
-async function acquireLease(
+export async function acquireLease(
   candidate: CandidateDescriptor,
   request: GatewayRequest,
   ctx: AttemptContext,
@@ -313,7 +313,7 @@ async function acquireLease(
  *
  * @returns The cooldown delay the key pool scheduled, if any.
  */
-function finishAttempt(
+export function finishAttempt(
   ctx: AttemptContext,
   request: GatewayRequest,
   candidate: CandidateDescriptor,
@@ -343,7 +343,7 @@ function finishAttempt(
   return cooldownMs;
 }
 
-async function recordCancellation(
+export async function recordCancellation(
   ctx: AttemptContext,
   request: GatewayRequest,
   phase: string,

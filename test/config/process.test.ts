@@ -126,7 +126,7 @@ function assertConnectionRefused(port: number): Promise<void> {
 }
 
 /**
- * The six exact invalid examples pinned by docs/configuration.md. Each must
+ * The six exact invalid configuration examples. Each must
  * exit 78 with exactly one sorted stderr line and no stdout.
  */
 const INVALID_CASES: Array<{
