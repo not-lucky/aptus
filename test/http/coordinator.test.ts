@@ -69,7 +69,7 @@ function completeFact(): TerminalFact {
   };
 }
 
-test("pre-ingress finalization writes the trace terminal but skips accepted-request telemetry", async () => {
+test.concurrent("pre-ingress finalization writes the trace terminal but skips accepted-request telemetry", async () => {
   const { observer, calls } = trackingObserver();
   const terminals: TraceTerminal[] = [];
   const trace: TraceSession = {
@@ -96,7 +96,7 @@ test("pre-ingress finalization writes the trace terminal but skips accepted-requ
   assert.ok(!calls.includes("completed"), "must not emit an accepted-request counter before ingress");
 });
 
-test("post-ingress finalization is atomic across duplicate claims", async () => {
+test.concurrent("post-ingress finalization is atomic across duplicate claims", async () => {
   const { observer, calls } = trackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
@@ -118,7 +118,7 @@ test("post-ingress finalization is atomic across duplicate claims", async () => 
   assert.equal(calls.filter((call) => call === "completed").length, 1);
 });
 
-test("pre-Gateway finalization records HTTP terminal without the completion log", async () => {
+test.concurrent("pre-Gateway finalization records HTTP terminal without the completion log", async () => {
   const { observer, calls } = trackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
@@ -144,7 +144,7 @@ test("pre-Gateway finalization records HTTP terminal without the completion log"
   assert.ok(!calls.includes("firstByte"), "no attempt means no first-byte event");
 });
 
-test("first-byte is emitted with the winning attempt number when marked", async () => {
+test.concurrent("first-byte is emitted with the winning attempt number when marked", async () => {
   const { observer, firstBytes } = trackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
@@ -164,7 +164,7 @@ test("first-byte is emitted with the winning attempt number when marked", async 
   assert.deepEqual(firstBytes, [{ attemptNumber: 3, durationMs: 45 }]);
 });
 
-test("in-flight decrement uses the admitted stream label, not the terminal stream", async () => {
+test.concurrent("in-flight decrement uses the admitted stream label, not the terminal stream", async () => {
   const { observer, terminalStreams } = trackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),

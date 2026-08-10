@@ -3,7 +3,7 @@ import { test } from "vitest";
 import type { IrOutcome, IrRequest } from "../../src/translation/ir.ts";
 import { preflightOutcome, preflightRequest } from "../../src/translation/preflight.ts";
 
-test("translation preflight: admits plain-text complete request", () => {
+test.concurrent("translation preflight: admits plain-text complete request", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -37,7 +37,7 @@ test("translation preflight: admits plain-text complete request", () => {
   }
 });
 
-test("translation preflight: rejects streaming request with semantic-stream-lifecycle", () => {
+test.concurrent("translation preflight: rejects streaming request with semantic-stream-lifecycle", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "stream",
@@ -57,7 +57,7 @@ test("translation preflight: rejects streaming request with semantic-stream-life
   }
 });
 
-test("translation preflight: rejects tools with function-tool-definition", () => {
+test.concurrent("translation preflight: rejects tools with function-tool-definition", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -85,7 +85,7 @@ test("translation preflight: rejects tools with function-tool-definition", () =>
   }
 });
 
-test("translation preflight: rejects mid-conversation instruction into Messages", () => {
+test.concurrent("translation preflight: rejects mid-conversation instruction into Messages", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -116,7 +116,7 @@ test("translation preflight: rejects mid-conversation instruction into Messages"
   }
 });
 
-test("translation preflight: rejects outcome refusal with refusal-content", () => {
+test.concurrent("translation preflight: rejects outcome refusal with refusal-content", () => {
   const out: IrOutcome = {
     responseId: "resp_1",
     model: "claude-3-7-sonnet",

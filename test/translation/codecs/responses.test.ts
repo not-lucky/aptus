@@ -3,7 +3,7 @@ import { test } from "vitest";
 import { ResponsesEgressEncoder } from "../../../src/translation/codecs/responses/egress.ts";
 import { ResponsesIngressDecoder } from "../../../src/translation/codecs/responses/ingress.ts";
 
-test("translation codec responses: decodes and encodes request", () => {
+test.concurrent("translation codec responses: decodes and encodes request", () => {
   const decoder = new ResponsesIngressDecoder();
   const encoder = new ResponsesEgressEncoder();
 
@@ -31,7 +31,7 @@ test("translation codec responses: decodes and encodes request", () => {
   }
 });
 
-test("translation codec responses: rejects parallel_tool_calls fail-closed", () => {
+test.concurrent("translation codec responses: rejects parallel_tool_calls fail-closed", () => {
   const decoder = new ResponsesIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "gpt-5.4",
@@ -44,7 +44,7 @@ test("translation codec responses: rejects parallel_tool_calls fail-closed", () 
   }
 });
 
-test("translation codec responses: decodes and encodes outcome", () => {
+test.concurrent("translation codec responses: decodes and encodes outcome", () => {
   const decoder = new ResponsesIngressDecoder();
   const encoder = new ResponsesEgressEncoder();
 

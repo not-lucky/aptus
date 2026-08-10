@@ -6,7 +6,7 @@ import { createLifecycleObserver } from "../../src/observability/lifecycle-obser
 import { aptusLogger, configureLogging } from "../../src/observability/logging.ts";
 import { createMetricsRegistry } from "../../src/observability/metrics.ts";
 
-test("lifecycle observer emits structured LogTape logs and observed metrics", async () => {
+test.concurrent("lifecycle observer emits structured LogTape logs and observed metrics", async () => {
   const records: LogRecord[] = [];
   const sink: Sink = (record) => {
     records.push(record);
@@ -168,7 +168,7 @@ test("lifecycle observer emits structured LogTape logs and observed metrics", as
   assert.equal(shutdownRecord?.properties.aptusRequestId, undefined);
 });
 
-test("httpTerminal records the accepted-request counter without the completion log", async () => {
+test.concurrent("httpTerminal records the accepted-request counter without the completion log", async () => {
   const records: LogRecord[] = [];
   configureLogging({ enabled: true, level: "info" }, (record) => {
     records.push(record);

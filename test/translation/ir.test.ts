@@ -8,7 +8,7 @@ import type {
   IrUsage,
 } from "../../src/translation/ir.ts";
 
-test("translation ir: constructs fully typed IrRequest", () => {
+test.concurrent("translation ir: constructs fully typed IrRequest", () => {
   const request: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -34,7 +34,7 @@ test("translation ir: constructs fully typed IrRequest", () => {
   assert.equal(request.items[1]?.type, "message");
 });
 
-test("translation ir: constructs fully typed IrOutcome", () => {
+test.concurrent("translation ir: constructs fully typed IrOutcome", () => {
   const finish: IrFinish = { reason: "stop" };
   const parts: IrOutputPart[] = [
     {

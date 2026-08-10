@@ -3,7 +3,7 @@ import { test } from "vitest";
 import type { IrOutcome, IrRequest } from "../../src/translation/ir.ts";
 import { validateIrOutcome, validateIrRequest } from "../../src/translation/validate.ts";
 
-test("translation validate: admits valid IrRequest", () => {
+test.concurrent("translation validate: admits valid IrRequest", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -25,7 +25,7 @@ test("translation validate: admits valid IrRequest", () => {
   assert.equal(result.ok, true);
 });
 
-test("translation validate: rejects empty model or whitespace model", () => {
+test.concurrent("translation validate: rejects empty model or whitespace model", () => {
   const req: IrRequest = {
     model: "   ",
     delivery: "complete",
@@ -44,7 +44,7 @@ test("translation validate: rejects empty model or whitespace model", () => {
   }
 });
 
-test("translation validate: rejects request with no items", () => {
+test.concurrent("translation validate: rejects request with no items", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -57,7 +57,7 @@ test("translation validate: rejects request with no items", () => {
   }
 });
 
-test("translation validate: rejects request with only instructions (no user or assistant turn)", () => {
+test.concurrent("translation validate: rejects request with only instructions (no user or assistant turn)", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -77,7 +77,7 @@ test("translation validate: rejects request with only instructions (no user or a
   }
 });
 
-test("translation validate: admits valid IrOutcome with usage", () => {
+test.concurrent("translation validate: admits valid IrOutcome with usage", () => {
   const out: IrOutcome = {
     responseId: "resp_123",
     model: "claude-3-7-sonnet",
@@ -99,7 +99,7 @@ test("translation validate: admits valid IrOutcome with usage", () => {
   assert.equal(result.ok, true);
 });
 
-test("translation validate: rejects IrOutcome with negative usage", () => {
+test.concurrent("translation validate: rejects IrOutcome with negative usage", () => {
   const out: IrOutcome = {
     responseId: "resp_123",
     model: "claude-3-7-sonnet",
@@ -117,7 +117,7 @@ test("translation validate: rejects IrOutcome with negative usage", () => {
   }
 });
 
-test("translation validate: admits valid IrOutcome with empty parts array", () => {
+test.concurrent("translation validate: admits valid IrOutcome with empty parts array", () => {
   const out: IrOutcome = {
     responseId: "resp_123",
     model: "claude-3-7-sonnet",
@@ -128,7 +128,7 @@ test("translation validate: admits valid IrOutcome with empty parts array", () =
   assert.equal(result.ok, true);
 });
 
-test("translation validate: rejects IrOutcome with duplicate part IDs", () => {
+test.concurrent("translation validate: rejects IrOutcome with duplicate part IDs", () => {
   const out: IrOutcome = {
     responseId: "resp_123",
     model: "claude-3-7-sonnet",

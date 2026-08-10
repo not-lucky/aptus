@@ -10,7 +10,7 @@ import { aptusLogger, configureLogging } from "../../src/observability/logging.t
 import { createMetricsRegistry } from "../../src/observability/metrics.ts";
 import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.ts";
 
-test("runtime trace write failure degrades readiness without failing traffic", async () => {
+test.concurrent("runtime trace write failure degrades readiness without failing traffic", async () => {
   const captured: LogRecord[] = [];
   const sink: Sink = (record) => {
     captured.push(record);
@@ -66,7 +66,7 @@ test("runtime trace write failure degrades readiness without failing traffic", a
   assert.match(text, /aptus_trace_write_failures_total\{operation="trace_start"\} 1/);
 });
 
-test("a later successful write restores readiness after degradation", async () => {
+test.concurrent("a later successful write restores readiness after degradation", async () => {
   const metrics = createMetricsRegistry();
   const observer = createLifecycleObserver({
     logger: aptusLogger(),

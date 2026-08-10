@@ -19,7 +19,7 @@ function keys(count: number, enabledFlags: boolean[] = []): ProviderKeyConfig[] 
   }));
 }
 
-test("fill-first strategy always selects first available enabled key and recovers to it", () => {
+test.concurrent("fill-first strategy always selects first available enabled key and recovers to it", () => {
   const pool = createKeyPool("provider-a", keys(3), "fill-first", DEFAULT_CONFIG, new TestRandomSource([0]));
 
   // Acquire 1st key
@@ -43,7 +43,7 @@ test("fill-first strategy always selects first available enabled key and recover
   assert.equal(acq3.lease.keyName, "key-1");
 });
 
-test("round-robin strategy advances cursor across enabled keys and skips cooled keys", () => {
+test.concurrent("round-robin strategy advances cursor across enabled keys and skips cooled keys", () => {
   const pool = createKeyPool("provider-b", keys(3), "round-robin", DEFAULT_CONFIG, new TestRandomSource([0]));
 
   const acq1 = pool.acquire(100);
@@ -76,7 +76,7 @@ test("round-robin strategy advances cursor across enabled keys and skips cooled 
   assert.equal(acq6.lease.keyName, "key-1");
 });
 
-test("server and transport failures escalate cooldown through bounded rungs and success resets", () => {
+test.concurrent("server and transport failures escalate cooldown through bounded rungs and success resets", () => {
   const pool = createKeyPool("provider-c", keys(1), "fill-first", DEFAULT_CONFIG, new TestRandomSource([0]));
 
   // Failure 1: rung 0 -> 500ms cooldown
@@ -114,7 +114,7 @@ test("server and transport failures escalate cooldown through bounded rungs and 
   assert.deepEqual(pool.acquire(6100), { kind: "wait", untilMs: 6500 });
 });
 
-test("4xx non-429 responses and client cancellation do not cool the key", () => {
+test.concurrent("4xx non-429 responses and client cancellation do not cool the key", () => {
   const pool = createKeyPool("provider-d", keys(1), "fill-first", DEFAULT_CONFIG);
 
   const acq1 = pool.acquire(100);
@@ -132,7 +132,7 @@ test("4xx non-429 responses and client cancellation do not cool the key", () => 
   assert.equal(acq3.kind, "acquired");
 });
 
-test("429 honors retryDelayMs, rateLimitFallbackMs, maxRetryAfterMs, and jitter", () => {
+test.concurrent("429 honors retryDelayMs, rateLimitFallbackMs, maxRetryAfterMs, and jitter", () => {
   const config: KeyPoolConfig = {
     failureCooldownMs: [500, 2000],
     rateLimitFallbackMs: 2000,
@@ -169,7 +169,7 @@ test("429 honors retryDelayMs, rateLimitFallbackMs, maxRetryAfterMs, and jitter"
   assert.deepEqual(pool4.acquire(200), { kind: "wait", untilMs: 5100 });
 });
 
-test("stale lease generation observations are ignored", () => {
+test.concurrent("stale lease generation observations are ignored", () => {
   const pool = createKeyPool("provider-f", keys(1), "fill-first", DEFAULT_CONFIG);
 
   const acq1 = pool.acquire(100);
@@ -190,7 +190,7 @@ test("stale lease generation observations are ignored", () => {
   assert.equal(acq3.lease.generation, 3);
 });
 
-test("all-keys-cooling yields wait result; no-enabled-keys yields unavailable", () => {
+test.concurrent("all-keys-cooling yields wait result; no-enabled-keys yields unavailable", () => {
   // All keys disabled
   const emptyPool = createKeyPool("provider-g", keys(2, [false, false]), "fill-first", DEFAULT_CONFIG);
   assert.deepEqual(emptyPool.acquire(100), { kind: "unavailable" });
@@ -217,7 +217,7 @@ test("all-keys-cooling yields wait result; no-enabled-keys yields unavailable", 
   assert.equal(k1Recovered.lease.keyName, "key-1");
 });
 
-test("KeyPool.preview() is read-only and invariant across strategy, cooldown, generation, and cursor", () => {
+test.concurrent("KeyPool.preview() is read-only and invariant across strategy, cooldown, generation, and cursor", () => {
   // 1. fill-first preview returns first enabled key even during cooldown
   const fillPool = createKeyPool("provider-h", keys(3), "fill-first", DEFAULT_CONFIG, new TestRandomSource([0]));
   assert.equal(fillPool.availableCount(100), 3);

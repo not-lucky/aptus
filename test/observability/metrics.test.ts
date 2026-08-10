@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import { createMetricsRegistry } from "../../src/observability/metrics.ts";
 
-test("metrics registry sanitizes labels to closed domain and records all metrics", async () => {
+test.concurrent("metrics registry sanitizes labels to closed domain and records all metrics", async () => {
   const registry = createMetricsRegistry({
     providers: new Set(["chat-provider", "backup-provider"]),
     publicNames: new Set(["gpt-main", "gpt-backup"]),

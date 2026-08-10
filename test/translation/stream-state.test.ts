@@ -4,7 +4,7 @@ import { test } from "vitest";
 import type { IrStreamEvent } from "../../src/translation/ir.ts";
 import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
 
-test("state machine: legal plain-text stream lifecycle passes validation", () => {
+test.concurrent("state machine: legal plain-text stream lifecycle passes validation", () => {
   const sm = createIrStreamStateMachine({ expectedResponseId: "resp_1", expectedModel: "gpt-main" });
 
   const events: IrStreamEvent[] = [
@@ -30,7 +30,7 @@ test("state machine: legal plain-text stream lifecycle passes validation", () =>
   assert.equal(sm.getOpenPartIds().size, 0);
 });
 
-test("state machine: supports interleaved open text parts", () => {
+test.concurrent("state machine: supports interleaved open text parts", () => {
   const sm = createIrStreamStateMachine();
 
   const events: IrStreamEvent[] = [
@@ -53,19 +53,19 @@ test("state machine: supports interleaved open text parts", () => {
   assert.equal(sm.isTerminal(), true);
 });
 
-test("state machine: rejects events before response_start", () => {
+test.concurrent("state machine: rejects events before response_start", () => {
   const sm = createIrStreamStateMachine();
   const res = sm.feed({ type: "part_start", responseId: "r1", partId: "p1", part: { type: "text" } });
   assert.equal(res.ok, false);
 });
 
-test("state machine: rejects duplicate response_start", () => {
+test.concurrent("state machine: rejects duplicate response_start", () => {
   const sm = createIrStreamStateMachine();
   assert.equal(sm.feed({ type: "response_start", responseId: "r1", model: "m1" }).ok, true);
   assert.equal(sm.feed({ type: "response_start", responseId: "r1", model: "m1" }).ok, false);
 });
 
-test("state machine: rejects response_end when parts remain open", () => {
+test.concurrent("state machine: rejects response_end when parts remain open", () => {
   const sm = createIrStreamStateMachine();
   sm.feed({ type: "response_start", responseId: "r1", model: "m1" });
   sm.feed({ type: "part_start", responseId: "r1", partId: "p1", part: { type: "text" } });
@@ -73,7 +73,7 @@ test("state machine: rejects response_end when parts remain open", () => {
   assert.equal(res.ok, false);
 });
 
-test("state machine: rejects events after terminal state", () => {
+test.concurrent("state machine: rejects events after terminal state", () => {
   const sm = createIrStreamStateMachine();
   sm.feed({ type: "response_start", responseId: "r1", model: "m1" });
   sm.feed({ type: "response_end", responseId: "r1", finish: { reason: "stop" } });
@@ -83,7 +83,7 @@ test("state machine: rejects events after terminal state", () => {
   assert.equal(res.ok, false);
 });
 
-test("state machine: fail-closed profile rejections for non-text features", () => {
+test.concurrent("state machine: fail-closed profile rejections for non-text features", () => {
   const sm = createIrStreamStateMachine();
   sm.feed({ type: "response_start", responseId: "r1", model: "m1" });
 
@@ -154,7 +154,7 @@ test("state machine: fail-closed profile rejections for non-text features", () =
   }
 });
 
-test("state machine: property test for arbitrary text delta sequences", () => {
+test.concurrent("state machine: property test for arbitrary text delta sequences", () => {
   fc.assert(
     fc.property(fc.array(fc.string({ minLength: 1 }), { minLength: 1, maxLength: 20 }), (deltaChunks) => {
       const sm = createIrStreamStateMachine({ expectedResponseId: "r-prop", expectedModel: "m-prop" });
@@ -176,7 +176,7 @@ test("state machine: property test for arbitrary text delta sequences", () => {
   );
 });
 
-test("state machine: property test for legal interleaved multi-part streams", () => {
+test.concurrent("state machine: property test for legal interleaved multi-part streams", () => {
   // Generate 1-5 parts, each with 1-8 text_delta chunks. Interleave all events
   // across parts while preserving each part's start -> deltas -> end ordering,
   // then wrap with response_start / response_end. The state machine must
@@ -244,7 +244,7 @@ test("state machine: property test for legal interleaved multi-part streams", ()
   );
 });
 
-test("state machine: property test for part-correlation violations", () => {
+test.concurrent("state machine: property test for part-correlation violations", () => {
   // Generate illegal part-correlation events and assert the state machine
   // rejects each. Covers three violation classes:
   //   1. text_delta for an unknown/closed partId.

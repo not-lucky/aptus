@@ -10,11 +10,11 @@ import {
 } from "../../src/routing/retry-policy.ts";
 import { TestRandomSource } from "../helpers/test-timing.ts";
 
-test("RETRYABLE_STATUSES contains exactly 429, 500, 503, 529", () => {
+test.concurrent("RETRYABLE_STATUSES contains exactly 429, 500, 503, 529", () => {
   assert.deepEqual([...RETRYABLE_STATUSES].sort(), [429, 500, 503, 529]);
 });
 
-test("shouldRetry allows retry for retryable status when category matches under cap", () => {
+test.concurrent("shouldRetry allows retry for retryable status when category matches under cap", () => {
   for (const status of [429, 500, 503, 529]) {
     const result = shouldRetry({
       status,
@@ -39,7 +39,7 @@ test("shouldRetry allows retry for retryable status when category matches under 
   );
 });
 
-test("shouldRetry rejects retry after attempt cap is reached", () => {
+test.concurrent("shouldRetry rejects retry after attempt cap is reached", () => {
   // candidateAttemptCount = 3 means 3 attempts have been performed (initial + 2 retries)
   assert.equal(
     shouldRetry({
@@ -63,7 +63,7 @@ test("shouldRetry rejects retry after attempt cap is reached", () => {
   );
 });
 
-test("shouldRetry rejects non-retryable statuses", () => {
+test.concurrent("shouldRetry rejects non-retryable statuses", () => {
   for (const status of [400, 401, 403, 404, 408, 422, 502, 504]) {
     const result = shouldRetry({
       status,
@@ -76,7 +76,7 @@ test("shouldRetry rejects non-retryable statuses", () => {
   }
 });
 
-test("shouldRetry rejects when status is undefined (e.g. transport error)", () => {
+test.concurrent("shouldRetry rejects when status is undefined (e.g. transport error)", () => {
   assert.equal(
     shouldRetry({
       status: undefined,
@@ -89,7 +89,7 @@ test("shouldRetry rejects when status is undefined (e.g. transport error)", () =
   );
 });
 
-test("shouldRetry rejects once client bytes have been written", () => {
+test.concurrent("shouldRetry rejects once client bytes have been written", () => {
   assert.equal(
     shouldRetry({
       status: 500,
@@ -102,7 +102,7 @@ test("shouldRetry rejects once client bytes have been written", () => {
   );
 });
 
-test("shouldRetry rejects when category is not in retryOn", () => {
+test.concurrent("shouldRetry rejects when category is not in retryOn", () => {
   assert.equal(
     shouldRetry({
       status: 500,
@@ -115,7 +115,7 @@ test("shouldRetry rejects when category is not in retryOn", () => {
   );
 });
 
-test("shouldRetry rejects success and client_cancelled", () => {
+test.concurrent("shouldRetry rejects success and client_cancelled", () => {
   assert.equal(
     shouldRetry({
       status: 200,
@@ -137,7 +137,7 @@ test("shouldRetry rejects success and client_cancelled", () => {
   );
 });
 
-test("shouldFallback allows fallback when category in fallbackOn, before bytes, and next candidate exists", () => {
+test.concurrent("shouldFallback allows fallback when category in fallbackOn, before bytes, and next candidate exists", () => {
   assert.equal(
     shouldFallback({
       category: "unavailable",
@@ -159,7 +159,7 @@ test("shouldFallback allows fallback when category in fallbackOn, before bytes, 
   );
 });
 
-test("shouldFallback rejects fallback if client bytes written, no next candidate, or category not in fallbackOn", () => {
+test.concurrent("shouldFallback rejects fallback if client bytes written, no next candidate, or category not in fallbackOn", () => {
   // After client bytes
   assert.equal(
     shouldFallback({
@@ -214,7 +214,7 @@ test("shouldFallback rejects fallback if client bytes written, no next candidate
   );
 });
 
-test("calculateRetryDelay honors delay, maxRetryAfterMs cap, and uniform jitter", () => {
+test.concurrent("calculateRetryDelay honors delay, maxRetryAfterMs cap, and uniform jitter", () => {
   const config: KeyPoolConfig = {
     failureCooldownMs: [250, 1000],
     rateLimitFallbackMs: 1000,

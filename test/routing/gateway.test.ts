@@ -368,7 +368,7 @@ function readTrace(root: string, filename: string): unknown {
   return JSON.parse(readFileSync(join(root, dir, filename), "utf8"));
 }
 
-test("complete Chat relays exact bytes with mutation, model replacement, and auth", async () => {
+test.concurrent("complete Chat relays exact bytes with mutation, model replacement, and auth", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness();
   dispatcher.enqueue({ status: 200, body: COMPLETE_CHAT_BYTES });
 
@@ -411,7 +411,7 @@ test("complete Chat relays exact bytes with mutation, model replacement, and aut
   });
 });
 
-test("two 429s with three keys rotate keys with zero sleep and succeed on third attempt", async () => {
+test.concurrent("two 429s with three keys rotate keys with zero sleep and succeed on third attempt", async () => {
   const { gateway, dispatcher, sleeper, traceRoot, events } = buildHarness();
 
   // Attempt 1: 429 with key-1
@@ -459,7 +459,7 @@ test("two 429s with three keys rotate keys with zero sleep and succeed on third 
   });
 });
 
-test("attempt cap limits same-candidate retries to at most two retries after first attempt", async () => {
+test.concurrent("attempt cap limits same-candidate retries to at most two retries after first attempt", async () => {
   const { gateway, dispatcher } = buildHarness();
 
   // 3 continuous 429s on candidate 1 (exhausting 1 initial + 2 retries)
@@ -481,7 +481,7 @@ test("attempt cap limits same-candidate retries to at most two retries after fir
   assert.equal(requests[3]?.prepared.provider, "backup-chat-provider");
 });
 
-test("503 exhausts retries on candidate 1 then falls back to candidate 2", async () => {
+test.concurrent("503 exhausts retries on candidate 1 then falls back to candidate 2", async () => {
   const { gateway, dispatcher, events } = buildHarness();
 
   // 3 consecutive 503s on candidate 1
@@ -505,7 +505,7 @@ test("503 exhausts retries on candidate 1 then falls back to candidate 2", async
   }
 });
 
-test("503 head with interrupted body retries on the head category, not stream_interrupted", async () => {
+test.concurrent("503 head with interrupted body retries on the head category, not stream_interrupted", async () => {
   const { gateway, dispatcher } = buildHarness();
 
   dispatcher.enqueue({ status: 503, streamError: { kind: "transport", afterChunks: 0 } });
@@ -520,7 +520,7 @@ test("503 head with interrupted body retries on the head category, not stream_in
   assert.equal(dispatcher.requests()[1]?.prepared.provider, "chat-provider");
 });
 
-test("503 head with interrupted body falls back on the head category when retryOn excludes it", async () => {
+test.concurrent("503 head with interrupted body falls back on the head category when retryOn excludes it", async () => {
   const { gateway, dispatcher, events } = buildHarness({
     routes: [
       {
@@ -551,7 +551,7 @@ test("503 head with interrupted body falls back on the head category when retryO
   }
 });
 
-test("transport/timeout failure does not retry same-candidate and falls back directly per policy", async () => {
+test.concurrent("transport/timeout failure does not retry same-candidate and falls back directly per policy", async () => {
   const { gateway, dispatcher } = buildHarness();
 
   // Candidate 1 throws a timeout dispatch error
@@ -567,7 +567,7 @@ test("transport/timeout failure does not retry same-candidate and falls back dir
   assert.equal(dispatcher.requests()[1]?.prepared.provider, "backup-chat-provider");
 });
 
-test("timeout does not fall back when fallbackOn excludes timeout", async () => {
+test.concurrent("timeout does not fall back when fallbackOn excludes timeout", async () => {
   const { gateway, dispatcher } = buildHarness({
     routes: [
       {
@@ -592,7 +592,7 @@ test("timeout does not fall back when fallbackOn excludes timeout", async () => 
   assert.equal(dispatcher.dispatchCount(), 1);
 });
 
-test("transport failure does not fall back when fallbackOn excludes provider", async () => {
+test.concurrent("transport failure does not fall back when fallbackOn excludes provider", async () => {
   const { gateway, dispatcher } = buildHarness({
     routes: [
       {
@@ -616,7 +616,7 @@ test("transport failure does not fall back when fallbackOn excludes provider", a
   assert.equal(dispatcher.dispatchCount(), 1);
 });
 
-test("deadline expiry during retry wait aborts request with timeout failure without extra dispatch", async () => {
+test.concurrent("deadline expiry during retry wait aborts request with timeout failure without extra dispatch", async () => {
   // Config with short 500ms deadline
   const { gateway, dispatcher } = buildHarness({
     server: {
@@ -653,7 +653,7 @@ test("deadline expiry during retry wait aborts request with timeout failure with
   assert.equal(dispatcher.dispatchCount(), 1);
 });
 
-test("all candidates skipped returns unsupported_capability terminal with all skips traced", async () => {
+test.concurrent("all candidates skipped returns unsupported_capability terminal with all skips traced", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness({
     routes: [
       {
@@ -688,7 +688,7 @@ test("all candidates skipped returns unsupported_capability terminal with all sk
   });
 });
 
-test("public model dispatches once and never retries or falls back", async () => {
+test.concurrent("public model dispatches once and never retries or falls back", async () => {
   const { gateway, dispatcher } = buildHarness();
   dispatcher.enqueue({ status: 503, body: ERROR_BYTES });
 
@@ -702,7 +702,7 @@ test("public model dispatches once and never retries or falls back", async () =>
   assert.equal(dispatcher.dispatchCount(), 1);
 });
 
-test("SSE Chat relays byte-exact stream including [DONE]", async () => {
+test.concurrent("SSE Chat relays byte-exact stream including [DONE]", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness();
   dispatcher.enqueue({
     status: 200,
@@ -732,7 +732,7 @@ test("SSE Chat relays byte-exact stream including [DONE]", async () => {
   assert.deepEqual(new Uint8Array(readFileSync(join(traceRoot, dir, "006_provider_stream.sse"))), SSE_CHAT_BYTES);
 });
 
-test("stream error surfaces as a failure with the typed category", async () => {
+test.concurrent("stream error surfaces as a failure with the typed category", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness();
   dispatcher.enqueue({
     status: 200,
@@ -754,7 +754,7 @@ test("stream error surfaces as a failure with the typed category", async () => {
   });
 });
 
-test("post-first-byte stream failure cannot fall back to a later candidate", async () => {
+test.concurrent("post-first-byte stream failure cannot fall back to a later candidate", async () => {
   const { gateway, dispatcher, events } = buildHarness();
   // Candidate 1 streams a chunk, then errors mid-stream. Because bytes have
   // reached the client, the gateway must not fall back to candidate 2.
@@ -782,7 +782,7 @@ test("post-first-byte stream failure cannot fall back to a later candidate", asy
   );
 });
 
-test("client abort cancels the provider body and records a cancelled terminal", async () => {
+test.concurrent("client abort cancels the provider body and records a cancelled terminal", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness();
   dispatcher.enqueue({
     status: 200,
@@ -806,7 +806,7 @@ test("client abort cancels the provider body and records a cancelled terminal", 
   assert.deepEqual(readTrace(traceRoot, "999_terminal.json"), { kind: "cancelled", by: "client" });
 });
 
-test("single-key 429 waits out the observed Retry-After cooldown and succeeds on retry", async () => {
+test.concurrent("single-key 429 waits out the observed Retry-After cooldown and succeeds on retry", async () => {
   const { gateway, dispatcher, sleeper } = buildHarness({ providers: SINGLE_KEY_PROVIDERS });
 
   dispatcher.enqueue({ status: 429, headers: { "retry-after": "1" }, body: ERROR_BYTES });
@@ -819,7 +819,7 @@ test("single-key 429 waits out the observed Retry-After cooldown and succeeds on
   assert.deepEqual(sleeper.sleeps, [1000]);
 });
 
-test("observed Retry-After on 503 overrides the fixed failure cooldown rung", async () => {
+test.concurrent("observed Retry-After on 503 overrides the fixed failure cooldown rung", async () => {
   const { gateway, dispatcher, sleeper } = buildHarness({ providers: SINGLE_KEY_PROVIDERS });
 
   dispatcher.enqueue({ status: 503, headers: { "retry-after": "2" }, body: ERROR_BYTES });
@@ -832,7 +832,7 @@ test("observed Retry-After on 503 overrides the fixed failure cooldown rung", as
   assert.deepEqual(sleeper.sleeps, [2000]);
 });
 
-test("exhausted 503 stays on the candidate when fallbackOn excludes unavailable", async () => {
+test.concurrent("exhausted 503 stays on the candidate when fallbackOn excludes unavailable", async () => {
   const { gateway, dispatcher, events } = buildHarness({
     routes: [
       {
@@ -864,7 +864,7 @@ test("exhausted 503 stays on the candidate when fallbackOn excludes unavailable"
   );
 });
 
-test("fallback into a protocol-skipped candidate surfaces the original failure as terminal", async () => {
+test.concurrent("fallback into a protocol-skipped candidate surfaces the original failure as terminal", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness({
     routes: [
       {
@@ -895,7 +895,7 @@ test("fallback into a protocol-skipped candidate surfaces the original failure a
   });
 });
 
-test("interrupted non-stream provider body falls back by policy before any client byte", async () => {
+test.concurrent("interrupted non-stream provider body falls back by policy before any client byte", async () => {
   const { gateway, dispatcher } = buildHarness({
     routes: [
       {
@@ -919,7 +919,7 @@ test("interrupted non-stream provider body falls back by policy before any clien
   assert.equal(dispatcher.requests()[1]?.prepared.provider, "backup-chat-provider");
 });
 
-test("interrupted non-stream provider body terminates with stream_interrupted when policy excludes it", async () => {
+test.concurrent("interrupted non-stream provider body terminates with stream_interrupted when policy excludes it", async () => {
   const { gateway, dispatcher } = buildHarness({
     routes: [
       {
@@ -943,7 +943,7 @@ test("interrupted non-stream provider body terminates with stream_interrupted wh
   assert.equal(dispatcher.dispatchCount(), 1);
 });
 
-test("large complete response exceeding 64 KiB spools to disk and streams without full-RAM materialization", async () => {
+test.concurrent("large complete response exceeding 64 KiB spools to disk and streams without full-RAM materialization", async () => {
   const { gateway, dispatcher, traceRoot } = buildHarness();
 
   // Create a 128 KiB JSON response (exceeds 64 KiB memory threshold)

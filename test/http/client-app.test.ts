@@ -32,7 +32,7 @@ function createTestClientApp(options: Partial<ClientAppOptions> & { config: Aptu
   });
 }
 
-test("all create aliases share the injected gateway and request identity", async () => {
+test.concurrent("all create aliases share the injected gateway and request identity", async () => {
   const calls: GatewayRequest[] = [];
   const gateway: Gateway = {
     async execute(request) {
@@ -69,7 +69,7 @@ test("all create aliases share the injected gateway and request identity", async
   );
 });
 
-test("catalogs are local sorted alias-free and never dispatch", async () => {
+test.concurrent("catalogs are local sorted alias-free and never dispatch", async () => {
   let calls = 0;
   const gateway: Gateway = {
     async execute() {
@@ -100,7 +100,7 @@ test("catalogs are local sorted alias-free and never dispatch", async () => {
   assert.equal(calls, 0);
 });
 
-test("authenticated catalog records a models HTTP observation", async () => {
+test.concurrent("authenticated catalog records a models HTTP observation", async () => {
   const metrics = createMetricsRegistry();
   const observer = createLifecycleObserver({
     logger: aptusLogger(),
@@ -132,7 +132,7 @@ test("authenticated catalog records a models HTTP observation", async () => {
   });
 });
 
-test("unknown and disallowed names are byte-identical native not-found failures", async () => {
+test.concurrent("unknown and disallowed names are byte-identical native not-found failures", async () => {
   const restricted = configuration({ allow: ["primary"] });
   let calls = 0;
   const gateway: Gateway = {
@@ -171,7 +171,7 @@ test("unknown and disallowed names are byte-identical native not-found failures"
   assert.equal(calls, 0);
 });
 
-test("in-flight exhaustion follows body admission and does not dispatch", async () => {
+test.concurrent("in-flight exhaustion follows body admission and does not dispatch", async () => {
   const limited = { ...config, server: { ...config.server, maxInFlight: 1 } };
   let resolveFirst: (() => void) | undefined;
   let calls = 0;
@@ -212,7 +212,7 @@ test("in-flight exhaustion follows body admission and does not dispatch", async 
   assert.equal(calls, 1);
 });
 
-test("oversized ingress returns an unidentified native failure without dispatch", async () => {
+test.concurrent("oversized ingress returns an unidentified native failure without dispatch", async () => {
   const limited = { ...config, server: { ...config.server, bodyLimitBytes: 4 } };
   let calls = 0;
   const gateway: Gateway = {
@@ -240,7 +240,7 @@ test("oversized ingress returns an unidentified native failure without dispatch"
   assert.equal(calls, 0);
 });
 
-test("unauthenticated request returns 401 before consuming concurrency limiter", async () => {
+test.concurrent("unauthenticated request returns 401 before consuming concurrency limiter", async () => {
   const limited = { ...config, server: { ...config.server, maxInFlight: 0 } };
   let calls = 0;
   const gateway: Gateway = {
@@ -268,7 +268,7 @@ test("unauthenticated request returns 401 before consuming concurrency limiter",
   assert.equal(calls, 0);
 });
 
-test("error encoder maps every category with request IDs", async () => {
+test.concurrent("error encoder maps every category with request IDs", async () => {
   const categories = [
     "invalid_request",
     "authentication",
@@ -328,7 +328,7 @@ test("error encoder maps every category with request IDs", async () => {
   });
 });
 
-test("gateway failures use complete protocol-native error envelopes", async () => {
+test.concurrent("gateway failures use complete protocol-native error envelopes", async () => {
   const gateway: Gateway = {
     async execute() {
       return { kind: "failure", failure: { category: "not_found", message: "safe", retryable: false } };
@@ -355,7 +355,7 @@ test("gateway failures use complete protocol-native error envelopes", async () =
   });
 });
 
-test("client disconnect aborts the gateway signal without a second response", async () => {
+test.concurrent("client disconnect aborts the gateway signal without a second response", async () => {
   const completion = Promise.withResolvers<void>();
   let signal: AbortSignal | undefined;
   const gateway: Gateway = {
@@ -385,7 +385,7 @@ test("client disconnect aborts the gateway signal without a second response", as
   });
 });
 
-test("request deadline aborts the gateway once and returns a native timeout failure", async () => {
+test.concurrent("request deadline aborts the gateway once and returns a native timeout failure", async () => {
   const timed = { ...config, server: { ...config.server, requestDeadlineMs: 25 } };
   let calls = 0;
   let aborts = 0;
@@ -422,7 +422,7 @@ test("request deadline aborts the gateway once and returns a native timeout fail
   assert.equal(aborts, 1);
 });
 
-test("stream deadline closes after headers and cancels the owned stream", async () => {
+test.concurrent("stream deadline closes after headers and cancels the owned stream", async () => {
   const timed = { ...config, server: { ...config.server, requestDeadlineMs: 25 } };
   const cancellation = Promise.withResolvers<unknown>();
   const gateway: Gateway = {
@@ -469,7 +469,7 @@ test("stream deadline closes after headers and cancels the owned stream", async 
   await cancellation.promise;
 });
 
-test("stream relay cancels the owned stream when the client disconnects", async () => {
+test.concurrent("stream relay cancels the owned stream when the client disconnects", async () => {
   const cancellation = Promise.withResolvers<unknown>();
   const gateway: Gateway = {
     async execute() {
@@ -508,7 +508,7 @@ test("stream relay cancels the owned stream when the client disconnects", async 
   });
 });
 
-test("complete body delivery records cancellation telemetry when client disconnects mid-delivery", async () => {
+test.concurrent("complete body delivery records cancellation telemetry when client disconnects mid-delivery", async () => {
   const cancelledCalls: Array<{ aptusRequestId: string; phase: string; by: string }> = [];
   const observer = createLifecycleObserver({
     logger: aptusLogger(),
@@ -573,7 +573,7 @@ test("complete body delivery records cancellation telemetry when client disconne
 });
 
 
-test("operations metrics honor enablement and bounded endpoint labels", async () => {
+test.concurrent("operations metrics honor enablement and bounded endpoint labels", async () => {
   const state = { draining: false, traceReady: true };
   await withApp(
     createOperationsApp({ config, revision: "sha256:test", state, metrics: createMetricsRegistry() }),
@@ -597,7 +597,7 @@ test("operations metrics honor enablement and bounded endpoint labels", async ()
   );
 });
 
-test("GET /health aliases to /health/ready and uses health_ready metric endpoint label", async () => {
+test.concurrent("GET /health aliases to /health/ready and uses health_ready metric endpoint label", async () => {
   const metrics = createMetricsRegistry();
   const state = { draining: false, traceReady: true };
   await withApp(
@@ -648,7 +648,7 @@ test("GET /health aliases to /health/ready and uses health_ready metric endpoint
   );
 });
 
-test("GET /metrics returns 404 when metrics.enabled is false", async () => {
+test.concurrent("GET /metrics returns 404 when metrics.enabled is false", async () => {
   const disabledConfig = { ...config, metrics: { enabled: false } };
   const state = { draining: false, traceReady: true };
   await withApp(

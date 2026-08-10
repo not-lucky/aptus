@@ -6,6 +6,7 @@ export default defineConfig({
     globalSetup: ["./test/global-setup.ts"],
     environment: "node",
     pool: "threads",
+    isolate: false,
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },

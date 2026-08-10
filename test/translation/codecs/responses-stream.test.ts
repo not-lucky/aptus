@@ -15,7 +15,7 @@ const session: StreamSession = {
   createPartId: () => "p_1",
 };
 
-test("responses stream request: decodes and encodes stream requests", () => {
+test.concurrent("responses stream request: decodes and encodes stream requests", () => {
   const decoder = new ResponsesStreamRequestDecoder();
   const res = decoder.decodeRequest({
     model: "responses-main",
@@ -33,7 +33,7 @@ test("responses stream request: decodes and encodes stream requests", () => {
   }
 });
 
-test("responses stream decoder: enforces event matching and sequence_number ordering", () => {
+test.concurrent("responses stream decoder: enforces event matching and sequence_number ordering", () => {
   const decoder = new ResponsesProviderStreamDecoder(session);
 
   // Missing event
@@ -103,7 +103,7 @@ test("responses stream decoder: enforces event matching and sequence_number orde
   assert.equal(dec2.finish().ok, true);
 });
 
-test("responses stream encoder: regenerates monotonic sequence_numbers", () => {
+test.concurrent("responses stream encoder: regenerates monotonic sequence_numbers", () => {
   const encoder = new ResponsesClientStreamEncoder(session);
 
   const startEvt: IrStreamEvent = { type: "response_start", responseId: "resp_123", model: "responses-main" };

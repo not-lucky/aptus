@@ -5,7 +5,7 @@ import { createSseDecoder, createSseEncoder, type SseFrame } from "../../src/tra
 
 const encoder = new TextEncoder();
 
-test("sse encoder: canonical wire format serializes all fields", () => {
+test.concurrent("sse encoder: canonical wire format serializes all fields", () => {
   const encoderInstance = createSseEncoder();
   const frame: SseFrame = {
     event: "response.output_text.delta",
@@ -27,7 +27,7 @@ test("sse encoder: canonical wire format serializes all fields", () => {
   );
 });
 
-test("sse decoder: basic decoding with LF and CRLF", () => {
+test.concurrent("sse decoder: basic decoding with LF and CRLF", () => {
   const decoder = createSseDecoder();
   const rawLf = "event: custom\ndata: first line\ndata: second line\nid: 1\nretry: 3000\n\n";
   const resultsLf = decoder.push(encoder.encode(rawLf));
@@ -57,7 +57,7 @@ test("sse decoder: basic decoding with LF and CRLF", () => {
   assert.deepEqual(finish, []);
 });
 
-test("sse decoder: strips leading UTF-8 BOM", () => {
+test.concurrent("sse decoder: strips leading UTF-8 BOM", () => {
   const decoder = createSseDecoder();
   const raw = "\uFEFFdata: hello\n\n";
   const results = decoder.push(encoder.encode(raw));
@@ -68,7 +68,7 @@ test("sse decoder: strips leading UTF-8 BOM", () => {
   }
 });
 
-test("sse decoder: parses comments preserving order", () => {
+test.concurrent("sse decoder: parses comments preserving order", () => {
   const decoder = createSseDecoder();
   const raw = ": comment 1\nevent: test\n: comment 2\ndata: payload\n\n: comment 3\n";
   const results = decoder.push(encoder.encode(raw));
@@ -95,7 +95,7 @@ test("sse decoder: parses comments preserving order", () => {
   }
 });
 
-test("sse decoder: arbitrary byte chunk segmentation (property test)", () => {
+test.concurrent("sse decoder: arbitrary byte chunk segmentation (property test)", () => {
   fc.assert(
     fc.property(
       fc.array(
@@ -172,7 +172,7 @@ test("sse decoder: arbitrary byte chunk segmentation (property test)", () => {
   );
 });
 
-test("sse decoder: rejects duplicate singleton fields", () => {
+test.concurrent("sse decoder: rejects duplicate singleton fields", () => {
   const dec1 = createSseDecoder();
   const res1 = dec1.push(encoder.encode("event: first\nevent: second\ndata: hi\n\n"));
   assert.equal(res1.length, 1);
@@ -189,28 +189,28 @@ test("sse decoder: rejects duplicate singleton fields", () => {
   assert.equal(res3[0]?.kind, "failure");
 });
 
-test("sse decoder: rejects unknown fields", () => {
+test.concurrent("sse decoder: rejects unknown fields", () => {
   const decoder = createSseDecoder();
   const res = decoder.push(encoder.encode("foo: bar\ndata: hi\n\n"));
   assert.equal(res.length, 1);
   assert.equal(res[0]?.kind, "failure");
 });
 
-test("sse decoder: rejects NUL in id", () => {
+test.concurrent("sse decoder: rejects NUL in id", () => {
   const decoder = createSseDecoder();
   const res = decoder.push(encoder.encode("id: a\0b\ndata: hi\n\n"));
   assert.equal(res.length, 1);
   assert.equal(res[0]?.kind, "failure");
 });
 
-test("sse decoder: rejects invalid retry values", () => {
+test.concurrent("sse decoder: rejects invalid retry values", () => {
   const decoder = createSseDecoder();
   const res = decoder.push(encoder.encode("retry: invalid\ndata: hi\n\n"));
   assert.equal(res.length, 1);
   assert.equal(res[0]?.kind, "failure");
 });
 
-test("sse decoder: enforces maxEventBytes bound", () => {
+test.concurrent("sse decoder: enforces maxEventBytes bound", () => {
   const decoder = createSseDecoder({ maxEventBytes: 20 });
   const chunk1 = encoder.encode("data: 1234567890\n");
   const res1 = decoder.push(chunk1);
@@ -223,7 +223,7 @@ test("sse decoder: enforces maxEventBytes bound", () => {
   assert.equal(res2[0]?.kind, "failure");
 });
 
-test("sse decoder: fails on incomplete line or unclosed event at EOF", () => {
+test.concurrent("sse decoder: fails on incomplete line or unclosed event at EOF", () => {
   const dec1 = createSseDecoder();
   dec1.push(encoder.encode("data: unfinished line"));
   const finish1 = dec1.finish();

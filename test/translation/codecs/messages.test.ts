@@ -4,7 +4,7 @@ import { MessagesEgressEncoder } from "../../../src/translation/codecs/messages/
 import { MessagesIngressDecoder } from "../../../src/translation/codecs/messages/ingress.ts";
 import type { IrRequest } from "../../../src/translation/ir.ts";
 
-test("translation codec messages: decodes and encodes request", () => {
+test.concurrent("translation codec messages: decodes and encodes request", () => {
   const decoder = new MessagesIngressDecoder();
   const encoder = new MessagesEgressEncoder();
 
@@ -32,7 +32,7 @@ test("translation codec messages: decodes and encodes request", () => {
   }
 });
 
-test("translation codec messages: rejects mid_conv_system role as mid-conversation-instruction", () => {
+test.concurrent("translation codec messages: rejects mid_conv_system role as mid-conversation-instruction", () => {
   const decoder = new MessagesIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "claude-3-7-sonnet",
@@ -45,7 +45,7 @@ test("translation codec messages: rejects mid_conv_system role as mid-conversati
   }
 });
 
-test("translation codec messages: rejects output_config as structured-json-schema", () => {
+test.concurrent("translation codec messages: rejects output_config as structured-json-schema", () => {
   const decoder = new MessagesIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "claude-3-7-sonnet",
@@ -59,7 +59,7 @@ test("translation codec messages: rejects output_config as structured-json-schem
   }
 });
 
-test("translation codec messages: merges consecutive same-role turns into Messages", () => {
+test.concurrent("translation codec messages: merges consecutive same-role turns into Messages", () => {
   const encoder = new MessagesEgressEncoder();
 
   const ir: IrRequest = {
@@ -88,7 +88,7 @@ test("translation codec messages: merges consecutive same-role turns into Messag
   assert.equal(messages[0]?.content[1]?.text, "Turn 2.");
 });
 
-test("translation codec messages: decodes and encodes outcome", () => {
+test.concurrent("translation codec messages: decodes and encodes outcome", () => {
   const decoder = new MessagesIngressDecoder();
   const encoder = new MessagesEgressEncoder();
 

@@ -4,14 +4,14 @@ import { isPublicName } from "../../src/domain/names.ts";
 import { estimateCostUsd, type PricingConfig } from "../../src/domain/pricing.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
 
-test("isPublicName: valid names", () => {
+test.concurrent("isPublicName: valid names", () => {
   assert.equal(isPublicName("gpt-main"), true);
   assert.equal(isPublicName("a.b-c_d"), true);
   assert.equal(isPublicName("a".repeat(128)), true);
   assert.equal(isPublicName("A"), true);
 });
 
-test("isPublicName: invalid names", () => {
+test.concurrent("isPublicName: invalid names", () => {
   assert.equal(isPublicName("-x"), false);
   assert.equal(isPublicName(""), false);
   assert.equal(isPublicName("a".repeat(129)), false);
@@ -20,7 +20,7 @@ test("isPublicName: invalid names", () => {
   assert.equal(isPublicName("1"), true); // Leading digits are legal.
 });
 
-test("createRequestId: unique across 100 calls", () => {
+test.concurrent("createRequestId: unique across 100 calls", () => {
   const seen = new Set<string>();
   for (let index = 0; index < 100; index++) {
     const id = createRequestId();
@@ -41,7 +41,7 @@ function pricing(overrides: Partial<PricingConfig> = {}): PricingConfig {
   };
 }
 
-test("estimateCostUsd: plan formula splits exactly", () => {
+test.concurrent("estimateCostUsd: plan formula splits exactly", () => {
   // 1,000,000 input tokens at 0.10 and 1,000,000 output tokens at 0.20.
   assert.equal(
     estimateCostUsd(pricing({ inputUsdPerMillionTokens: "0.1", outputUsdPerMillionTokens: "0.2" }), {
@@ -52,11 +52,11 @@ test("estimateCostUsd: plan formula splits exactly", () => {
   );
 });
 
-test("estimateCostUsd: one million tokens at 2.50", () => {
+test.concurrent("estimateCostUsd: one million tokens at 2.50", () => {
   assert.equal(estimateCostUsd(pricing({ inputUsdPerMillionTokens: "2.50" }), { input: 1_000_000, output: 0 }), "2.5");
 });
 
-test("estimateCostUsd: null cache prices contribute zero", () => {
+test.concurrent("estimateCostUsd: null cache prices contribute zero", () => {
   assert.equal(
     estimateCostUsd(pricing(), {
       input: 0,
@@ -68,7 +68,7 @@ test("estimateCostUsd: null cache prices contribute zero", () => {
   );
 });
 
-test("estimateCostUsd: cache inputs count at their own prices", () => {
+test.concurrent("estimateCostUsd: cache inputs count at their own prices", () => {
   assert.equal(
     estimateCostUsd(pricing({ cacheReadUsdPerMillionTokens: "0.25", cacheWriteUsdPerMillionTokens: "0.5" }), {
       input: 0,
@@ -80,11 +80,11 @@ test("estimateCostUsd: cache inputs count at their own prices", () => {
   );
 });
 
-test("estimateCostUsd: zero usage is zero", () => {
+test.concurrent("estimateCostUsd: zero usage is zero", () => {
   assert.equal(estimateCostUsd(pricing(), { input: 0, output: 0 }), "0");
 });
 
-test("estimateCostUsd: mixed usage sums all four terms", () => {
+test.concurrent("estimateCostUsd: mixed usage sums all four terms", () => {
   const cost = estimateCostUsd(
     pricing({
       inputUsdPerMillionTokens: "1",
@@ -98,7 +98,7 @@ test("estimateCostUsd: mixed usage sums all four terms", () => {
   assert.equal(cost, "1.05");
 });
 
-test("estimateCostUsd: exact decimal never emits scientific notation or float artifacts", () => {
+test.concurrent("estimateCostUsd: exact decimal never emits scientific notation or float artifacts", () => {
   // IEEE-754 computes 0.1 + 0.2 = 0.30000000000000004, and dividing by 1e6 would render
   // as "3.0000000000000004e-7". Exact decimal fixed-point arithmetic must yield the true value.
   assert.equal(

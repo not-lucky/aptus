@@ -93,7 +93,7 @@ async function waitForCondition(predicate: () => boolean | Promise<boolean>, tim
   }
 }
 
-test("createGracefulShutdown returns the active shutdown promise on multiple calls and drains without aborting", async () => {
+test.concurrent("createGracefulShutdown returns the active shutdown promise on multiple calls and drains without aborting", async () => {
   const client = mockServer();
   const operations = mockServer();
   const observer = mockObserver();
@@ -156,7 +156,7 @@ test("createGracefulShutdown returns the active shutdown promise on multiple cal
   assert.equal(abortActiveCalls, 0, "late run() must not force-abort after natural drain");
 });
 
-test("createGracefulShutdown abort forces immediate active abort and reports the exact aborted count", async () => {
+test.concurrent("createGracefulShutdown abort forces immediate active abort and reports the exact aborted count", async () => {
   const client = mockServer();
   const operations = mockServer();
   const observer = mockObserver();
@@ -194,7 +194,7 @@ test("createGracefulShutdown abort forces immediate active abort and reports the
   assert.equal((observer.completed[0] as { aborted: number }).aborted, 2);
 });
 
-test("createGracefulShutdown deadline timer aborts remaining requests and reports {drained: 0, aborted: N}", async () => {
+test.concurrent("createGracefulShutdown deadline timer aborts remaining requests and reports {drained: 0, aborted: N}", async () => {
   const client = mockServer();
   const operations = mockServer();
   const observer = mockObserver();
@@ -229,7 +229,7 @@ test("createGracefulShutdown deadline timer aborts remaining requests and report
   assert.equal((observer.completed[0] as { aborted: number }).aborted, 3);
 });
 
-test("createGracefulShutdown idle shutdown reports zero drained and zero aborted", async () => {
+test.concurrent("createGracefulShutdown idle shutdown reports zero drained and zero aborted", async () => {
   const client = mockServer();
   const operations = mockServer();
   const observer = mockObserver();
@@ -261,7 +261,7 @@ test("createGracefulShutdown idle shutdown reports zero drained and zero aborted
   assert.equal((observer.completed[0] as { aborted: number }).aborted, 0);
 });
 
-test("createGracefulShutdown orders retention stop after drain and before operations close, emitting observer events", async () => {
+test.concurrent("createGracefulShutdown orders retention stop after drain and before operations close, emitting observer events", async () => {
   const client = mockServer();
   const operations = mockServer();
   const order: string[] = [];

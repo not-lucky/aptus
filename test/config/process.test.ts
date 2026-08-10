@@ -398,10 +398,8 @@ test.concurrent("process: client ingress catalogs and operations metrics are liv
   }
 });
 
-test.concurrent("process: config path resolution precedence (--config > APTUS_CONFIG > ./aptus.yaml)", async () => {
-  const env = seededEnv("path-res");
-
-  // 1. --config wins over APTUS_CONFIG
+test.concurrent("process: config path resolution precedence --config flag", async () => {
+  const env = seededEnv("path-res-a");
   const dirA = mkdtempSync(join(tmpdir(), "aptus-process-path-a-"));
   const configA = join(dirA, "custom.yaml");
   writeFileSync(
@@ -429,8 +427,10 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
   } finally {
     if (childA.exitCode === null && childA.signalCode === null) childA.kill("SIGKILL");
   }
+});
 
-  // 2. APTUS_CONFIG is used when --config is omitted
+test.concurrent("process: config path resolution precedence APTUS_CONFIG env", async () => {
+  const env = seededEnv("path-res-b");
   const dirB = mkdtempSync(join(tmpdir(), "aptus-process-path-b-"));
   const configB = join(dirB, "env.yaml");
   writeFileSync(
@@ -458,8 +458,10 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
   } finally {
     if (childB.exitCode === null && childB.signalCode === null) childB.kill("SIGKILL");
   }
+});
 
-  // 3. Default ./aptus.yaml in working directory
+test.concurrent("process: config path resolution precedence default ./aptus.yaml in working directory", async () => {
+  const env = seededEnv("path-res-c");
   const dirC = mkdtempSync(join(tmpdir(), "aptus-process-path-c-"));
   writeFileSync(
     join(dirC, "aptus.yaml"),
@@ -486,8 +488,10 @@ test.concurrent("process: config path resolution precedence (--config > APTUS_CO
   } finally {
     if (childC.exitCode === null && childC.signalCode === null) childC.kill("SIGKILL");
   }
+});
 
-  // 4. Missing config file anywhere exits 78 with read error
+test.concurrent("process: missing config file anywhere exits 78 with read error", async () => {
+  const env = seededEnv("path-res-d");
   const dirD = mkdtempSync(join(tmpdir(), "aptus-process-path-d-"));
   const resultD = await spawnCli([], env, dirD);
   assert.equal(resultD.code, 78);

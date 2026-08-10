@@ -19,7 +19,7 @@ function createDirWithTerminal(root: string, dirName: string, sizeBytes = 100, t
   return dir;
 }
 
-test("retention pass deletes traces exceeding maxAgeMs and preserves younger traces", async () => {
+test.concurrent("retention pass deletes traces exceeding maxAgeMs and preserves younger traces", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-retention-age-"));
   const nowMs = new Date("2026-08-17T12:00:00.000Z").getTime();
 
@@ -53,7 +53,7 @@ test("retention pass deletes traces exceeding maxAgeMs and preserves younger tra
   assert.ok(remaining.includes("2026-08-07T12-00-00.000+0000_33333333-3333-4333-8333-333333333333"));
 });
 
-test("retention pass prunes oldest completed traces when total size exceeds maxBytes", async () => {
+test.concurrent("retention pass prunes oldest completed traces when total size exceeds maxBytes", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-retention-size-"));
   const nowMs = new Date("2026-08-17T12:00:00.000Z").getTime();
 
@@ -86,7 +86,7 @@ async function waitForCondition(predicate: () => boolean | Promise<boolean>, tim
   }
 }
 
-test("retention scheduler executes periodic passes and stops cleanly", async () => {
+test.concurrent("retention scheduler executes periodic passes and stops cleanly", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-scheduler-"));
   createDirWithTerminal(root, "2026-08-01T00-00-00.000+0000_11111111-1111-4111-8111-111111111111");
 
@@ -121,7 +121,7 @@ test("retention scheduler executes periodic passes and stops cleanly", async () 
   scheduler.stop();
 });
 
-test("failed retention pass emits trace failure with system sentinel, suppresses retention log, and keeps timer alive", async () => {
+test.concurrent("failed retention pass emits trace failure with system sentinel, suppresses retention log, and keeps timer alive", async () => {
   const capturedLogs: import("@logtape/logtape").LogRecord[] = [];
   const { configureLogging } = await import("../../src/observability/logging.ts");
   configureLogging({ enabled: true, level: "info" }, (rec) => capturedLogs.push(rec));
@@ -172,7 +172,7 @@ test("failed retention pass emits trace failure with system sentinel, suppresses
   assert.equal(retentionRuns.length, 0, "must not emit aptus.retention.run on failure");
 });
 
-test("scheduler stop() gate immediately blocks subsequent scheduled passes and triggerNow", async () => {
+test.concurrent("scheduler stop() gate immediately blocks subsequent scheduled passes and triggerNow", async () => {
   let runs = 0;
   const mockRetention: import("../../src/domain/operations.ts").TraceRetention = {
     async run() {

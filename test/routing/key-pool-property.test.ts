@@ -22,7 +22,7 @@ function randomInt(min: number, max: number): number {
 
 const random = createSeededRandom(RANDOM_SEED);
 
-test("property: key pool state transitions preserve safety invariants under arbitrary interleavings", () => {
+test.concurrent("property: key pool state transitions preserve safety invariants under arbitrary interleavings", () => {
   const keyConfigs: ProviderKeyConfig[] = [
     { name: "k1", secret: "s1" as SecretString, enabled: true },
     { name: "k2", secret: "s2" as SecretString, enabled: true },

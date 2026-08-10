@@ -4,7 +4,7 @@ import { ChatEgressEncoder } from "../../../src/translation/codecs/chat/egress.t
 import { ChatIngressDecoder } from "../../../src/translation/codecs/chat/ingress.ts";
 
 
-test("translation codec chat: decodes and encodes request", () => {
+test.concurrent("translation codec chat: decodes and encodes request", () => {
   const decoder = new ChatIngressDecoder();
   const encoder = new ChatEgressEncoder();
 
@@ -32,7 +32,7 @@ test("translation codec chat: decodes and encodes request", () => {
   }
 });
 
-test("translation codec chat: rejects unknown request field", () => {
+test.concurrent("translation codec chat: rejects unknown request field", () => {
   const decoder = new ChatIngressDecoder();
   const chatBody = {
     model: "gpt-4o",
@@ -47,7 +47,7 @@ test("translation codec chat: rejects unknown request field", () => {
   }
 });
 
-test("translation codec chat: rejects parallel_tool_calls fail-closed", () => {
+test.concurrent("translation codec chat: rejects parallel_tool_calls fail-closed", () => {
   const decoder = new ChatIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "gpt-4o",
@@ -60,7 +60,7 @@ test("translation codec chat: rejects parallel_tool_calls fail-closed", () => {
   }
 });
 
-test("translation codec chat: rejects n other than 1 with multiple-candidates", () => {
+test.concurrent("translation codec chat: rejects n other than 1 with multiple-candidates", () => {
   const decoder = new ChatIngressDecoder();
   for (const n of [0, 2, "2"]) {
     const decodeRes = decoder.decodeRequest({
@@ -75,7 +75,7 @@ test("translation codec chat: rejects n other than 1 with multiple-candidates", 
   }
 });
 
-test("translation codec chat: decodes and encodes outcome", () => {
+test.concurrent("translation codec chat: decodes and encodes outcome", () => {
   const decoder = new ChatIngressDecoder();
   const encoder = new ChatEgressEncoder();
 

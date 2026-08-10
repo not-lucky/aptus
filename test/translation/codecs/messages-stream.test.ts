@@ -15,7 +15,7 @@ const session: StreamSession = {
   createPartId: () => "p_1",
 };
 
-test("messages stream request: decodes max_tokens and encodes messages", () => {
+test.concurrent("messages stream request: decodes max_tokens and encodes messages", () => {
   const decoder = new MessagesStreamRequestDecoder();
   const res = decoder.decodeRequest({
     model: "claude-main",
@@ -34,7 +34,7 @@ test("messages stream request: decodes max_tokens and encodes messages", () => {
   }
 });
 
-test("messages stream decoder: consumes ping and aggregates cumulative usage", () => {
+test.concurrent("messages stream decoder: consumes ping and aggregates cumulative usage", () => {
   const decoder = new MessagesProviderStreamDecoder(session);
 
   const r1 = decoder.push({
@@ -106,7 +106,7 @@ test("messages stream decoder: consumes ping and aggregates cumulative usage", (
   assert.equal(decoder.finish().ok, true);
 });
 
-test("messages stream decoder: collapses cumulative message_delta usage instead of summing", () => {
+test.concurrent("messages stream decoder: collapses cumulative message_delta usage instead of summing", () => {
   const decoder = new MessagesProviderStreamDecoder(session);
 
   decoder.push({
@@ -131,7 +131,7 @@ test("messages stream decoder: collapses cumulative message_delta usage instead 
   }
 });
 
-test("messages stream encoder: encodes canonical named sequence with message_delta usage carrier", () => {
+test.concurrent("messages stream encoder: encodes canonical named sequence with message_delta usage carrier", () => {
   const encoder = new MessagesClientStreamEncoder(session);
 
   const startEvt: IrStreamEvent = { type: "response_start", responseId: "resp_123", model: "claude-main" };
@@ -178,7 +178,7 @@ test("messages stream encoder: encodes canonical named sequence with message_del
   assert.deepEqual(msgDeltaJson.usage, { input_tokens: 17, output_tokens: 8 });
 });
 
-test("messages stream encoder: tracks monotonic part indices across multiple stream parts", () => {
+test.concurrent("messages stream encoder: tracks monotonic part indices across multiple stream parts", () => {
   const encoder = new MessagesClientStreamEncoder(session);
   encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
 

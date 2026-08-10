@@ -66,6 +66,7 @@ function routeReplacements(
     "  requestDeadlineMs: 600000": "  requestDeadlineMs: 30000",
     "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${primary.baseUrl}/`,
     "    keyStrategy: round-robin": "    keyStrategy: fill-first",
+    "    failureCooldownMs: [250, 1000]": "    failureCooldownMs: [5, 10]",
     "providers:\n": `providers:\n${BACKUP_PROVIDER_SNIPPET.replace("BACKUP_CHAT_BASE_URL", backup.baseUrl)}`,
     "models:\n": `models:\n${BACKUP_MODEL_SNIPPET}`,
     ...overrides,
@@ -254,7 +255,7 @@ test.concurrent("process: stalled response head times out with no retry and a 50
     const caseName = "dispatch-timeout";
     const cli = await startRoutesCli(primary, backup, caseName, {
       "    candidates: [gpt-main, claude-main]": "    candidates: [gpt-main]",
-      "  requestDeadlineMs: 600000": "  requestDeadlineMs: 300",
+      "  requestDeadlineMs: 600000": "  requestDeadlineMs: 250",
     });
     try {
       // The origin accepts the request but never sends a head within the deadline.
@@ -281,7 +282,7 @@ test.concurrent("process: retry wait past the request deadline expires with a 50
     const caseName = "deadline-expiry";
     const cli = await startRoutesCli(primary, backup, caseName, {
       "    candidates: [gpt-main, claude-main]": "    candidates: [gpt-main]",
-      "  requestDeadlineMs: 600000": "  requestDeadlineMs: 1000",
+      "  requestDeadlineMs: 600000": "  requestDeadlineMs: 400",
       // A single primary key so the 429 cooldown forces a wait.
       "      - name: openai-chat-b\n        secret: ${OPENAI_CHAT_KEY_B}\n        enabled: true\n": "",
     });

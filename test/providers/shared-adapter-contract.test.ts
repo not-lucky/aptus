@@ -63,13 +63,13 @@ function sampleInput(tc: AdapterTestCase, overrides: Partial<NativePreparationIn
 
 for (const tc of ADAPTER_TEST_CASES) {
   describe(`Shared ProtocolAdapter Contract: ${tc.name}`, () => {
-    test("protocol and createPath match expected constants", () => {
+    test.concurrent("protocol and createPath match expected constants", () => {
       const adapter = tc.factory();
       assert.equal(adapter.protocol, tc.protocol);
       assert.equal(adapter.createPath, tc.createPath);
     });
 
-    test("readPublicModel accepts non-empty string and rejects missing, non-string, or empty model", () => {
+    test.concurrent("readPublicModel accepts non-empty string and rejects missing, non-string, or empty model", () => {
       const adapter = tc.factory();
       assert.deepEqual(adapter.readPublicModel({ model: "gpt-main" }), { ok: true, value: "gpt-main" });
 
@@ -93,7 +93,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       }
     });
 
-    test("prepareNative constructs target URL from baseUrl + createPath", () => {
+    test.concurrent("prepareNative constructs target URL from baseUrl + createPath", () => {
       const adapter = tc.factory();
       const input = sampleInput(tc, { baseUrl: "https://custom.provider.com/v1" });
       const result = adapter.prepareNative(input);
@@ -104,7 +104,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(result.value.streamIdleMs, 500);
     });
 
-    test("prepareNative installs outbound auth and strips client auth, hop-by-hop, and framing headers", () => {
+    test.concurrent("prepareNative installs outbound auth and strips client auth, hop-by-hop, and framing headers", () => {
       const adapter = tc.factory();
       const input = sampleInput(tc, {
         clientHeaders: {
@@ -161,7 +161,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(headers["proxy-authorization"], undefined);
     });
 
-    test("prepareNative applies mutation pipeline and encodes body to Uint8Array", () => {
+    test.concurrent("prepareNative applies mutation pipeline and encodes body to Uint8Array", () => {
       const adapter = tc.factory();
       const clientBody: JsonObject = {
         model: "public-model",
@@ -198,7 +198,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(clientBody.temperature, 0.8);
     });
 
-    test("classify maps status codes accurately with beforeClientBytes: true", () => {
+    test.concurrent("classify maps status codes accurately with beforeClientBytes: true", () => {
       const adapter = tc.factory();
       const cases: Array<[number, string]> = [
         [200, "success"],
@@ -228,7 +228,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       }
     });
 
-    test("classify parses Retry-After delta-seconds on 429", () => {
+    test.concurrent("classify parses Retry-After delta-seconds on 429", () => {
       const adapter = tc.factory();
       const obs = adapter.classify({ status: 429, headers: { "retry-after": "5" } });
       assert.equal(obs.result, "rate_limit");
@@ -236,7 +236,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(obs.beforeClientBytes, true);
     });
 
-    test("classify records Retry-After on 503 and 529 for key-pool cooldown", () => {
+    test.concurrent("classify records Retry-After on 503 and 529 for key-pool cooldown", () => {
       const adapter = tc.factory();
       for (const status of [503, 529]) {
         const obs = adapter.classify({ status, headers: { "retry-after": "7" } });
@@ -245,7 +245,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       }
     });
 
-    test("classify parses a Retry-After HTTP-date on 429", () => {
+    test.concurrent("classify parses a Retry-After HTTP-date on 429", () => {
       const adapter = tc.factory();
       const futureDate = new Date(Date.now() + 60_000).toUTCString();
       const obs = adapter.classify({ status: 429, headers: { "retry-after": futureDate } });
@@ -258,7 +258,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       }
     });
 
-    test("classify ignores an expired Retry-After HTTP-date on 429", () => {
+    test.concurrent("classify ignores an expired Retry-After HTTP-date on 429", () => {
       const adapter = tc.factory();
       const pastDate = new Date(Date.now() - 60_000).toUTCString();
       const obs = adapter.classify({ status: 429, headers: { "retry-after": pastDate } });
@@ -267,7 +267,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(obs.beforeClientBytes, true);
     });
 
-    test("classify parses HTTP-date Retry-After deterministically from injected nowMs", () => {
+    test.concurrent("classify parses HTTP-date Retry-After deterministically from injected nowMs", () => {
       const adapter = tc.factory();
       const fixedNow = Date.parse("2026-01-01T00:00:00.000Z");
 
@@ -282,7 +282,7 @@ for (const tc of ADAPTER_TEST_CASES) {
       assert.equal(expired.retryDelayMs, undefined);
     });
 
-    test("buildModelList returns valid catalog envelope for populated and empty lists", () => {
+    test.concurrent("buildModelList returns valid catalog envelope for populated and empty lists", () => {
       const adapter = tc.factory();
       const populated = adapter.buildModelList({
         entries: [

@@ -29,7 +29,7 @@ const bearer = (secret: string): { name: string; value: string } => ({
 });
 
 /** Drain window for every shutdown scenario; the fast request must finish inside it. */
-const DRAIN_MS = 600;
+const DRAIN_MS = 150;
 
 function startCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningCli> {
   return startThreeOriginCli(harness, {
@@ -110,7 +110,7 @@ async function runDrainScenario(signal: "SIGTERM" | "SIGINT"): Promise<void> {
     // The held request is cut off at the drain deadline, not before.
     await assert.rejects(held);
     assert.ok(
-      Date.now() - signalMs >= 400,
+      Date.now() - signalMs >= 90,
       `held request must wait for the drain deadline, aborted after ${Date.now() - signalMs}ms`,
     );
 
@@ -164,7 +164,7 @@ test.concurrent("process: second signal during drain aborts immediately with {dr
     const exit = await waitForExit(cli.child);
     assert.equal(exit.code, 0, `stdout: ${cli.stdout}`);
     assert.ok(
-      Date.now() - secondSignalMs < 400,
+      Date.now() - secondSignalMs < 120,
       `second signal must abort well under the ${DRAIN_MS}ms drain, took ${Date.now() - secondSignalMs}ms`,
     );
     assert.match(cli.stdout, /aptus\.shutdown\.completed/);

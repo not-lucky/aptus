@@ -3,7 +3,7 @@ import { test } from "vitest";
 import type { JsonObject } from "../../src/domain/contracts.ts";
 import { applyNativeMutations } from "../../src/providers/shared/mutation.ts";
 
-test("applyNativeMutations preserves unknown fields and array order and reports ordered pointers", () => {
+test.concurrent("applyNativeMutations preserves unknown fields and array order and reports ordered pointers", () => {
   const clientBody: JsonObject = {
     model: "public-name",
     temperature: 1.5,
@@ -51,7 +51,7 @@ test("applyNativeMutations preserves unknown fields and array order and reports 
   assert.equal(clientBody.temperature, 1.5);
 });
 
-test("applyNativeMutations skips defaults when intermediate segment is a client scalar", () => {
+test.concurrent("applyNativeMutations skips defaults when intermediate segment is a client scalar", () => {
   const clientBody: JsonObject = {
     model: "public-name",
     a: 1,

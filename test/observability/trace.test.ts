@@ -14,7 +14,7 @@ function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-test("file recorder writes manifest, ordered stages, exact bytes, and one terminal", async () => {
+test.concurrent("file recorder writes manifest, ordered stages, exact bytes, and one terminal", async () => {
   const root = tmpRoot("aptus-trace-");
   let failures = 0;
   const recorder = createFileTraceRecorder({
@@ -99,7 +99,7 @@ test("file recorder writes manifest, ordered stages, exact bytes, and one termin
   }
 });
 
-test("file recorder records a non-JSON response as .bin bytes", async () => {
+test.concurrent("file recorder records a non-JSON response as .bin bytes", async () => {
   const root = tmpRoot("aptus-trace-bin-");
   const recorder = createFileTraceRecorder({
     root,
@@ -122,7 +122,7 @@ test("file recorder records a non-JSON response as .bin bytes", async () => {
   assert.deepEqual(new Uint8Array(readFileSync(join(dir, "001_provider_response.bin"))), Uint8Array.from([0, 1, 2]));
 });
 
-test("no-op recorder resolves without creating any directory", async () => {
+test.concurrent("no-op recorder resolves without creating any directory", async () => {
   const root = tmpRoot("aptus-trace-noop-");
   const recorder = createNoopTraceRecorder();
   const session = await recorder.start({
@@ -137,7 +137,7 @@ test("no-op recorder resolves without creating any directory", async () => {
   assert.equal(existsSync(join(root, "2026-08-15T00-00-00.000+0000_req-3")), false);
 });
 
-test("redactor preserves __proto__ as an own property without prototype pollution", () => {
+test.concurrent("redactor preserves __proto__ as an own property without prototype pollution", () => {
   const redactor = createRedactor(new Set(["secret-tok"]));
   const input = JSON.parse('{"__proto__":{"polluted":true,"token":"secret-tok"},"a":1}');
   const output = redactor.redactJson(input) as Record<string, unknown>;

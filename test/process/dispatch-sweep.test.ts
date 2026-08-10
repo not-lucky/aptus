@@ -300,7 +300,7 @@ const SCENARIOS: readonly ScenarioEntry[] = [
   },
 ];
 
-test("process: dispatch-count sweep is internally consistent across every scenario", () => {
+test.concurrent("process: dispatch-count sweep is internally consistent across every scenario", () => {
   // Every descriptor (the exact live test name) appears exactly once.
   const descriptors = SCENARIOS.map((entry) => entry.descriptor);
   assert.equal(new Set(descriptors).size, descriptors.length, "scenario descriptors must be unique");

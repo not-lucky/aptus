@@ -4,7 +4,7 @@ import { createTerminalCoordinator } from "../../src/http/coordinator.ts";
 import { classifyAbortReason } from "../../src/routing/attempt.ts";
 import type { TerminalFact, TraceSession } from "../../src/domain/contracts.ts";
 
-test("classifyAbortReason classifies timeout, shutdown, and client correctly", () => {
+test.concurrent("classifyAbortReason classifies timeout, shutdown, and client correctly", () => {
   const timeoutCtrl = new AbortController();
   timeoutCtrl.abort("timeout");
   assert.equal(classifyAbortReason(timeoutCtrl.signal), "timeout");
@@ -22,7 +22,7 @@ test("classifyAbortReason classifies timeout, shutdown, and client correctly", (
   assert.equal(classifyAbortReason(defaultCtrl.signal), "client");
 });
 
-test("AbortSignal.any preserves the reason of the first aborting signal", () => {
+test.concurrent("AbortSignal.any preserves the reason of the first aborting signal", () => {
   const perRequest = new AbortController();
   const shutdown = new AbortController();
 
@@ -34,7 +34,7 @@ test("AbortSignal.any preserves the reason of the first aborting signal", () => 
   assert.equal(classifyAbortReason(signal), "shutdown");
 });
 
-test("TerminalCoordinator tracks attempt counts and uses them on cancellation", async () => {
+test.concurrent("TerminalCoordinator tracks attempt counts and uses them on cancellation", async () => {
   let completedFact: any = null;
   const mockTrace: TraceSession = {
     recordJson: async () => {},
@@ -91,7 +91,7 @@ test("TerminalCoordinator tracks attempt counts and uses them on cancellation", 
   assert.equal(completedFact?.outcomeCategory, "cancelled");
 });
 
-test("TerminalCoordinator falls back to shutdown_abort when trace.finish rejects on shutdown cancellation", async () => {
+test.concurrent("TerminalCoordinator falls back to shutdown_abort when trace.finish rejects on shutdown cancellation", async () => {
   let finishCalls: any[] = [];
   const mockTrace: TraceSession = {
     recordJson: async () => {},

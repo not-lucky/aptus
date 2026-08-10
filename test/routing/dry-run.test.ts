@@ -127,7 +127,7 @@ function createTestRequest(body: JsonObject): GatewayRequest {
   };
 }
 
-test("dry run returns complete inspection payload with zero network dispatch", async () => {
+test.concurrent("dry run returns complete inspection payload with zero network dispatch", async () => {
   const config = buildDryRunConfig();
   const dispatcher = createFixtureDispatcher();
   const observer = createLifecycleObserver({
@@ -190,7 +190,7 @@ test("dry run returns complete inspection payload with zero network dispatch", a
   assert.equal(body.providerRequest.body.store, false);
 });
 
-test("dry run returns failure when candidate key is unavailable", async () => {
+test.concurrent("dry run returns failure when candidate key is unavailable", async () => {
   const baseConfig = buildDryRunConfig();
   const config: AptusConfig = {
     ...baseConfig,

@@ -14,11 +14,11 @@ const DIRECTIONS = [
   "anthropic-messages->openai-responses",
 ] as const;
 
-test("translation matrix: defines exactly 184 capability rows", () => {
+test.concurrent("translation matrix: defines exactly 184 capability rows", () => {
   assert.equal(MATRIX.length, 184);
 });
 
-test("translation matrix: all rows have unique IDs and all 6 direction tiers defined", () => {
+test.concurrent("translation matrix: all rows have unique IDs and all 6 direction tiers defined", () => {
   const seenIds = new Set<string>();
   for (const row of MATRIX) {
     assert.ok(row.id && row.id.trim().length > 0, "Capability row must have non-empty ID");
@@ -39,7 +39,7 @@ test("translation matrix: all rows have unique IDs and all 6 direction tiers def
   }
 });
 
-test("translation matrix: getCapabilityRow correctly retrieves capability rows by ID", () => {
+test.concurrent("translation matrix: getCapabilityRow correctly retrieves capability rows by ID", () => {
   const plainTextCapabilities = [
     "logical-model-selection",
     "single-text-turn",

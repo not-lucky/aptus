@@ -8,7 +8,7 @@ import { createFileTraceRecorder } from "../../src/observability/trace/file-reco
 
 const encoder = new TextEncoder();
 
-test("openBytes creates .tmp file, appends chunks, and renames atomically on complete", async () => {
+test.concurrent("openBytes creates .tmp file, appends chunks, and renames atomically on complete", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-trace-sink-"));
   const recorder = createFileTraceRecorder({
     root,
@@ -41,7 +41,7 @@ test("openBytes creates .tmp file, appends chunks, and renames atomically on com
   assert.equal(streamContent, 'data: {"id":"1"}\n\ndata: [DONE]\n\n');
 });
 
-test("openBytes unlinks temporary file on discard", async () => {
+test.concurrent("openBytes unlinks temporary file on discard", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-trace-discard-"));
   const recorder = createFileTraceRecorder({
     root,
@@ -74,7 +74,7 @@ test("openBytes unlinks temporary file on discard", async () => {
   assert.ok(!files.some((f) => f.includes(".tmp")));
 });
 
-test("serialized queue preserves strict execution order across interleaved writes", async () => {
+test.concurrent("serialized queue preserves strict execution order across interleaved writes", async () => {
   const root = mkdtempSync(join(tmpdir(), "aptus-trace-fifo-"));
   const recorder = createFileTraceRecorder({
     root,

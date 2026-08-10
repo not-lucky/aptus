@@ -92,7 +92,7 @@ ${tracingBlock}
 
 const MINIMAL_ENV = { APTUS_TEST_SECRET: "minimal-secret" };
 
-test("complete sample loads fully resolved, normalized, and frozen", async () => {
+test.concurrent("complete sample loads fully resolved, normalized, and frozen", async () => {
   const { path, root } = writeComplete();
   const result = await loadConfig(path, FULL_ENV);
   assert(result.ok);
@@ -130,7 +130,7 @@ test("complete sample loads fully resolved, normalized, and frozen", async () =>
   );
 });
 
-test("minimal YAML applies all documented defaults", async () => {
+test.concurrent("minimal YAML applies all documented defaults", async () => {
   const root = join(tmpDir("aptus-minimal-"), "traces");
   const path = writeText(
     minimalYaml(`tracing:
@@ -167,7 +167,7 @@ test("minimal YAML applies all documented defaults", async () => {
   assert.equal(config.dryRun.enabled, false);
 });
 
-test("logging.level warning loads; warn rejects with CONFIG_SCHEMA", async () => {
+test.concurrent("logging.level warning loads; warn rejects with CONFIG_SCHEMA", async () => {
   const okResult = await loadComplete({ "  level: info": "  level: warning" });
   assert(okResult.ok);
   assert.equal(okResult.value.config.logging.level, "warning");
@@ -179,7 +179,7 @@ test("logging.level warning loads; warn rejects with CONFIG_SCHEMA", async () =>
   ]);
 });
 
-test("baseUrl: one trailing slash removed, legal forms unchanged", async () => {
+test.concurrent("baseUrl: one trailing slash removed, legal forms unchanged", async () => {
   const slash = await loadComplete({
     "    baseUrl: https://api.openai.com/v1/": "    baseUrl: https://api.openai.com/v1",
   });
@@ -210,7 +210,7 @@ const URL_CASES: Array<[string, string, string]> = [
 ];
 
 for (const [replacement, code, message] of URL_CASES) {
-  test(`baseUrl: ${code}`, async () => {
+  test.concurrent(`baseUrl: ${code}`, async () => {
     const result = await loadComplete({
       "    baseUrl: https://api.openai.com/v1/": `    baseUrl: ${replacement}`,
     });
@@ -219,7 +219,7 @@ for (const [replacement, code, message] of URL_CASES) {
   });
 }
 
-test("secrets: literal secret value rejects", async () => {
+test.concurrent("secrets: literal secret value rejects", async () => {
   const result = await loadComplete({
     "      secret: ${APTUS_CLIENT_PRIMARY}": "      secret: literal-secret",
   });
@@ -229,7 +229,7 @@ test("secrets: literal secret value rejects", async () => {
   ]);
 });
 
-test("secrets: invalid reference name rejects", async () => {
+test.concurrent("secrets: invalid reference name rejects", async () => {
   const result = await loadComplete({
     "        secret: ${OPENAI_CHAT_KEY_B}": "        secret: ${1BAD}",
   });
@@ -239,7 +239,7 @@ test("secrets: invalid reference name rejects", async () => {
   ]);
 });
 
-test("secrets: unset and empty env values reject with the exact pinned line", async () => {
+test.concurrent("secrets: unset and empty env values reject with the exact pinned line", async () => {
   const unsetEnv = { ...FULL_ENV };
   delete unsetEnv.OPENAI_CHAT_KEY_B;
   const unset = await loadConfig(writeComplete().path, unsetEnv);
@@ -255,7 +255,7 @@ test("secrets: unset and empty env values reject with the exact pinned line", as
   ]);
 });
 
-test("secrets: interpolation in baseUrl matches the exact pinned line", async () => {
+test.concurrent("secrets: interpolation in baseUrl matches the exact pinned line", async () => {
   const result = await loadComplete({
     "    baseUrl: https://api.openai.com/v1/": "    baseUrl: https://api.openai.com:${PORT}/v1/",
   });
@@ -276,7 +276,7 @@ const INTERPOLATION_CASES: Array<[string, string]> = [
 ];
 
 for (const [anchor, replacement] of INTERPOLATION_CASES) {
-  test(`secrets: interpolation inside non-secret string at ${JSON.stringify(anchor)}`, async () => {
+  test.concurrent(`secrets: interpolation inside non-secret string at ${JSON.stringify(anchor)}`, async () => {
     const result = await loadComplete({ [anchor]: replacement });
     assert(!result.ok);
     const interpolationLines = errorLines(result.error).filter((line) =>
@@ -286,7 +286,7 @@ for (const [anchor, replacement] of INTERPOLATION_CASES) {
   });
 }
 
-test("revision: depends on reference names, never on resolved secret values", async () => {
+test.concurrent("revision: depends on reference names, never on resolved secret values", async () => {
   const dir = tmpDir("aptus-revision-");
   const root = join(dir, "traces");
   const basePath = join(dir, "aptus.yaml");
@@ -401,7 +401,7 @@ const CROSS_REFERENCE_CASES: Array<{
 ];
 
 for (const fixture of CROSS_REFERENCE_CASES) {
-  test(`cross-reference: ${fixture.name}`, async () => {
+  test.concurrent(`cross-reference: ${fixture.name}`, async () => {
     const result = await loadComplete(fixture.replacements);
     assert(!result.ok);
     assert.deepEqual(
@@ -428,7 +428,7 @@ const FORBIDDEN_HEADERS = [
 ];
 
 for (const header of FORBIDDEN_HEADERS) {
-  test(`cross-reference: forbidden provider header ${header}`, async () => {
+  test.concurrent(`cross-reference: forbidden provider header ${header}`, async () => {
     const result = await loadComplete({
       "      openai-organization: org_example": `      ${header}: value`,
     });
@@ -439,14 +439,14 @@ for (const header of FORBIDDEN_HEADERS) {
   });
 }
 
-test("cross-reference: same resolved secret in different pools is legal", async () => {
+test.concurrent("cross-reference: same resolved secret in different pools is legal", async () => {
   const result = await loadComplete({
     "        secret: ${OPENAI_RESPONSES_KEY_A}": "        secret: ${OPENAI_CHAT_KEY_A}",
   });
   assert(result.ok);
 });
 
-test("multi-error Zod stage: bogus key plus removed metrics and routing", async () => {
+test.concurrent("multi-error Zod stage: bogus key plus removed metrics and routing", async () => {
   const result = await loadComplete({
     "metrics:\n  enabled: true\n": "",
     "routing:\n  keyPool:\n    failureCooldownMs: [250, 1000]\n    rateLimitFallbackMs: 1000\n    maxRetryAfterMs: 30000\n    jitterRatio: 0.25\n":
@@ -461,7 +461,7 @@ test("multi-error Zod stage: bogus key plus removed metrics and routing", async 
   ]);
 });
 
-test("multi-error secret stage: literal, invalid reference, and missing secret sorted", async () => {
+test.concurrent("multi-error secret stage: literal, invalid reference, and missing secret sorted", async () => {
   const env = { ...FULL_ENV };
   delete env.OPENAI_CHAT_KEY_B;
   const result = await loadComplete(
@@ -479,7 +479,7 @@ test("multi-error secret stage: literal, invalid reference, and missing secret s
   ]);
 });
 
-test("multi-error YAML stage: duplicate key, merge key, alias, non-string key, custom tag", async () => {
+test.concurrent("multi-error YAML stage: duplicate key, merge key, alias, non-string key, custom tag", async () => {
   const path = writeText(`root:
   - &shared
     name: a
@@ -511,7 +511,7 @@ test("multi-error YAML stage: duplicate key, merge key, alias, non-string key, c
   assert.ok(parseLines.length >= 1, lines.join("\n"));
 });
 
-test("YAML violations: document count, parse, merge key, non-string key, custom tag, alias", async () => {
+test.concurrent("YAML violations: document count, parse, merge key, non-string key, custom tag, alias", async () => {
   const twoDocs = await loadConfig(writeText("a: 1\n---\nb: 2\n"), {});
   assert(!twoDocs.ok);
   assert.deepEqual(errorLines(twoDocs.error), [
@@ -562,7 +562,7 @@ test("YAML violations: document count, parse, merge key, non-string key, custom 
   assert.ok(errorLines(alias.error).includes("CONFIG_YAML_ALIAS /other YAML aliases are not allowed"));
 });
 
-test("probe: disabled tracing skips the probe and creates no directory", async () => {
+test.concurrent("probe: disabled tracing skips the probe and creates no directory", async () => {
   const neverRoot = join(tmpDir("aptus-probe-disabled-"), "never");
   const path = writeText(
     minimalYaml(`tracing:
@@ -576,7 +576,7 @@ test("probe: disabled tracing skips the probe and creates no directory", async (
   assert.equal(existsSync(neverRoot), false);
 });
 
-test("probe: root at an existing file rejects with CONFIG_TRACE_PROBE", async () => {
+test.concurrent("probe: root at an existing file rejects with CONFIG_TRACE_PROBE", async () => {
   const blocker = join(tmpDir("aptus-probe-file-"), "blocker");
   writeFileSync(blocker, "occupied\n");
   const result = await loadComplete({ "  root: ./traces": `  root: ${blocker}` });

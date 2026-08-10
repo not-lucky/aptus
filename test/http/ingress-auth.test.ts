@@ -7,7 +7,7 @@ import { admitJsonObject, filterClientHeaders, parseDuplicateFreeJson } from "..
 
 const keys: readonly ClientKeyConfig[] = [{ name: "client", secret: "client-secret" as SecretString }];
 
-test("authenticateClient accepts only the endpoint credential scheme", () => {
+test.concurrent("authenticateClient accepts only the endpoint credential scheme", () => {
   assert.deepEqual(authenticateClient({ authorization: "Bearer client-secret" }, keys, "openai-create"), {
     name: "client",
     kind: "bearer",
@@ -20,7 +20,7 @@ test("authenticateClient accepts only the endpoint credential scheme", () => {
   assert.equal(authenticateClient({ authorization: "Bearer client-secret" }, keys, "messages-create"), undefined);
 });
 
-test("authenticateClient rejects missing malformed combined and repeated credentials", () => {
+test.concurrent("authenticateClient rejects missing malformed combined and repeated credentials", () => {
   assert.equal(authenticateClient({}, keys, "catalog"), undefined);
   assert.equal(authenticateClient({ authorization: "Basic client-secret" }, keys, "catalog"), undefined);
   assert.equal(
@@ -38,7 +38,7 @@ test("authenticateClient rejects missing malformed combined and repeated credent
   );
 });
 
-test("duplicate-aware JSON parser accepts escaped strings and rejects duplicate keys everywhere", () => {
+test.concurrent("duplicate-aware JSON parser accepts escaped strings and rejects duplicate keys everywhere", () => {
   for (const source of ['{"value":"\\\\"}', '{"value":"\\\\\\\\"}', '{"value":"a\\"b"}']) {
     const result = parseDuplicateFreeJson(source);
     assert.equal(result.ok, true, source);
@@ -50,7 +50,7 @@ test("duplicate-aware JSON parser accepts escaped strings and rejects duplicate 
   assert.equal(parseDuplicateFreeJson('{"a":1} {}').ok, false);
 });
 
-test("duplicate-aware JSON parser accepts only JSON whitespace and valid Unicode escapes", () => {
+test.concurrent("duplicate-aware JSON parser accepts only JSON whitespace and valid Unicode escapes", () => {
   assert.equal(parseDuplicateFreeJson('\t\r\n {"value":1} \r\n').ok, true);
   for (const source of ['{"value":1}\v', '{"value":"\\uD800"}', '{"value":"\\uDC00"}', '{"value":"\\uD800\\u0041"}']) {
     assert.equal(parseDuplicateFreeJson(source).ok, false, source);
@@ -74,13 +74,13 @@ test("duplicate-aware JSON parser accepts only JSON whitespace and valid Unicode
   assert.equal(escapedDuplicate.ok, false);
 });
 
-test("forwarding headers survive only for trusted proxy CIDRs", () => {
+test.concurrent("forwarding headers survive only for trusted proxy CIDRs", () => {
   const headers = { "x-forwarded-for": "198.51.100.7", forwarded: "for=198.51.100.7", accept: "application/json" };
   assert.deepEqual(filterClientHeaders(headers, "10.2.3.4", ["10.0.0.0/8"]), headers);
   assert.deepEqual(filterClientHeaders(headers, "192.0.2.4", ["10.0.0.0/8"]), { accept: "application/json" });
 });
 
-test("raw admission enforces JSON content, body size, and root objects", async () => {
+test.concurrent("raw admission enforces JSON content, body size, and root objects", async () => {
   const accepted = await admit({ "content-type": "application/json" }, Buffer.from('{"value":1}'), 32);
   assert.equal(accepted.ok, true);
   const quotedCharset = await admit(
@@ -108,13 +108,13 @@ test("raw admission enforces JSON content, body size, and root objects", async (
   if (!tooLarge.ok) assert.equal(tooLarge.failure.category, "payload_too_large");
 });
 
-test("peer forwarding headers strictly reject IPv6 peers without IPv6 CIDR parsing", () => {
+test.concurrent("peer forwarding headers strictly reject IPv6 peers without IPv6 CIDR parsing", () => {
   const headers = { "x-forwarded-for": "198.51.100.7", forwarded: "for=198.51.100.7", accept: "application/json" };
   assert.deepEqual(filterClientHeaders(headers, "::ffff:10.2.3.4", ["10.0.0.0/8"]), { accept: "application/json" });
   assert.deepEqual(filterClientHeaders(headers, "::1", ["127.0.0.1/32"]), { accept: "application/json" });
 });
 
-test("raw admission rejects invalid UTF-8 and rejects client aborts after readable bytes", async () => {
+test.concurrent("raw admission rejects invalid UTF-8 and rejects client aborts after readable bytes", async () => {
   const invalidUtf8 = await admit({ "content-type": "application/json" }, Buffer.from([0xc3, 0x28]), 32);
   assert.equal(invalidUtf8.ok, false);
 
@@ -127,7 +127,7 @@ test("raw admission rejects invalid UTF-8 and rejects client aborts after readab
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.failure.category, "invalid_request");
 });
-test("raw admission converts stream errors to deterministic invalid requests", async () => {
+test.concurrent("raw admission converts stream errors to deterministic invalid requests", async () => {
   const request = new PassThrough() as PassThrough & { headers: Record<string, string> };
   request.headers = { "content-type": "application/json" };
   const result = admitJsonObject(request as never, 32);

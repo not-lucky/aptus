@@ -46,7 +46,7 @@ function translateRequest(coordinator: TranslationCoordinator, source: Protocol,
   });
 }
 
-test("row logical-model-selection: logical key resolves to target model and never leaks the wire model", () => {
+test.concurrent("row logical-model-selection: logical key resolves to target model and never leaks the wire model", () => {
   const coordinator = createDefaultTranslationCoordinator();
   for (const [source, target] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator, source, target, sourceBodyFor(source));
@@ -58,7 +58,7 @@ test("row logical-model-selection: logical key resolves to target model and neve
   }
 });
 
-test("rows single-text-turn / text-content: one user text turn translates in all six directions", () => {
+test.concurrent("rows single-text-turn / text-content: one user text turn translates in all six directions", () => {
   const coordinator = createDefaultTranslationCoordinator();
   for (const [source, target] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator, source, target, sourceBodyFor(source));
@@ -73,7 +73,7 @@ test("rows single-text-turn / text-content: one user text turn translates in all
   }
 });
 
-test("row multi-turn-text: alternating turns pass through C↔R unchanged and merge into M", () => {
+test.concurrent("row multi-turn-text: alternating turns pass through C↔R unchanged and merge into M", () => {
   const chat = new ChatIngressDecoder();
   const chatBody = {
     model: "m",
@@ -116,7 +116,7 @@ test("row multi-turn-text: alternating turns pass through C↔R unchanged and me
   );
 });
 
-test("row anthropic-turn-merging: adjacency alone never rejects and merging is deterministic", () => {
+test.concurrent("row anthropic-turn-merging: adjacency alone never rejects and merging is deterministic", () => {
   const ir: IrRequest = {
     model: "logical-key",
     delivery: "complete",
@@ -137,7 +137,7 @@ test("row anthropic-turn-merging: adjacency alone never rejects and merging is d
   );
 });
 
-test("row assistant-prefill: final assistant prefill translates in all six directions", () => {
+test.concurrent("row assistant-prefill: final assistant prefill translates in all six directions", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const prefillBodies: Record<Protocol, JsonObject> = {
     "openai-chat": {
@@ -174,7 +174,7 @@ test("row assistant-prefill: final assistant prefill translates in all six direc
   }
 });
 
-test("row system-instruction: system instruction maps to C system, R system item, M system block", () => {
+test.concurrent("row system-instruction: system instruction maps to C system, R system item, M system block", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const chatBody = {
     model: "m",
@@ -203,7 +203,7 @@ test("row system-instruction: system instruction maps to C system, R system item
   }
 });
 
-test("row developer-instruction: C↔R direct; into M collapses advisory; M-origin directions reject", () => {
+test.concurrent("row developer-instruction: C↔R direct; into M collapses advisory; M-origin directions reject", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const chatBody = {
     model: "m",
@@ -250,7 +250,7 @@ test("row developer-instruction: C↔R direct; into M collapses advisory; M-orig
   }
 });
 
-test("row mixed-instruction-authority: C↔R preserves order and authority; into M collapses all-advisory; required rejects", () => {
+test.concurrent("row mixed-instruction-authority: C↔R preserves order and authority; into M collapses all-advisory; required rejects", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const chatBody = {
     model: "m",
@@ -297,7 +297,7 @@ test("row mixed-instruction-authority: C↔R preserves order and authority; into
   }
 });
 
-test("row mid-conversation-instruction: C→R preserves it; every M-bound direction rejects", () => {
+test.concurrent("row mid-conversation-instruction: C→R preserves it; every M-bound direction rejects", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const chatBody = {
     model: "m",
@@ -325,7 +325,7 @@ test("row mid-conversation-instruction: C→R preserves it; every M-bound direct
   }
 });
 
-test("row message-name: Chat message name attribution rejects as unsupported", () => {
+test.concurrent("row message-name: Chat message name attribution rejects as unsupported", () => {
   const decoder = new ChatIngressDecoder();
   const res = decoder.decodeRequest({
     model: "m",
@@ -337,7 +337,7 @@ test("row message-name: Chat message name attribution rejects as unsupported", (
   }
 });
 
-test("row responses-message-phase: Responses phase/status input items reject as unsupported", () => {
+test.concurrent("row responses-message-phase: Responses phase/status input items reject as unsupported", () => {
   const decoder = new ResponsesIngressDecoder();
   const res = decoder.decodeRequest({
     model: "m",
@@ -349,7 +349,7 @@ test("row responses-message-phase: Responses phase/status input items reject as 
   }
 });
 
-test("row multiple-candidates: Chat n>1 rejects before dispatch", () => {
+test.concurrent("row multiple-candidates: Chat n>1 rejects before dispatch", () => {
   const decoder = new ChatIngressDecoder();
   const res = decoder.decodeRequest({
     model: "m",
@@ -362,7 +362,7 @@ test("row multiple-candidates: Chat n>1 rejects before dispatch", () => {
   }
 });
 
-test("rows single-completed-output / response-envelope-synthesis: one synthesized target-native envelope per outcome", () => {
+test.concurrent("rows single-completed-output / response-envelope-synthesis: one synthesized target-native envelope per outcome", () => {
   const chatDecoder = new ChatIngressDecoder();
   const responsesEgress = new ResponsesEgressEncoder();
   const chatOutcome = chatDecoder.decodeOutcome(
@@ -393,7 +393,7 @@ test("rows single-completed-output / response-envelope-synthesis: one synthesize
   }
 });
 
-test("row ordered-output-parts: multi-part outcomes preserve semantic order", () => {
+test.concurrent("row ordered-output-parts: multi-part outcomes preserve semantic order", () => {
   const messagesDecoder = new MessagesIngressDecoder();
   const chatEgress = new ChatEgressEncoder();
   const res = messagesDecoder.decodeOutcome(
@@ -424,7 +424,7 @@ test("row ordered-output-parts: multi-part outcomes preserve semantic order", ()
   }
 });
 
-test("row finish-natural: stop maps to C stop / R completed / M end_turn", () => {
+test.concurrent("row finish-natural: stop maps to C stop / R completed / M end_turn", () => {
   const messagesDecoder = new MessagesIngressDecoder();
   const responsesEgress = new ResponsesEgressEncoder();
   const chatEgress = new ChatEgressEncoder();
@@ -452,7 +452,7 @@ test("row finish-natural: stop maps to C stop / R completed / M end_turn", () =>
   }
 });
 
-test("row finish-length: length maps to C length / R incomplete max_output_tokens / M max_tokens", () => {
+test.concurrent("row finish-length: length maps to C length / R incomplete max_output_tokens / M max_tokens", () => {
   const chatDecoder = new ChatIngressDecoder();
   const responsesEgress = new ResponsesEgressEncoder();
   const messagesEgress = new MessagesEgressEncoder();
@@ -515,7 +515,7 @@ test("row finish-length: length maps to C length / R incomplete max_output_token
   }
 });
 
-test("row usage-input-output-total: totals map directly; M input formula and absent total", () => {
+test.concurrent("row usage-input-output-total: totals map directly; M input formula and absent total", () => {
   const chatDecoder = new ChatIngressDecoder();
   const messagesEgress = new MessagesEgressEncoder();
   const messagesDecoder = new MessagesIngressDecoder();
@@ -571,7 +571,7 @@ test("row usage-input-output-total: totals map directly; M input formula and abs
   }
 });
 
-test("usage-absence: egress omits usage when the IR outcome reports none", () => {
+test.concurrent("usage-absence: egress omits usage when the IR outcome reports none", () => {
   const outcome: IrOutcome = {
     responseId: "resp_1",
     model: "logical-key",
@@ -586,7 +586,7 @@ test("usage-absence: egress omits usage when the IR outcome reports none", () =>
   assert.equal("usage" in messagesBody, false);
 });
 
-test("preflight outcome: non-plain-text outcome discoveries terminate fail-closed with matrix capability IDs", () => {
+test.concurrent("preflight outcome: non-plain-text outcome discoveries terminate fail-closed with matrix capability IDs", () => {
   const base = {
     responseId: "resp_1",
     model: "logical-key",
@@ -619,7 +619,7 @@ test("preflight outcome: non-plain-text outcome discoveries terminate fail-close
   }
 });
 
-test("row semantic-stream-lifecycle: streaming lifecycle translates across all six directions", () => {
+test.concurrent("row semantic-stream-lifecycle: streaming lifecycle translates across all six directions", () => {
   const coordinator = createDefaultTranslationCoordinator();
   for (const [source, target] of ALL_DIRECTIONS) {
     const body = { ...sourceBodyFor(source), stream: true };
@@ -639,7 +639,7 @@ test("row semantic-stream-lifecycle: streaming lifecycle translates across all s
   }
 });
 
-test("row text-stream-delta: text delta frames encode and decode correctly across all codecs", () => {
+test.concurrent("row text-stream-delta: text delta frames encode and decode correctly across all codecs", () => {
   const coordinator = createDefaultTranslationCoordinator();
   for (const [source, target] of ALL_DIRECTIONS) {
     const sessionBundle = coordinator.createStreamSession({
@@ -664,7 +664,7 @@ test("row text-stream-delta: text delta frames encode and decode correctly acros
   }
 });
 
-test("row stream-final-usage: final usage arrives on end chunk or usage block", () => {
+test.concurrent("row stream-final-usage: final usage arrives on end chunk or usage block", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const sessionBundle = coordinator.createStreamSession({
     sourceProtocol: "openai-chat",
@@ -691,7 +691,7 @@ test("row stream-final-usage: final usage arrives on end chunk or usage block", 
   }
 });
 
-test("row sse-named-events: Responses and Messages emit named SSE events", () => {
+test.concurrent("row sse-named-events: Responses and Messages emit named SSE events", () => {
   const coordinator = createDefaultTranslationCoordinator();
 
   const respSession = coordinator.createStreamSession({
@@ -727,7 +727,7 @@ test("row sse-named-events: Responses and Messages emit named SSE events", () =>
   }
 });
 
-test("row chat-done-sentinel: Chat decoder requires [DONE] and encoder emits [DONE]", () => {
+test.concurrent("row chat-done-sentinel: Chat decoder requires [DONE] and encoder emits [DONE]", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const sessionBundle = coordinator.createStreamSession({
     sourceProtocol: "openai-chat",
@@ -748,7 +748,7 @@ test("row chat-done-sentinel: Chat decoder requires [DONE] and encoder emits [DO
   }
 });
 
-test("row responses-sequence-number: Responses encoder generates strictly monotonic sequence numbers", () => {
+test.concurrent("row responses-sequence-number: Responses encoder generates strictly monotonic sequence numbers", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const sessionBundle = coordinator.createStreamSession({
     sourceProtocol: "openai-responses",
@@ -780,7 +780,7 @@ test("row responses-sequence-number: Responses encoder generates strictly monoto
   }
 });
 
-test("row messages-ping: Messages decoder safely consumes ping keepalive frames", () => {
+test.concurrent("row messages-ping: Messages decoder safely consumes ping keepalive frames", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const sessionBundle = coordinator.createStreamSession({
     sourceProtocol: "openai-chat",
@@ -796,7 +796,7 @@ test("row messages-ping: Messages decoder safely consumes ping keepalive frames"
   }
 });
 
-test("row stream-obfuscation: request decoder accepts include_obfuscation and encoder sets false on provider", () => {
+test.concurrent("row stream-obfuscation: request decoder accepts include_obfuscation and encoder sets false on provider", () => {
   const coordinator = createDefaultTranslationCoordinator();
   const res = coordinator.translateStreamRequest({
     sourceProtocol: "openai-chat",

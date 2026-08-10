@@ -52,7 +52,7 @@ async function withOrigin(run: (origin: ChatOrigin) => Promise<void>): Promise<v
   }
 }
 
-test("dispatcher relays a complete response with filtered headers", async () => {
+test.concurrent("dispatcher relays a complete response with filtered headers", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({ status: 200, headers: { "x-request-id": "rid", "set-cookie": "secret=1" }, body: "hello" });
     const response = await dispatcher.dispatch(
@@ -67,7 +67,7 @@ test("dispatcher relays a complete response with filtered headers", async () => 
   });
 });
 
-test("dispatcher follows a same-origin path-only redirect", async () => {
+test.concurrent("dispatcher follows a same-origin path-only redirect", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({ status: 200, body: "final", redirect: { location: "/v1/chat/completions/final", count: 1 } });
     const response = await dispatcher.dispatch(
@@ -81,7 +81,7 @@ test("dispatcher follows a same-origin path-only redirect", async () => {
   });
 });
 
-test("dispatcher rejects a cross-origin redirect", async () => {
+test.concurrent("dispatcher rejects a cross-origin redirect", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({ status: 302, redirect: { location: `http://127.0.0.1:${origin.port + 1}/x`, count: 1 } });
     await assert.rejects(
@@ -91,7 +91,7 @@ test("dispatcher rejects a cross-origin redirect", async () => {
   });
 });
 
-test("dispatcher detects a redirect loop", async () => {
+test.concurrent("dispatcher detects a redirect loop", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({ status: 302, redirect: { location: "/v1/chat/completions", count: 5 } });
     await assert.rejects(
@@ -102,7 +102,7 @@ test("dispatcher detects a redirect loop", async () => {
   });
 });
 
-test("dispatcher rejects an already-expired deadline before dispatch", async () => {
+test.concurrent("dispatcher rejects an already-expired deadline before dispatch", async () => {
   await withOrigin(async (origin) => {
     const signal = new AbortController().signal;
     await assert.rejects(
@@ -113,7 +113,7 @@ test("dispatcher rejects an already-expired deadline before dispatch", async () 
   });
 });
 
-test("dispatcher rejects request on pre-header disconnect", async () => {
+test.concurrent("dispatcher rejects request on pre-header disconnect", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({ status: 200, mode: "pre-header-disconnect" });
     await assert.rejects(
@@ -123,7 +123,7 @@ test("dispatcher rejects request on pre-header disconnect", async () => {
   });
 });
 
-test("dispatcher stream errors on post-header disconnect", async () => {
+test.concurrent("dispatcher stream errors on post-header disconnect", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({
       status: 200,
@@ -146,45 +146,45 @@ test("dispatcher stream errors on post-header disconnect", async () => {
   });
 });
 
-test("stream-idle timer resets on each received chunk", async () => {
+test.concurrent("stream-idle timer resets on each received chunk", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({
       status: 200,
       mode: "sse",
       segments: [
         { bytes: "data: a\n\n", delayMs: 0 },
-        { bytes: "data: b\n\n", delayMs: 60 },
-        { bytes: "data: [DONE]\n\n", delayMs: 60 },
+        { bytes: "data: b\n\n", delayMs: 15 },
+        { bytes: "data: [DONE]\n\n", delayMs: 15 },
       ],
     });
     const response = await dispatcher.dispatch(
-      prepare(`${origin.baseUrl}/chat/completions`, { streamIdleMs: 200 }),
+      prepare(`${origin.baseUrl}/chat/completions`, { streamIdleMs: 50 }),
       new AbortController().signal,
     );
     assert.equal(new TextDecoder().decode(await readAll(response.body)), "data: a\n\ndata: b\n\ndata: [DONE]\n\n");
   });
 });
 
-test("interleaved ping events reset stream-idle timer and keep stream alive", async () => {
+test.concurrent("interleaved ping events reset stream-idle timer and keep stream alive", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({
       status: 200,
       mode: "sse",
       segments: [
         { bytes: 'event: message_start\ndata: {"type":"message_start"}\n\n', delayMs: 0 },
-        { bytes: 'event: ping\ndata: {"type":"ping"}\n\n', delayMs: 120 },
+        { bytes: 'event: ping\ndata: {"type":"ping"}\n\n', delayMs: 25 },
         {
           bytes:
             'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n\n',
-          delayMs: 120,
+          delayMs: 25,
         },
-        { bytes: 'event: message_stop\ndata: {"type":"message_stop"}\n\n', delayMs: 120 },
+        { bytes: 'event: message_stop\ndata: {"type":"message_stop"}\n\n', delayMs: 25 },
       ],
     });
-    // Total duration is 360ms with chunks arriving every 120ms; streamIdleMs is 180ms.
-    // The interleaved ping at 120ms resets idle, allowing the text delta at 240ms to arrive.
+    // Total duration is 75ms with chunks arriving every 25ms; streamIdleMs is 40ms.
+    // The interleaved ping at 25ms resets idle, allowing the text delta at 50ms to arrive.
     const response = await dispatcher.dispatch(
-      prepare(`${origin.baseUrl}/v1/messages`, { streamIdleMs: 180 }),
+      prepare(`${origin.baseUrl}/v1/messages`, { streamIdleMs: 40 }),
       new AbortController().signal,
     );
     const bytes = await readAll(response.body);
@@ -194,18 +194,18 @@ test("interleaved ping events reset stream-idle timer and keep stream alive", as
   });
 });
 
-test("stream-idle expiry errors the stream with idle_timeout", async () => {
+test.concurrent("stream-idle expiry errors the stream with idle_timeout", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({
       status: 200,
       mode: "sse",
       segments: [
         { bytes: "data: first\n\n", delayMs: 0 },
-        { bytes: "data: late\n\n", delayMs: 400 },
+        { bytes: "data: late\n\n", delayMs: 60 },
       ],
     });
     const response = await dispatcher.dispatch(
-      prepare(`${origin.baseUrl}/chat/completions`, { streamIdleMs: 100 }),
+      prepare(`${origin.baseUrl}/chat/completions`, { streamIdleMs: 20 }),
       new AbortController().signal,
     );
     const reader = response.body.getReader();
@@ -215,7 +215,7 @@ test("stream-idle expiry errors the stream with idle_timeout", async () => {
   });
 });
 
-test("abort cancels the provider body and errors the stream", async () => {
+test.concurrent("abort cancels the provider body and errors the stream", async () => {
   await withOrigin(async (origin) => {
     origin.enqueue({ status: 200, mode: "held-open", segments: [{ bytes: "data: start\n\n", delayMs: 0 }] });
     const controller = new AbortController();

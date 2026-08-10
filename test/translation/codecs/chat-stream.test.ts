@@ -15,7 +15,7 @@ const session: StreamSession = {
   createPartId: () => "p_1",
 };
 
-test("chat stream request: decodes and encodes stream options", () => {
+test.concurrent("chat stream request: decodes and encodes stream options", () => {
   const decoder = new ChatStreamRequestDecoder();
   const res = decoder.decodeRequest({
     model: "gpt-main",
@@ -37,7 +37,7 @@ test("chat stream request: decodes and encodes stream options", () => {
   }
 });
 
-test("chat stream decoder: decodes chunks, usage, and [DONE]", () => {
+test.concurrent("chat stream decoder: decodes chunks, usage, and [DONE]", () => {
   const decoder = new ChatProviderStreamDecoder(session);
 
   const chunk1 = {
@@ -100,7 +100,7 @@ test("chat stream decoder: decodes chunks, usage, and [DONE]", () => {
   assert.equal(decoder.finish().ok, true);
 });
 
-test("chat stream encoder: encodes clean frames and usage only when requested", () => {
+test.concurrent("chat stream encoder: encodes clean frames and usage only when requested", () => {
   const encoder = new ChatClientStreamEncoder(session, { includeUsage: true }, () => 1700000000);
 
   const startEvt: IrStreamEvent = { type: "response_start", responseId: "resp_123", model: "gpt-main" };

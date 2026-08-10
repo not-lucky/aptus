@@ -13,7 +13,7 @@ const PRICING: PricingConfig = {
   cacheWriteUsdPerMillionTokens: "3.75",
 };
 
-test("extractCompleteUsage extracts raw usage and normalized usage across OpenAI and Anthropic", () => {
+test.concurrent("extractCompleteUsage extracts raw usage and normalized usage across OpenAI and Anthropic", () => {
   // 1. OpenAI Chat
   const chatBody = {
     id: "chat-1",
@@ -82,7 +82,7 @@ test("extractCompleteUsage extracts raw usage and normalized usage across OpenAI
   assert.deepEqual(extractCompleteUsage("openai-chat", { usage: null as any }), {});
 });
 
-test("createStreamUsageCollector accumulates chunk usage and validates framing", () => {
+test.concurrent("createStreamUsageCollector accumulates chunk usage and validates framing", () => {
   // 1. OpenAI Chat SSE stream
   const openAiCollector = createStreamUsageCollector("openai-chat");
   openAiCollector.feed(encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'));
@@ -145,7 +145,7 @@ test("createStreamUsageCollector accumulates chunk usage and validates framing",
   assert.equal(incompleteResult.hasValidTerminal, false);
 });
 
-test("estimateCostUsd computes exact decimal cost from normalized Usage", () => {
+test.concurrent("estimateCostUsd computes exact decimal cost from normalized Usage", () => {
   const usage = {
     input: 1_000_000,
     output: 500_000,
@@ -163,7 +163,7 @@ test("estimateCostUsd computes exact decimal cost from normalized Usage", () => 
   assert.equal(cost, "8.125");
 });
 
-test("extractCompleteUsage extracts OpenAI Responses usage with cache detail", () => {
+test.concurrent("extractCompleteUsage extracts OpenAI Responses usage with cache detail", () => {
   const responsesBody = {
     id: "resp-1",
     usage: {
@@ -185,7 +185,7 @@ test("extractCompleteUsage extracts OpenAI Responses usage with cache detail", (
   });
 });
 
-test("createStreamUsageCollector captures Responses usage from response.completed", () => {
+test.concurrent("createStreamUsageCollector captures Responses usage from response.completed", () => {
   const collector = createStreamUsageCollector("openai-responses");
   collector.feed(
     encoder.encode(
@@ -205,7 +205,7 @@ test("createStreamUsageCollector captures Responses usage from response.complete
   });
 });
 
-test("oversized or deeply nested raw usage is omitted and suppresses cost", () => {
+test.concurrent("oversized or deeply nested raw usage is omitted and suppresses cost", () => {
   // Exceeds the 16 KiB byte bound.
   const oversized = {
     prompt_tokens: 10,

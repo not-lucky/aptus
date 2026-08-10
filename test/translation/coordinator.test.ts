@@ -12,7 +12,7 @@ const DIRECTIONS: ReadonlyArray<readonly [Protocol, Protocol]> = [
   ["anthropic-messages", "openai-responses"],
 ];
 
-test("translation coordinator: translates requests and outcomes across all six directions", () => {
+test.concurrent("translation coordinator: translates requests and outcomes across all six directions", () => {
   const coordinator = createDefaultTranslationCoordinator();
 
   for (const [sourceProtocol, targetProtocol] of DIRECTIONS) {
@@ -118,7 +118,7 @@ test("translation coordinator: translates requests and outcomes across all six d
   }
 });
 
-test("translation coordinator: fails closed when Anthropic target is missing max_tokens default configuration", () => {
+test.concurrent("translation coordinator: fails closed when Anthropic target is missing max_tokens default configuration", () => {
   const coordinator = createDefaultTranslationCoordinator();
 
   const reqResult = coordinator.translateCompleteRequest({
