@@ -77,7 +77,10 @@ export interface ProviderOrigin {
    * substitute for `headDelayMs` when the test must complete the request at a
    * chosen moment (e.g. after a shutdown signal lands).
    */
-  enqueueDeferred(response: { readonly status: number; readonly headers?: Record<string, string> }): DeferredResponseHandle;
+  enqueueDeferred(response: {
+    readonly status: number;
+    readonly headers?: Record<string, string>;
+  }): DeferredResponseHandle;
   /** Number of requests received so far. */
   dispatchCount(): number;
   /** All recorded requests in arrival order. */
@@ -225,7 +228,7 @@ async function serveResponse(
   }
 
   res.writeHead(item.status, headers);
-  const segments = item.segments ?? [];
+  const segments = item.segments ?? (item.body !== undefined ? [{ bytes: item.body }] : []);
   for (const segment of segments) {
     if (segment.delayMs !== undefined && segment.delayMs > 0) {
       await delay(segment.delayMs);

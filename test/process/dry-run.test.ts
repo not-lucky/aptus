@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
 import { MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
-import { createChatOrigin, type ChatOrigin } from "../helpers/chat-origin.ts";
+import { type ChatOrigin, createChatOrigin } from "../helpers/chat-origin.ts";
 import {
   postJson,
   type RunningInProcessAptus,
@@ -90,13 +90,16 @@ test.concurrent("process: dry run with stream:true returns vendor JSON and zero 
 
     // The accepted-request counter records `complete` with the dry-run `stream: false`,
     // while the in-flight gauge balances the admitted `stream: true` increment.
-    const metrics = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
-    const text = await metrics.text();
-    assert.match(
-      text,
-      /aptus_http_requests_total\{endpoint_protocol="openai-chat",endpoint="chat_completions",outcome_category="complete",stream="false"\} 1/,
-    );
-    assert.match(text, /aptus_in_flight_requests\{endpoint_protocol="openai-chat",stream="true"\} 0/);
+    let text = "";
+    await waitFor(async () => {
+      const metrics = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
+      text = await metrics.text();
+      return (
+        /aptus_http_requests_total\{endpoint_protocol="openai-chat",endpoint="chat_completions",outcome_category="complete",stream="false"\} 1/.test(
+          text,
+        ) && /aptus_in_flight_requests\{endpoint_protocol="openai-chat",stream="true"\} 0/.test(text)
+      );
+    }, "dry run metrics");
   } finally {
     await origin.close();
     await cli.stop();

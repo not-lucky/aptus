@@ -26,7 +26,7 @@ const HOP_BY_HOP: ReadonlySet<string> = new Set([
  *
  * This mirrors the outbound policy in `src/providers/shared/headers.ts` but is
  * intentionally duplicated here: the translation layer depends only on Domain
- * and protocol codec contracts (docs/architecture.md) and must not import
+ * and protocol codec contracts and must not import
  * provider modules.
  */
 const OUTBOUND_REMOVE: ReadonlySet<string> = new Set([
@@ -115,7 +115,7 @@ export function prepareTranslatedProviderRequest(input: PrepareTranslatedRequest
     url,
     headers,
     body: bodyBytes,
-    stream: false,
+    stream: input.stream ?? false,
     mutations: ["/model"],
     deadlineMs: input.deadlineMs,
     streamIdleMs: input.streamIdleMs,

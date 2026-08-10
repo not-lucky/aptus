@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
-import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST, SSE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
+import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
 import {
   postJson,
   type RunningInProcessAptus,
@@ -11,7 +11,7 @@ import {
   waitFor,
 } from "../helpers/cli-process.ts";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
-import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST, SSE_RESPONSES_BYTES } from "../helpers/responses-fixtures.ts";
+import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
 
 const ENV_NAMES = [
@@ -158,35 +158,49 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
   const env = seededEnv("skips");
   const cli = await startCli(harness, "skips");
   try {
-    // 1. Ingress streaming Chat request targeting multi-protocol-route [claude-main (M), gpt-main (C), responses-main (R)]
-    // Should skip candidate 0 (claude-main) with zero dispatch due to unsupported stream translation,
+    // 1. Ingress Chat request with tools targeting multi-protocol-route [claude-main (M), gpt-main (C), responses-main (R)]
+    // Should skip candidate 0 (claude-main) with zero dispatch due to unsupported tool translation in plain-text,
     // then match and dispatch candidate 1 (gpt-main) natively
-    harness.chatOrigin.enqueue({ status: 200, body: SSE_CHAT_BYTES });
+    harness.chatOrigin.enqueue({ status: 200, body: COMPLETE_CHAT_BYTES });
 
     const chatResponse = await postJson(
       cli.clientPort,
       "/chat/completions",
       { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
-      JSON.stringify({ ...MINIMAL_CHAT_REQUEST, stream: true, model: "multi-protocol-route" }),
+      JSON.stringify({
+        ...MINIMAL_CHAT_REQUEST,
+        model: "multi-protocol-route",
+        tools: [{ type: "function", function: { name: "get_weather" } }],
+      }),
     );
     assert.equal(chatResponse.status, 200);
-    assert.deepEqual(new Uint8Array(await chatResponse.arrayBuffer()), SSE_CHAT_BYTES);
+    assert.deepEqual(new Uint8Array(await chatResponse.arrayBuffer()), COMPLETE_CHAT_BYTES);
 
     assert.equal(harness.chatOrigin.dispatchCount(), 1, "chatOrigin should have 1 request");
     assert.equal(harness.messagesOrigin.dispatchCount(), 0, "messagesOrigin should have 0 requests");
     assert.equal(harness.responsesOrigin.dispatchCount(), 0, "responsesOrigin should have 0 requests");
 
     // The Chat trace records the candidate_skip stage for candidate 0 (claude-main).
+    await waitFor(
+      () =>
+        traceDirectories(cli.traceRoot).some((dir) =>
+          readdirSync(join(cli.traceRoot, dir)).some((f) => f.includes("candidate_skip")),
+        ),
+      "candidate skip trace write",
+    );
     const chatTraceDir = traceDirectories(cli.traceRoot).find(
       (dir) => traceSourceProtocol(cli.traceRoot, dir) === "openai-chat",
     );
     assert.ok(chatTraceDir, "chat trace directory not found");
-    assert.deepEqual(JSON.parse(readFileSync(join(cli.traceRoot, chatTraceDir, "004_candidate_skip.json"), "utf8")), {
+    const chatStageFiles = readdirSync(join(cli.traceRoot, chatTraceDir));
+    const skipFile = chatStageFiles.find((f) => f.includes("candidate_skip"));
+    assert.ok(skipFile, "candidate_skip file should exist");
+    assert.deepEqual(JSON.parse(readFileSync(join(cli.traceRoot, chatTraceDir, skipFile), "utf8")), {
       candidateIndex: 0,
       provider: "anthropic-primary",
       targetProtocol: "anthropic-messages",
       category: "unsupported_capability",
-      capability: "semantic-stream-lifecycle",
+      capability: "function-tool-definition",
     });
 
     // 2. Ingress Messages request targeting multi-protocol-route
@@ -206,18 +220,22 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
     assert.equal(harness.messagesOrigin.dispatchCount(), 1, "messagesOrigin should now have 1 request");
     assert.equal(harness.responsesOrigin.dispatchCount(), 0, "responsesOrigin should still have 0 requests");
 
-    // 3. Ingress streaming Responses request targeting multi-protocol-route
-    // Should skip candidate 0 (claude-main) and candidate 1 (gpt-main) with zero dispatch due to unsupported stream translation, then match candidate 2 (responses-main) natively
-    harness.responsesOrigin.enqueue({ status: 200, body: SSE_RESPONSES_BYTES });
+    // 3. Ingress Responses request with tools targeting multi-protocol-route
+    // Should skip candidate 0 (claude-main) and candidate 1 (gpt-main) with zero dispatch due to unsupported tool translation, then match candidate 2 (responses-main) natively
+    harness.responsesOrigin.enqueue({ status: 200, body: COMPLETE_RESPONSES_BYTES });
 
     const responsesResponse = await postJson(
       cli.clientPort,
       "/responses",
       { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
-      JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, stream: true, model: "multi-protocol-route" }),
+      JSON.stringify({
+        ...MINIMAL_RESPONSES_REQUEST,
+        model: "multi-protocol-route",
+        tools: [{ type: "function", name: "get_weather" }],
+      }),
     );
     assert.equal(responsesResponse.status, 200);
-    assert.deepEqual(new Uint8Array(await responsesResponse.arrayBuffer()), SSE_RESPONSES_BYTES);
+    assert.deepEqual(new Uint8Array(await responsesResponse.arrayBuffer()), COMPLETE_RESPONSES_BYTES);
 
     assert.equal(harness.chatOrigin.dispatchCount(), 1, "chatOrigin should still have 1 request");
     assert.equal(harness.messagesOrigin.dispatchCount(), 1, "messagesOrigin should still have 1 request");
@@ -226,18 +244,15 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
     // Verify metrics on operations port carry per-protocol labels for skips, attempts, and ingress.
     // Accepted-request counters are recorded after HTTP delivery, so poll until they appear.
     let metricsText = "";
-    await waitFor(
-      async () => {
-        const metricsRes = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
-        metricsText = await metricsRes.text();
-        return (
-          /aptus_http_requests_total\{[^}]*endpoint_protocol="openai-chat"[^}]*\}/.test(metricsText) &&
-          /aptus_http_requests_total\{[^}]*endpoint_protocol="openai-responses"[^}]*\}/.test(metricsText) &&
-          /aptus_http_requests_total\{[^}]*endpoint_protocol="anthropic-messages"[^}]*\}/.test(metricsText)
-        );
-      },
-      "protocol metrics",
-    );
+    await waitFor(async () => {
+      const metricsRes = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
+      metricsText = await metricsRes.text();
+      return (
+        /aptus_http_requests_total\{[^}]*endpoint_protocol="openai-chat"[^}]*\}/.test(metricsText) &&
+        /aptus_http_requests_total\{[^}]*endpoint_protocol="openai-responses"[^}]*\}/.test(metricsText) &&
+        /aptus_http_requests_total\{[^}]*endpoint_protocol="anthropic-messages"[^}]*\}/.test(metricsText)
+      );
+    }, "protocol metrics");
 
     // Candidate skips: Chat skipped the Messages candidate; Responses skipped Messages and Chat.
     // Label order follows the counter's labelNames declaration (endpoint_protocol, target_protocol, provider, public_name, outcome_category).

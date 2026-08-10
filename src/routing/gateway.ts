@@ -1,5 +1,6 @@
 import type { AptusConfig, ModelConfig, RouteConfig } from "../config/types.ts";
 import type {
+  AttemptObservation,
   DryRunProviderRequest,
   DryRunResult,
   Gateway,
@@ -17,7 +18,6 @@ import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import { createRedactor, type Redactor } from "../observability/trace/redaction.ts";
 import type { TranslationCoordinator } from "../translation/contracts.ts";
-import { unsupportedCapabilityFailure as translationUnsupportedCapability } from "../translation/failures.ts";
 import { type AttemptContext, classifyAbortReason, executeAttempt } from "./attempt.ts";
 import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
 import {
@@ -42,6 +42,7 @@ import {
   systemSleeper,
 } from "./timing.ts";
 import { executeTranslatedAttempt, executeTranslatedDryRun } from "./translated-attempt.ts";
+import { executeTranslatedStreamAttempt } from "./translated-stream-attempt.ts";
 
 /**
  * Construction options for the Gateway composition seam.
@@ -299,13 +300,6 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       if (deps.translation === undefined) {
         return { kind: "blocked", failure: unsupportedCapabilityFailure(candidate.provider.protocol), terminal: false };
       }
-      if (request.stream) {
-        return {
-          kind: "blocked",
-          failure: translationUnsupportedCapability("semantic-stream-lifecycle"),
-          terminal: true,
-        };
-      }
       return { kind: "proceed", translation: deps.translation };
     };
 
@@ -499,6 +493,85 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       },
     };
 
+    const handleCancellation = async (
+      stream: boolean,
+      targetProtocol?: Protocol,
+      provider?: string,
+    ): Promise<GatewayResult> => {
+      const durationMs = clock.nowMonotonicMs() - started;
+      const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
+      await request.coordinator.finalize({
+        terminal: { kind: "cancelled", by },
+        outcomeCategory: "cancelled",
+        status: 499,
+        attempts: attemptNumber,
+        stream,
+        durationMs,
+        targetProtocol,
+        provider,
+        canonicalPublicName: request.canonicalPublicName,
+      });
+      return { kind: "cancelled", by };
+    };
+
+    const handleResponseFailure = async (
+      candidate: CandidateDescriptor,
+      candidateIndex: number,
+      candidateAttemptCount: number,
+      response: { body: { cancel(): Promise<unknown> } },
+      observation: AttemptObservation,
+      attemptNumber: number,
+      cooldownMs?: number,
+    ): Promise<
+      | "retry"
+      | { readonly kind: "fallback"; readonly failure: NormalizedFailure }
+      | { readonly kind: "terminal"; readonly failure: NormalizedFailure }
+    > => {
+      const category = observation.result as IrFailureCategory;
+      const canRetry = shouldRetry({
+        status: observation.status,
+        category,
+        beforeClientBytes: observation.beforeClientBytes,
+        candidateAttemptCount,
+        retryOn: candidate.retryOn,
+      });
+
+      if (canRetry) {
+        await response.body.cancel().catch(() => undefined);
+        const delayMs = cooldownMs ?? 0;
+        await request.trace.recordJson("retry", {
+          attemptNumber,
+          provider: candidate.provider.name,
+          category,
+          delayMs,
+        });
+        deps.observer.retryScheduled({
+          aptusRequestId,
+          attemptNumber,
+          provider: candidate.provider.name,
+          targetProtocol: candidate.provider.protocol,
+          category,
+          delayMs,
+        });
+        deps.observer.observe({
+          type: "retry_scheduled",
+          aptusRequestId,
+          attemptNumber,
+          delayMs,
+          category,
+        });
+        return "retry";
+      }
+
+      const failure = failureFromObservation(observation);
+      if (await tryFallback(candidate, candidateIndex, category)) {
+        await response.body.cancel().catch(() => undefined);
+        return { kind: "fallback", failure };
+      }
+      await response.body.cancel().catch(() => undefined);
+      return { kind: "terminal", failure };
+    };
+
     candidateLoop: for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
       const candidate = candidates[candidateIndex];
       if (candidate === undefined) continue; // Protocol preflight check / Translation branch
@@ -519,102 +592,108 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
 
         let candidateAttemptCount = 0;
 
-        while (true) {
-          const outcome = await executeTranslatedAttempt(candidate, request, attemptContext, translation);
+        if (request.stream) {
+          while (true) {
+            const outcome = await executeTranslatedStreamAttempt(candidate, request, attemptContext, translation);
 
-          if (outcome.kind === "cancelled") {
-            const durationMs = clock.nowMonotonicMs() - started;
-            const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
-            await request.coordinator.finalize({
-              terminal: { kind: "cancelled", by },
-              outcomeCategory: "cancelled",
-              status: 499,
-              attempts: attemptNumber,
-              stream: request.stream,
-              durationMs,
-              targetProtocol: candidate.provider.protocol,
-              provider: candidate.provider.name,
-              canonicalPublicName: request.canonicalPublicName,
-            });
-            return { kind: "cancelled", by };
-          }
-          if (outcome.kind === "deadline_exceeded") {
-            return terminalFailure(timeoutFailure(), candidate);
-          }
-          if (outcome.kind === "prepare_failed") {
-            if (outcome.failure.category === "unsupported_capability") {
-              await emitCandidateSkip(candidate, outcome.failure);
-              lastCandidateFailure = outcome.failure;
-              continue candidateLoop;
+            if (outcome.kind === "cancelled") {
+              return handleCancellation(true, candidate.provider.protocol, candidate.provider.name);
             }
-            // A request-level translation failure (e.g. malformed payload) is
-            // not a candidate incompatibility: no other candidate can serve it.
-            return terminalFailure(outcome.failure, candidate);
-          }
-          if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
-            const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
-            lastCandidateFailure = failure;
-            if (await tryFallback(candidate, candidateIndex, failure.category)) {
-              continue candidateLoop;
+            if (outcome.kind === "deadline_exceeded") {
+              return terminalFailure(timeoutFailure(), candidate);
             }
-            return terminalFailure(failure, candidate);
-          }
-
-          if (outcome.kind === "response") {
-            candidateAttemptCount++;
-            const { response, observation, cooldownMs } = outcome;
-            const category = observation.result as IrFailureCategory;
-            const canRetry = shouldRetry({
-              status: observation.status,
-              category,
-              beforeClientBytes: observation.beforeClientBytes,
-              candidateAttemptCount,
-              retryOn: candidate.retryOn,
-            });
-
-            if (canRetry) {
-              await response.body.cancel().catch(() => undefined);
-              const delayMs = cooldownMs ?? 0;
-              await request.trace.recordJson("retry", {
-                attemptNumber: outcome.attemptNumber,
-                provider: candidate.provider.name,
-                category,
-                delayMs,
-              });
-              deps.observer.retryScheduled({
-                aptusRequestId,
-                attemptNumber: outcome.attemptNumber,
-                provider: candidate.provider.name,
-                targetProtocol: candidate.provider.protocol,
-                category,
-                delayMs,
-              });
-              deps.observer.observe({
-                type: "retry_scheduled",
-                aptusRequestId,
-                attemptNumber: outcome.attemptNumber,
-                delayMs,
-                category,
-              });
-              continue;
+            if (outcome.kind === "prepare_failed") {
+              if (outcome.failure.category === "unsupported_capability") {
+                await emitCandidateSkip(candidate, outcome.failure);
+                lastCandidateFailure = outcome.failure;
+                continue candidateLoop;
+              }
+              return terminalFailure(outcome.failure, candidate);
+            }
+            if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
+              const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
+              lastCandidateFailure = failure;
+              if (await tryFallback(candidate, candidateIndex, failure.category)) {
+                continue candidateLoop;
+              }
+              return terminalFailure(failure, candidate);
             }
 
-            lastCandidateFailure = failureFromObservation(observation);
-            if (await tryFallback(candidate, candidateIndex, category)) {
-              await response.body.cancel().catch(() => undefined);
-              continue candidateLoop;
+            if (outcome.kind === "response") {
+              candidateAttemptCount++;
+              const decision = await handleResponseFailure(
+                candidate,
+                candidateIndex,
+                candidateAttemptCount,
+                outcome.response,
+                outcome.observation,
+                outcome.attemptNumber,
+                outcome.cooldownMs,
+              );
+              if (decision === "retry") continue;
+              lastCandidateFailure = decision.failure;
+              if (decision.kind === "fallback") continue candidateLoop;
+              return terminalFailure(decision.failure, candidate);
             }
-            await response.body.cancel().catch(() => undefined);
-            return terminalFailure(lastCandidateFailure, candidate);
-          }
 
-          if (outcome.kind === "translated_response") {
-            return relayTranslatedComplete(
-              outcome.response,
-              outcome.body,
-              outcome.outcome,
-              relayContextFor(candidate, outcome.attemptNumber),
-            );
+            if (outcome.kind === "stream_ready") {
+              return outcome.result;
+            }
+          }
+        } else {
+          while (true) {
+            const outcome = await executeTranslatedAttempt(candidate, request, attemptContext, translation);
+
+            if (outcome.kind === "cancelled") {
+              return handleCancellation(false, candidate.provider.protocol, candidate.provider.name);
+            }
+            if (outcome.kind === "deadline_exceeded") {
+              return terminalFailure(timeoutFailure(), candidate);
+            }
+            if (outcome.kind === "prepare_failed") {
+              if (outcome.failure.category === "unsupported_capability") {
+                await emitCandidateSkip(candidate, outcome.failure);
+                lastCandidateFailure = outcome.failure;
+                continue candidateLoop;
+              }
+              // A request-level translation failure (e.g. malformed payload) is
+              // not a candidate incompatibility: no other candidate can serve it.
+              return terminalFailure(outcome.failure, candidate);
+            }
+            if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
+              const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
+              lastCandidateFailure = failure;
+              if (await tryFallback(candidate, candidateIndex, failure.category)) {
+                continue candidateLoop;
+              }
+              return terminalFailure(failure, candidate);
+            }
+
+            if (outcome.kind === "response") {
+              candidateAttemptCount++;
+              const decision = await handleResponseFailure(
+                candidate,
+                candidateIndex,
+                candidateAttemptCount,
+                outcome.response,
+                outcome.observation,
+                outcome.attemptNumber,
+                outcome.cooldownMs,
+              );
+              if (decision === "retry") continue;
+              lastCandidateFailure = decision.failure;
+              if (decision.kind === "fallback") continue candidateLoop;
+              return terminalFailure(decision.failure, candidate);
+            }
+
+            if (outcome.kind === "translated_response") {
+              return relayTranslatedComplete(
+                outcome.response,
+                outcome.body,
+                outcome.outcome,
+                relayContextFor(candidate, outcome.attemptNumber),
+              );
+            }
           }
         }
       }
@@ -631,18 +710,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         const outcome = await executeAttempt(candidate, request, attemptContext);
 
         if (outcome.kind === "cancelled") {
-          const durationMs = clock.nowMonotonicMs() - started;
-          const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
-          await request.coordinator.finalize({
-            terminal: { kind: "cancelled", by },
-            outcomeCategory: "cancelled",
-            status: 499,
-            attempts: attemptNumber,
-            stream: request.stream,
-            durationMs,
-            canonicalPublicName: request.canonicalPublicName,
-          });
-          return { kind: "cancelled", by };
+          return handleCancellation(request.stream, candidate.provider.protocol, candidate.provider.name);
         }
         if (outcome.kind === "deadline_exceeded") {
           return terminalFailure(timeoutFailure(), candidate);
@@ -701,7 +769,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
               delayMs,
               category,
             });
-            continue; // Retry with key rotation
+            continue;
           }
 
           lastCandidateFailure = failureFromObservation(observation);

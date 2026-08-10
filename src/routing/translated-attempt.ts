@@ -391,14 +391,23 @@ export async function executeTranslatedDryRun(
   redactor: Redactor,
 ): Promise<TranslatedDryRunOutcome> {
   const targetDefaultMaxTokens = candidate.model.defaults?.max_tokens;
-  const translated = translation.translateCompleteRequest({
-    sourceProtocol: request.protocol,
-    targetProtocol: candidate.provider.protocol,
-    sourceBody: request.body,
-    logicalModel: request.canonicalPublicName,
-    targetModel: candidate.model.upstreamModel,
-    targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
-  });
+  const translated = request.stream
+    ? translation.translateStreamRequest({
+        sourceProtocol: request.protocol,
+        targetProtocol: candidate.provider.protocol,
+        sourceBody: request.body,
+        logicalModel: request.canonicalPublicName,
+        targetModel: candidate.model.upstreamModel,
+        targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
+      })
+    : translation.translateCompleteRequest({
+        sourceProtocol: request.protocol,
+        targetProtocol: candidate.provider.protocol,
+        sourceBody: request.body,
+        logicalModel: request.canonicalPublicName,
+        targetModel: candidate.model.upstreamModel,
+        targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
+      });
 
   if (!translated.ok) {
     await request.trace.recordJson("ir_request", {
@@ -436,6 +445,7 @@ export async function executeTranslatedDryRun(
     body: translated.value.body,
     deadlineMs: ctx.deadlineMs,
     streamIdleMs: ctx.streamIdleMs,
+    stream: request.stream,
   });
 
   const redactedHeaders = redactor.redactHeaders(prepared.headers);

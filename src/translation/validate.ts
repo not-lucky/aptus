@@ -317,7 +317,7 @@ function validateOutputPart(part: IrOutputPart, index: number): Result<void, Nor
   };
 }
 
-function validateUsage(usage: IrUsage): Result<void, NormalizedFailure> {
+export function validateUsage(usage: IrUsage): Result<void, NormalizedFailure> {
   if (!isNonNegativeSafeInteger(usage.input)) {
     return {
       ok: false,

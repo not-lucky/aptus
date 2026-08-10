@@ -5,26 +5,9 @@ import { unsupportedCapabilityFailure } from "./failures.ts";
 import type { IrOutcome, IrRequest } from "./ir.ts";
 
 /**
- * Evaluates semantic capability feasibility for an admitted {@link IrRequest}
- * given the specific translation direction.
- *
- * Only plain-text complete requests are admitted. Any non-plain-text
- * features or unsupported direction-specific transcript structures fail closed
- * with their exact matrix capability ID before any provider dispatch occurs.
- *
- * @param req - Validated semantic IR request.
- * @param direction - Directed protocol conversion path.
- * @returns Ok if eligible for translation; otherwise fail-closed normalized failure.
+ * Shared preflight checks for plain-text request subset across complete and stream deliveries.
  */
-export function preflightRequest(req: IrRequest, direction: Direction): Result<void, NormalizedFailure> {
-  // Gated delivery mode
-  if (req.delivery !== "complete") {
-    return {
-      ok: false,
-      error: unsupportedCapabilityFailure("semantic-stream-lifecycle"),
-    };
-  }
-
+function preflightPlainTextRequestFeatures(req: IrRequest, direction: Direction): Result<void, NormalizedFailure> {
   // Gated tool controls
   if (req.tools !== undefined && req.tools.length > 0) {
     return {
@@ -157,6 +140,53 @@ export function preflightRequest(req: IrRequest, direction: Direction): Result<v
   }
 
   return { ok: true, value: undefined };
+}
+
+/**
+ * Evaluates semantic capability feasibility for an admitted complete {@link IrRequest}
+ * given the specific translation direction.
+ *
+ * Only plain-text complete requests are admitted. Any non-plain-text
+ * features or unsupported direction-specific transcript structures fail closed
+ * with their exact matrix capability ID before any provider dispatch occurs.
+ *
+ * @param req - Validated semantic IR request.
+ * @param direction - Directed protocol conversion path.
+ * @returns Ok if eligible for translation; otherwise fail-closed normalized failure.
+ */
+export function preflightRequest(req: IrRequest, direction: Direction): Result<void, NormalizedFailure> {
+  // Gated delivery mode
+  if (req.delivery !== "complete") {
+    return {
+      ok: false,
+      error: unsupportedCapabilityFailure("semantic-stream-lifecycle"),
+    };
+  }
+
+  return preflightPlainTextRequestFeatures(req, direction);
+}
+
+/**
+ * Evaluates semantic capability feasibility for an admitted streaming {@link IrRequest}
+ * given the specific translation direction.
+ *
+ * Only plain-text streaming requests are admitted. Any non-plain-text
+ * features or unsupported direction-specific transcript structures fail closed
+ * with their exact matrix capability ID before any provider dispatch occurs.
+ *
+ * @param req - Validated semantic IR request.
+ * @param direction - Directed protocol conversion path.
+ * @returns Ok if eligible for translation; otherwise fail-closed normalized failure.
+ */
+export function preflightStreamRequest(req: IrRequest, direction: Direction): Result<void, NormalizedFailure> {
+  if (req.delivery !== "stream") {
+    return {
+      ok: false,
+      error: unsupportedCapabilityFailure("semantic-stream-lifecycle"),
+    };
+  }
+
+  return preflightPlainTextRequestFeatures(req, direction);
 }
 
 /**

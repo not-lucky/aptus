@@ -3,12 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
 import { COMPLETE_CHAT_BYTES, MINIMAL_CHAT_REQUEST } from "../helpers/chat-fixtures.ts";
-import {
-  postJson,
-  type RunningInProcessAptus,
-  seededSecrets,
-  startAptusInProcess,
-} from "../helpers/cli-process.ts";
+import { postJson, type RunningInProcessAptus, seededSecrets, startAptusInProcess } from "../helpers/cli-process.ts";
 import { COMPLETE_MESSAGES_BYTES, MINIMAL_MESSAGES_REQUEST } from "../helpers/messages-fixtures.ts";
 import { COMPLETE_RESPONSES_BYTES, MINIMAL_RESPONSES_REQUEST } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
@@ -112,10 +107,7 @@ ${ROUTE_CATALOG}
 ${ROUTE_CATALOG}
 `;
 
-function startTranslationCli(
-  harness: ThreeOriginHarness,
-  caseName: string,
-): Promise<RunningInProcessAptus> {
+function startTranslationCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningInProcessAptus> {
   return startAptusInProcess({
     casePrefix: "aptus-trans",
     caseName,
@@ -142,9 +134,7 @@ function traceDirectories(traceRoot: string): string[] {
 const RESPONSES_TEXT = "Once upon a time in a starlit glade, a tiny unicorn learned to gallop across rainbows.";
 
 /** Parses the exact body bytes the given origin last received. */
-function parsedTargetBody(origin: {
-  lastRequest(): { readonly body: Uint8Array } | undefined;
-}): unknown {
+function parsedTargetBody(origin: { lastRequest(): { readonly body: Uint8Array } | undefined }): unknown {
   const request = origin.lastRequest();
   assert.ok(request, "origin should have received one translated request");
   return JSON.parse(new TextDecoder().decode(request.body));
@@ -242,7 +232,9 @@ test.concurrent("process: plain-text complete translation succeeds in all six di
     assert.equal(rToMRes.status, 200);
     assert.deepEqual(parsedTargetBody(harness.messagesOrigin), {
       model: "claude-opus-4-1",
-      messages: [{ role: "user", content: [{ type: "text", text: "Tell me a three sentence bedtime story about a unicorn." }] }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Tell me a three sentence bedtime story about a unicorn." }] },
+      ],
       stream: false,
       max_tokens: 4096,
     });

@@ -1,6 +1,7 @@
 import type { HeaderMap, JsonObject, PreparedProviderRequest, Protocol, Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { IrOutcome, IrRequest } from "./ir.ts";
+import type { IrOutcome, IrRequest, IrStreamEvent } from "./ir.ts";
+import type { SseFrame } from "./sse.ts";
 
 /**
  * Six directed cross-protocol translation paths.
@@ -53,15 +54,79 @@ export interface EgressEncoder {
 }
 
 /**
+ * Wire-level options discovered on a stream request that are outside the private IR.
+ */
+export interface StreamWireOptions {
+  readonly includeUsage?: boolean;
+}
+
+/**
+ * Decodes a streaming create request into an {@link IrRequest} and wire options.
+ */
+export interface StreamRequestDecoder {
+  decodeRequest(
+    body: JsonObject,
+  ): Result<{ readonly irRequest: IrRequest; readonly sourceWireOptions: StreamWireOptions }, NormalizedFailure>;
+}
+
+/**
+ * Encodes a semantic {@link IrRequest} and resolved wire options into target provider JSON with stream: true.
+ */
+export interface StreamRequestEncoder {
+  encodeRequest(request: IrRequest, targetModel: string, wireOptions: StreamWireOptions): JsonObject;
+}
+
+/**
+ * Decodes one provider protocol stream into semantic IR events.
+ */
+export interface ProviderStreamDecoder {
+  /** Provider Protocol accepted by this decoder. */
+  readonly protocol: Protocol;
+  /** Accepts one strict SSE frame. */
+  push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure>;
+  /** Validates EOF and protocol terminal state. */
+  finish(): Result<readonly IrStreamEvent[], NormalizedFailure>;
+}
+
+/**
+ * Encodes semantic IR events as one client protocol stream.
+ */
+export interface ClientStreamEncoder {
+  /** Client Protocol emitted by this encoder. */
+  readonly protocol: Protocol;
+  /** Encodes one ordered semantic event into target SSE frames. */
+  encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure>;
+  /** Emits only the protocol codec's legal final framing. */
+  finish(): Result<readonly SseFrame[], NormalizedFailure>;
+}
+
+/**
+ * Stream session metadata identifying the opaque response ID and logical model.
+ */
+export interface StreamSession {
+  readonly responseId: string;
+  readonly model: string;
+  readonly createPartId: () => string;
+}
+
+/**
  * Codec registry mapping every supported protocol to its decoder and encoder implementations.
  */
 export interface TranslationCodecs {
   readonly ingress: Readonly<Record<Protocol, IngressDecoder>>;
   readonly egress: Readonly<Record<Protocol, EgressEncoder>>;
+  readonly streamRequestDecoders: Readonly<Record<Protocol, StreamRequestDecoder>>;
+  readonly streamRequestEncoders: Readonly<Record<Protocol, StreamRequestEncoder>>;
+  readonly createProviderStreamDecoder: (protocol: Protocol, session: StreamSession) => ProviderStreamDecoder;
+  readonly createClientStreamEncoder: (
+    protocol: Protocol,
+    session: StreamSession,
+    wireOptions: StreamWireOptions,
+  ) => ClientStreamEncoder;
 }
 
 /**
- * Input arguments for translating an admitted cross-protocol request.
+ * Input arguments for translating an admitted cross-protocol complete request.
  */
 export interface TranslateCompleteInput {
   readonly sourceProtocol: Protocol;
@@ -73,11 +138,32 @@ export interface TranslateCompleteInput {
 }
 
 /**
- * Result of request translation containing target provider body and the private IR request.
+ * Result of complete request translation containing target provider body and the private IR request.
  */
 export interface TranslateCompleteRequestResult {
   readonly body: JsonObject;
   readonly irRequest: IrRequest;
+}
+
+/**
+ * Input arguments for translating an admitted cross-protocol stream request.
+ */
+export interface TranslateStreamRequestInput {
+  readonly sourceProtocol: Protocol;
+  readonly targetProtocol: Protocol;
+  readonly sourceBody: JsonObject;
+  readonly logicalModel: string;
+  readonly targetModel: string;
+  readonly targetDefaultMaxTokens?: number;
+}
+
+/**
+ * Result of stream request translation containing target provider body, IR request, and source wire options.
+ */
+export interface TranslateStreamRequestResult {
+  readonly body: JsonObject;
+  readonly irRequest: IrRequest;
+  readonly sourceWireOptions: StreamWireOptions;
 }
 
 /**
@@ -116,16 +202,40 @@ export interface PrepareTranslatedRequestInput {
   readonly body: JsonObject;
   readonly deadlineMs: number;
   readonly streamIdleMs: number;
+  readonly stream?: boolean;
+}
+
+/**
+ * Input arguments for creating a streaming translation session.
+ */
+export interface CreateStreamSessionInput {
+  readonly sourceProtocol: Protocol;
+  readonly targetProtocol: Protocol;
+  readonly logicalModel: string;
+  readonly responseId?: string;
+  readonly createPartId?: () => string;
+  readonly sourceWireOptions?: StreamWireOptions;
+}
+
+/**
+ * Stream session bundle containing session metadata and instantiated stream codecs.
+ */
+export interface StreamSessionBundle {
+  readonly session: StreamSession;
+  readonly providerDecoder: ProviderStreamDecoder;
+  readonly clientEncoder: ClientStreamEncoder;
 }
 
 /**
  * Bundled translation coordinator providing request translation, outcome translation,
- * and outbound provider request preparation.
+ * streaming session management, and outbound provider request preparation.
  */
 export interface TranslationCoordinator {
   translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure>;
   translateCompleteOutcome(
     input: TranslateCompleteOutcomeInput,
   ): Result<TranslateCompleteOutcomeResult, NormalizedFailure>;
+  translateStreamRequest(input: TranslateStreamRequestInput): Result<TranslateStreamRequestResult, NormalizedFailure>;
+  createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle;
   prepareTranslatedProviderRequest(input: PrepareTranslatedRequestInput): PreparedProviderRequest;
 }

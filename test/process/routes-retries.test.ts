@@ -222,7 +222,16 @@ test.concurrent("process: protocol-mismatch-only route returns 400 with zero ori
       "    candidates: [gpt-main, claude-main]": "    candidates: [claude-main]",
     });
     try {
-      const res = await chatRequest(cli.clientPort, caseName, "reliable-chat", true);
+      const res = await postJson(
+        cli.clientPort,
+        "/v1/chat/completions",
+        { name: "authorization", value: `Bearer ${seededEnv(caseName).APTUS_CLIENT_PRIMARY}` },
+        JSON.stringify({
+          ...MINIMAL_CHAT_REQUEST,
+          model: "reliable-chat",
+          tools: [{ type: "function", function: { name: "get_weather" } }],
+        }),
+      );
       assert.equal(res.status, 400);
       const body = (await res.json()) as { error?: { type?: string } };
       assert.equal(body.error?.type, "invalid_request_error");

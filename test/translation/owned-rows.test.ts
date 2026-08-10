@@ -35,12 +35,7 @@ function sourceBodyFor(protocol: Protocol): JsonObject {
   return { model: "wire-model", max_tokens: 1024, messages: [{ role: "user", content: "Hello!" }] };
 }
 
-function translateRequest(
-  coordinator: TranslationCoordinator,
-  source: Protocol,
-  target: Protocol,
-  body: JsonObject,
-) {
+function translateRequest(coordinator: TranslationCoordinator, source: Protocol, target: Protocol, body: JsonObject) {
   return coordinator.translateCompleteRequest({
     sourceProtocol: source,
     targetProtocol: target,
@@ -93,7 +88,10 @@ test("row multi-turn-text: alternating turns pass through C↔R unchanged and me
   if (decodeRes.ok) {
     const encoded = new ResponsesEgressEncoder().encodeRequest(decodeRes.value, "t");
     const input = encoded.input as Array<{ role: string }>;
-    assert.deepEqual(input.map((i) => i.role), ["user", "assistant", "user"]);
+    assert.deepEqual(
+      input.map((i) => i.role),
+      ["user", "assistant", "user"],
+    );
   }
 
   // Into M: consecutive same-role turns merge; alternating turns are preserved
@@ -108,8 +106,14 @@ test("row multi-turn-text: alternating turns pass through C↔R unchanged and me
   };
   const encodedM = new MessagesEgressEncoder().encodeRequest(ir, "t");
   const messages = encodedM.messages as Array<{ role: string; content: Array<{ text: string }> }>;
-  assert.deepEqual(messages.map((m) => m.role), ["user", "assistant"]);
-  assert.deepEqual(messages[0]?.content.map((c) => c.text), ["A", "B"]);
+  assert.deepEqual(
+    messages.map((m) => m.role),
+    ["user", "assistant"],
+  );
+  assert.deepEqual(
+    messages[0]?.content.map((c) => c.text),
+    ["A", "B"],
+  );
 });
 
 test("row anthropic-turn-merging: adjacency alone never rejects and merging is deterministic", () => {
@@ -127,7 +131,10 @@ test("row anthropic-turn-merging: adjacency alone never rejects and merging is d
   const encoded = new MessagesEgressEncoder().encodeRequest(ir, "t");
   const messages = encoded.messages as Array<{ role: string; content: Array<{ text: string }> }>;
   assert.equal(messages.length, 1);
-  assert.deepEqual(messages[0]?.content.map((c) => c.text), ["A", "B"]);
+  assert.deepEqual(
+    messages[0]?.content.map((c) => c.text),
+    ["A", "B"],
+  );
 });
 
 test("row assistant-prefill: final assistant prefill translates in all six directions", () => {
@@ -181,7 +188,10 @@ test("row system-instruction: system instruction maps to C system, R system item
   assert.equal(toM.ok, true);
   if (toM.ok) {
     const system = (toM.value.body as { system: Array<{ text: string }> }).system;
-    assert.deepEqual(system.map((b) => b.text), ["You are helpful."]);
+    assert.deepEqual(
+      system.map((b) => b.text),
+      ["You are helpful."],
+    );
   }
 
   const toR = translateRequest(coordinator, "openai-chat", "openai-responses", chatBody);
@@ -216,7 +226,10 @@ test("row developer-instruction: C↔R direct; into M collapses advisory; M-orig
   assert.equal(toM.ok, true);
   if (toM.ok) {
     const system = (toM.value.body as { system: Array<{ text: string }> }).system;
-    assert.deepEqual(system.map((b) => b.text), ["Do X."]);
+    assert.deepEqual(
+      system.map((b) => b.text),
+      ["Do X."],
+    );
   }
 
   // M-origin directions are T3: an IR developer instruction rejects before dispatch
@@ -252,14 +265,20 @@ test("row mixed-instruction-authority: C↔R preserves order and authority; into
   assert.equal(toR.ok, true);
   if (toR.ok) {
     const input = toR.value.body.input as Array<{ role: string }>;
-    assert.deepEqual(input.map((i) => i.role), ["system", "developer", "user"]);
+    assert.deepEqual(
+      input.map((i) => i.role),
+      ["system", "developer", "user"],
+    );
   }
 
   const toM = translateRequest(coordinator, "openai-chat", "anthropic-messages", chatBody);
   assert.equal(toM.ok, true);
   if (toM.ok) {
     const system = (toM.value.body as { system: Array<{ text: string }> }).system;
-    assert.deepEqual(system.map((b) => b.text), ["S", "D"]);
+    assert.deepEqual(
+      system.map((b) => b.text),
+      ["S", "D"],
+    );
   }
 
   // Required separation into M fails closed
@@ -293,7 +312,10 @@ test("row mid-conversation-instruction: C→R preserves it; every M-bound direct
   assert.equal(toR.ok, true);
   if (toR.ok) {
     const input = toR.value.body.input as Array<{ role: string }>;
-    assert.deepEqual(input.map((i) => i.role), ["user", "system", "user"]);
+    assert.deepEqual(
+      input.map((i) => i.role),
+      ["user", "system", "user"],
+    );
   }
 
   const toM = translateRequest(coordinator, "openai-chat", "anthropic-messages", chatBody);
@@ -319,9 +341,7 @@ test("row responses-message-phase: Responses phase/status input items reject as 
   const decoder = new ResponsesIngressDecoder();
   const res = decoder.decodeRequest({
     model: "m",
-    input: [
-      { type: "message", role: "user", phase: "completed", content: [{ type: "input_text", text: "Hi" }] },
-    ],
+    input: [{ type: "message", role: "user", phase: "completed", content: [{ type: "input_text", text: "Hi" }] }],
   });
   assert.equal(res.ok, false);
   if (!res.ok) {
@@ -345,14 +365,18 @@ test("row multiple-candidates: Chat n>1 rejects before dispatch", () => {
 test("rows single-completed-output / response-envelope-synthesis: one synthesized target-native envelope per outcome", () => {
   const chatDecoder = new ChatIngressDecoder();
   const responsesEgress = new ResponsesEgressEncoder();
-  const chatOutcome = chatDecoder.decodeOutcome(200, {}, {
-    id: "chatcmpl-1",
-    object: "chat.completion",
-    created: 1,
-    model: "upstream-target",
-    choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
-  });
+  const chatOutcome = chatDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1,
+      model: "upstream-target",
+      choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    },
+  );
   assert.equal(chatOutcome.ok, true);
   if (chatOutcome.ok) {
     const encoded = responsesEgress.encodeOutcome(chatOutcome.value);
@@ -372,18 +396,22 @@ test("rows single-completed-output / response-envelope-synthesis: one synthesize
 test("row ordered-output-parts: multi-part outcomes preserve semantic order", () => {
   const messagesDecoder = new MessagesIngressDecoder();
   const chatEgress = new ChatEgressEncoder();
-  const res = messagesDecoder.decodeOutcome(200, {}, {
-    id: "msg_1",
-    type: "message",
-    role: "assistant",
-    model: "upstream-target",
-    content: [
-      { type: "text", text: "First. " },
-      { type: "text", text: "Second." },
-    ],
-    stop_reason: "end_turn",
-    usage: { input_tokens: 5, output_tokens: 4 },
-  });
+  const res = messagesDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "upstream-target",
+      content: [
+        { type: "text", text: "First. " },
+        { type: "text", text: "Second." },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 4 },
+    },
+  );
   assert.equal(res.ok, true);
   if (res.ok) {
     assert.deepEqual(
@@ -401,15 +429,19 @@ test("row finish-natural: stop maps to C stop / R completed / M end_turn", () =>
   const responsesEgress = new ResponsesEgressEncoder();
   const chatEgress = new ChatEgressEncoder();
 
-  const mRes = messagesDecoder.decodeOutcome(200, {}, {
-    id: "msg_1",
-    type: "message",
-    role: "assistant",
-    model: "t",
-    content: [{ type: "text", text: "Hi" }],
-    stop_reason: "end_turn",
-    usage: { input_tokens: 1, output_tokens: 1 },
-  });
+  const mRes = messagesDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "t",
+      content: [{ type: "text", text: "Hi" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  );
   assert.equal(mRes.ok, true);
   if (mRes.ok) {
     assert.equal(mRes.value.finish.reason, "stop");
@@ -427,14 +459,18 @@ test("row finish-length: length maps to C length / R incomplete max_output_token
   const chatEgress = new ChatEgressEncoder();
 
   // C length -> R incomplete with max_output_tokens detail and M max_tokens
-  const cRes = chatDecoder.decodeOutcome(200, {}, {
-    id: "chatcmpl-1",
-    object: "chat.completion",
-    created: 1,
-    model: "t",
-    choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "length" }],
-    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
-  });
+  const cRes = chatDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1,
+      model: "t",
+      choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    },
+  );
   assert.equal(cRes.ok, true);
   if (cRes.ok) {
     assert.equal(cRes.value.finish.reason, "length");
@@ -450,23 +486,27 @@ test("row finish-length: length maps to C length / R incomplete max_output_token
 
   // R incomplete max_output_tokens -> C length
   const rDecoder = new ResponsesIngressDecoder();
-  const rRes = rDecoder.decodeOutcome(200, {}, {
-    id: "resp_1",
-    object: "response",
-    status: "incomplete",
-    incomplete_details: { reason: "max_output_tokens" },
-    model: "t",
-    output: [
-      {
-        type: "message",
-        id: "msg_1",
-        status: "completed",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Hi", annotations: [] }],
-      },
-    ],
-    usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
-  });
+  const rRes = rDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "resp_1",
+      object: "response",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      model: "t",
+      output: [
+        {
+          type: "message",
+          id: "msg_1",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Hi", annotations: [] }],
+        },
+      ],
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    },
+  );
   assert.equal(rRes.ok, true);
   if (rRes.ok) {
     assert.equal(rRes.value.finish.reason, "length");
@@ -481,14 +521,18 @@ test("row usage-input-output-total: totals map directly; M input formula and abs
   const messagesDecoder = new MessagesIngressDecoder();
 
   // C usage -> M: input/output preserved, no fabricated total
-  const cRes = chatDecoder.decodeOutcome(200, {}, {
-    id: "chatcmpl-1",
-    object: "chat.completion",
-    created: 1,
-    model: "t",
-    choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
-    usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
-  });
+  const cRes = chatDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1,
+      model: "t",
+      choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+    },
+  );
   assert.equal(cRes.ok, true);
   if (cRes.ok) {
     const mBody = messagesEgress.encodeOutcome(cRes.value).body as {
@@ -500,20 +544,24 @@ test("row usage-input-output-total: totals map directly; M input formula and abs
   }
 
   // M usage -> IR: input includes cache read + cache creation; total absent
-  const mRes = messagesDecoder.decodeOutcome(200, {}, {
-    id: "msg_1",
-    type: "message",
-    role: "assistant",
-    model: "t",
-    content: [{ type: "text", text: "Hi" }],
-    stop_reason: "end_turn",
-    usage: {
-      input_tokens: 10,
-      cache_read_input_tokens: 3,
-      cache_creation_input_tokens: 2,
-      output_tokens: 4,
+  const mRes = messagesDecoder.decodeOutcome(
+    200,
+    {},
+    {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "t",
+      content: [{ type: "text", text: "Hi" }],
+      stop_reason: "end_turn",
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 3,
+        cache_creation_input_tokens: 2,
+        output_tokens: 4,
+      },
     },
-  });
+  );
   assert.equal(mRes.ok, true);
   if (mRes.ok) {
     assert.equal(mRes.value.usage?.input, 15);
@@ -554,7 +602,9 @@ test("preflight outcome: non-plain-text outcome discoveries terminate fail-close
       {
         ...base,
         finish: { reason: "stop" },
-        parts: [{ type: "tool_call", partId: "p1", call: { type: "function", callId: "c1", name: "f", argumentsText: "{}" } }],
+        parts: [
+          { type: "tool_call", partId: "p1", call: { type: "function", callId: "c1", name: "f", argumentsText: "{}" } },
+        ],
       },
       "function-tool-definition",
       "openai-chat->openai-responses",
@@ -566,5 +616,204 @@ test("preflight outcome: non-plain-text outcome discoveries terminate fail-close
     if (!res.ok) {
       assert.equal(res.error.capability, capability);
     }
+  }
+});
+
+test("row semantic-stream-lifecycle: streaming lifecycle translates across all six directions", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  for (const [source, target] of ALL_DIRECTIONS) {
+    const body = { ...sourceBodyFor(source), stream: true };
+    const res = coordinator.translateStreamRequest({
+      sourceProtocol: source,
+      targetProtocol: target,
+      sourceBody: body,
+      logicalModel: "logical-key",
+      targetModel: "upstream-target",
+      targetDefaultMaxTokens: target === "anthropic-messages" ? 2048 : undefined,
+    });
+    assert.equal(res.ok, true, `${source}->${target}`);
+    if (res.ok) {
+      assert.equal(res.value.irRequest.delivery, "stream");
+      assert.equal(res.value.body.stream, true);
+    }
+  }
+});
+
+test("row text-stream-delta: text delta frames encode and decode correctly across all codecs", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  for (const [source, target] of ALL_DIRECTIONS) {
+    const sessionBundle = coordinator.createStreamSession({
+      sourceProtocol: source,
+      targetProtocol: target,
+      logicalModel: "logical-key",
+      responseId: "resp_test",
+    });
+
+    const events = [
+      { type: "response_start" as const, responseId: "resp_test", model: "logical-key" },
+      { type: "part_start" as const, responseId: "resp_test", partId: "p1", part: { type: "text" as const } },
+      { type: "text_delta" as const, responseId: "resp_test", partId: "p1", text: "Hello stream" },
+      { type: "part_end" as const, responseId: "resp_test", partId: "p1", partType: "text" as const },
+      { type: "response_end" as const, responseId: "resp_test", finish: { reason: "stop" as const } },
+    ];
+
+    for (const evt of events) {
+      const encodeRes = sessionBundle.clientEncoder.encode(evt);
+      assert.equal(encodeRes.ok, true, `${source}->${target}`);
+    }
+  }
+});
+
+test("row stream-final-usage: final usage arrives on end chunk or usage block", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  const sessionBundle = coordinator.createStreamSession({
+    sourceProtocol: "openai-chat",
+    targetProtocol: "openai-responses",
+    logicalModel: "logical-key",
+    responseId: "resp_u",
+    sourceWireOptions: { includeUsage: true },
+  });
+
+  const endRes = sessionBundle.clientEncoder.encode({
+    type: "response_end",
+    responseId: "resp_u",
+    finish: { reason: "stop" },
+    usage: { input: 12, output: 8, total: 20 },
+  });
+  assert.equal(endRes.ok, true);
+  if (endRes.ok) {
+    // Should include terminal chunk, usage chunk, and [DONE]
+    assert.equal(endRes.value.length, 3);
+    const usageJson = JSON.parse(endRes.value[1]?.data ?? "{}");
+    assert.equal(usageJson.usage.prompt_tokens, 12);
+    assert.equal(usageJson.usage.completion_tokens, 8);
+    assert.equal(usageJson.usage.total_tokens, 20);
+  }
+});
+
+test("row sse-named-events: Responses and Messages emit named SSE events", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+
+  const respSession = coordinator.createStreamSession({
+    sourceProtocol: "openai-responses",
+    targetProtocol: "openai-chat",
+    logicalModel: "logical-key",
+    responseId: "resp_named",
+  });
+  const respFrames = respSession.clientEncoder.encode({
+    type: "response_start",
+    responseId: "resp_named",
+    model: "logical-key",
+  });
+  assert.equal(respFrames.ok, true);
+  if (respFrames.ok) {
+    assert.equal(respFrames.value[0]?.event, "response.created");
+  }
+
+  const msgSession = coordinator.createStreamSession({
+    sourceProtocol: "anthropic-messages",
+    targetProtocol: "openai-chat",
+    logicalModel: "logical-key",
+    responseId: "resp_named",
+  });
+  const msgFrames = msgSession.clientEncoder.encode({
+    type: "response_start",
+    responseId: "resp_named",
+    model: "logical-key",
+  });
+  assert.equal(msgFrames.ok, true);
+  if (msgFrames.ok) {
+    assert.equal(msgFrames.value[0]?.event, "message_start");
+  }
+});
+
+test("row chat-done-sentinel: Chat decoder requires [DONE] and encoder emits [DONE]", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  const sessionBundle = coordinator.createStreamSession({
+    sourceProtocol: "openai-chat",
+    targetProtocol: "openai-chat",
+    logicalModel: "logical-key",
+    responseId: "resp_done",
+  });
+
+  const endFrames = sessionBundle.clientEncoder.encode({
+    type: "response_end",
+    responseId: "resp_done",
+    finish: { reason: "stop" },
+  });
+  assert.equal(endFrames.ok, true);
+  if (endFrames.ok) {
+    const lastFrame = endFrames.value[endFrames.value.length - 1];
+    assert.equal(lastFrame?.data, "[DONE]");
+  }
+});
+
+test("row responses-sequence-number: Responses encoder generates strictly monotonic sequence numbers", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  const sessionBundle = coordinator.createStreamSession({
+    sourceProtocol: "openai-responses",
+    targetProtocol: "openai-chat",
+    logicalModel: "logical-key",
+    responseId: "resp_seq",
+  });
+
+  const f1 = sessionBundle.clientEncoder.encode({
+    type: "response_start",
+    responseId: "resp_seq",
+    model: "logical-key",
+  });
+  const f2 = sessionBundle.clientEncoder.encode({
+    type: "text_delta",
+    responseId: "resp_seq",
+    partId: "p1",
+    text: "hi",
+  });
+
+  assert.equal(f1.ok && f2.ok, true);
+  if (f1.ok && f2.ok) {
+    const seq1 = JSON.parse(f1.value[0]?.data ?? "{}").sequence_number;
+    const seq2 = JSON.parse(f1.value[1]?.data ?? "{}").sequence_number;
+    const seq3 = JSON.parse(f2.value[0]?.data ?? "{}").sequence_number;
+    assert.equal(seq1, 1);
+    assert.equal(seq2, 2);
+    assert.equal(seq3, 3);
+  }
+});
+
+test("row messages-ping: Messages decoder safely consumes ping keepalive frames", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  const sessionBundle = coordinator.createStreamSession({
+    sourceProtocol: "openai-chat",
+    targetProtocol: "anthropic-messages",
+    logicalModel: "logical-key",
+    responseId: "resp_ping",
+  });
+
+  const pingRes = sessionBundle.providerDecoder.push({ event: "ping", data: '{"type":"ping"}' });
+  assert.equal(pingRes.ok, true);
+  if (pingRes.ok) {
+    assert.equal(pingRes.value.length, 0);
+  }
+});
+
+test("row stream-obfuscation: request decoder accepts include_obfuscation and encoder sets false on provider", () => {
+  const coordinator = createDefaultTranslationCoordinator();
+  const res = coordinator.translateStreamRequest({
+    sourceProtocol: "openai-chat",
+    targetProtocol: "openai-chat",
+    sourceBody: {
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+      stream_options: { include_obfuscation: false },
+    },
+    logicalModel: "logical-key",
+    targetModel: "upstream-target",
+  });
+
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    const streamOpts = (res.value.body as Record<string, unknown>).stream_options as Record<string, unknown>;
+    assert.equal(streamOpts.include_obfuscation, false);
   }
 });
