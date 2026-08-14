@@ -28,8 +28,13 @@ const bearer = (secret: string): { name: string; value: string } => ({
   value: `Bearer ${secret}`,
 });
 
-/** Drain window for every shutdown scenario; the fast request must finish inside it. */
-const DRAIN_MS = 150;
+/**
+ * Drain window for every shutdown scenario; the fast request must finish
+ * inside it. Sized so the during-drain health checks plus the fast request's
+ * release and completion fit even under heavy suite parallelism; the held
+ * request asserts it waits for most of this window before the deadline abort.
+ */
+const DRAIN_MS = 1500;
 
 function startCli(harness: ThreeOriginHarness, caseName: string): Promise<RunningCli> {
   return startThreeOriginCli(harness, {
@@ -81,8 +86,10 @@ async function runDrainScenario(signal: "SIGTERM" | "SIGINT"): Promise<void> {
     harness.chatOrigin.enqueue({ status: 200, mode: "held-open" });
 
     const fast = chatRequest(cli, env.APTUS_CLIENT_PRIMARY);
+    fast.catch(() => {}); // keep an early scenario abort from leaking an unhandled rejection
     await waitFor(() => harness.chatOrigin.dispatchCount() === 1, "fast request dispatched", cli.child);
     const held = chatRequest(cli, env.APTUS_CLIENT_PRIMARY);
+    held.catch(() => {}); // kept asserted below via assert.rejects
     await waitFor(() => harness.chatOrigin.dispatchCount() === 2, "held request dispatched", cli.child);
 
     const signalMs = Date.now();
@@ -110,7 +117,7 @@ async function runDrainScenario(signal: "SIGTERM" | "SIGINT"): Promise<void> {
     // The held request is cut off at the drain deadline, not before.
     await assert.rejects(held);
     assert.ok(
-      Date.now() - signalMs >= 90,
+      Date.now() - signalMs >= Math.floor(DRAIN_MS * 0.6),
       `held request must wait for the drain deadline, aborted after ${Date.now() - signalMs}ms`,
     );
 
@@ -151,6 +158,7 @@ test.concurrent("process: second signal during drain aborts immediately with {dr
     harness.chatOrigin.enqueue({ status: 200, mode: "held-open" });
 
     const held = chatRequest(cli, env.APTUS_CLIENT_PRIMARY);
+    held.catch(() => {}); // kept asserted below via assert.rejects
     await waitFor(() => harness.chatOrigin.dispatchCount() === 1, "held request dispatched", cli.child);
 
     // First signal starts the drain.
@@ -164,7 +172,7 @@ test.concurrent("process: second signal during drain aborts immediately with {dr
     const exit = await waitForExit(cli.child);
     assert.equal(exit.code, 0, `stdout: ${cli.stdout}`);
     assert.ok(
-      Date.now() - secondSignalMs < 120,
+      Date.now() - secondSignalMs < Math.floor(DRAIN_MS / 3),
       `second signal must abort well under the ${DRAIN_MS}ms drain, took ${Date.now() - secondSignalMs}ms`,
     );
     assert.match(cli.stdout, /aptus\.shutdown\.completed/);

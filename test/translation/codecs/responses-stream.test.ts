@@ -33,6 +33,20 @@ test.concurrent("responses stream request: decodes and encodes stream requests",
   }
 });
 
+test.concurrent("responses stream request: text null fails invalid_request on the shared request parser", () => {
+  // The stream request decoder shares the complete-path request parser, so the
+  // documented-non-nullable `text` wrapper rejects explicit null identically.
+  const decoder = new ResponsesStreamRequestDecoder();
+  const res = decoder.decodeRequest({
+    model: "responses-main",
+    input: "hello",
+    stream: true,
+    text: null,
+  });
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.equal(res.error.capability, undefined);
+});
+
 test.concurrent("responses stream decoder: enforces event matching and sequence_number ordering", () => {
   const decoder = new ResponsesProviderStreamDecoder(session);
 
@@ -146,5 +160,55 @@ test.concurrent("responses stream encoder: regenerates monotonic sequence_number
     assert.equal(json.sequence_number, lastSeq + 1);
     lastSeq = json.sequence_number;
     assert.equal(frame.event, json.type);
+  }
+});
+
+test.concurrent("responses stream encoder: emits detailed usage subdivisions on response.completed", () => {
+  const encoder = new ResponsesClientStreamEncoder(session);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "responses-main" });
+
+  const endEvt: IrStreamEvent = {
+    type: "response_end",
+    responseId: "resp_123",
+    finish: { reason: "stop" },
+    usage: { input: 10, output: 4, cacheReadInput: 3, cacheWriteInput: 2, reasoningOutput: 5 },
+  };
+  const f = encoder.encode(endEvt);
+  assert.equal(f.ok, true);
+  if (f.ok) {
+    assert.equal(f.value[0]?.event, "response.completed");
+    const completedJson = JSON.parse(f.value[0]?.data ?? "{}");
+    assert.deepEqual(completedJson.response.usage, {
+      input_tokens: 10,
+      output_tokens: 4,
+      input_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 },
+      output_tokens_details: { reasoning_tokens: 5 },
+    });
+  }
+});
+
+test.concurrent("responses stream encoder: pins the length-finish terminal as response.incomplete with max_output_tokens", () => {
+  const encoder = new ResponsesClientStreamEncoder(session);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "responses-main" });
+
+  const endEvt: IrStreamEvent = {
+    type: "response_end",
+    responseId: "resp_123",
+    finish: { reason: "length" },
+    usage: { input: 10, output: 4, cacheReadInput: 3, cacheWriteInput: 2, reasoningOutput: 5 },
+  };
+  const f = encoder.encode(endEvt);
+  assert.equal(f.ok, true);
+  if (f.ok) {
+    assert.equal(f.value[0]?.event, "response.incomplete");
+    const incompleteJson = JSON.parse(f.value[0]?.data ?? "{}");
+    assert.equal(incompleteJson.response.status, "incomplete");
+    assert.equal(incompleteJson.response.incomplete_details.reason, "max_output_tokens");
+    assert.deepEqual(incompleteJson.response.usage, {
+      input_tokens: 10,
+      output_tokens: 4,
+      input_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 },
+      output_tokens_details: { reasoning_tokens: 5 },
+    });
   }
 });

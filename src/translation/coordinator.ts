@@ -18,15 +18,44 @@ import type {
 } from "./contracts.ts";
 import { unsupportedCapabilityFailure } from "./failures.ts";
 import type { IrOutcome, IrRequest } from "./ir.ts";
-import { preflightOutcome, preflightRequest, preflightStreamRequest } from "./preflight.ts";
+import {
+  normalizeOutcomeWireOptions,
+  preflightOutcome,
+  preflightRequest,
+  preflightStreamRequest,
+} from "./preflight.ts";
 import { prepareTranslatedProviderRequest } from "./prepare.ts";
 import { validateIrOutcome, validateIrRequest } from "./validate.ts";
 
 /**
+ * Resolves the required Anthropic Messages `max_tokens`: the caller's output
+ * token limit wins; the target model's configured default fills in when absent.
+ * Returns a fail-closed failure when no positive safe integer can be resolved.
+ */
+function resolveMessagesMaxTokens(
+  irRequest: IrRequest,
+  targetDefaultMaxTokens: number | undefined,
+): Result<number, NormalizedFailure> {
+  const maxTokens = irRequest.generation?.maxOutputTokens ?? targetDefaultMaxTokens;
+  if (typeof maxTokens !== "number" || !Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
+    return {
+      ok: false,
+      error: unsupportedCapabilityFailure(
+        "output-token-limit",
+        "No positive safe integer max_tokens could be resolved from the request or the target model defaults",
+      ),
+    };
+  }
+  return { ok: true, value: maxTokens };
+}
+
+/**
  * Creates the pure, side-effect-free cross-protocol translation coordinator.
  *
- * Coordinates request decoding, IR validation, capability preflight, and target encoding,
- * as well as provider response decoding, outcome validation, preflight, and client encoding.
+ * Coordinates request decoding (IR + wire-options sidecar), IR validation,
+ * capability preflight (including per-direction sidecar feasibility), and
+ * target encoding, as well as provider response decoding, outcome validation,
+ * preflight, sidecar normalization, and client encoding.
  *
  * @param codecs - Registered ingress decoders and egress encoders for each protocol.
  * @returns A {@link TranslationCoordinator} bundle.
@@ -38,7 +67,7 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       const decoder = codecs.ingress[input.sourceProtocol];
       const encoder = codecs.egress[input.targetProtocol];
 
-      // 1. Decode source request into IR
+      // 1. Decode source request into IR plus the wire-only sidecar
       const decodeResult = decoder.decodeRequest(input.sourceBody);
       if (!decodeResult.ok) {
         return decodeResult;
@@ -46,42 +75,31 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
 
       // Rebuild with canonical logical model name
       const irRequest: IrRequest = {
-        ...decodeResult.value,
+        ...decodeResult.value.irRequest,
         model: input.logicalModel,
       };
 
-      // 2. Validate IR request invariants
+      // 2. Validate IR request invariants (IR-only: never inspects the sidecar)
       const validateResult = validateIrRequest(irRequest);
       if (!validateResult.ok) {
         return validateResult;
       }
 
-      // 3. Preflight capability feasibility
-      const preflightResult = preflightRequest(irRequest, direction);
+      // 3. Preflight capability feasibility, including per-direction sidecar rows
+      const preflightResult = preflightRequest(irRequest, direction, decodeResult.value.requestWireOptions);
       if (!preflightResult.ok) {
         return preflightResult;
       }
 
-      // 4. Encode to target provider request body
-      const encodedBody = encoder.encodeRequest(irRequest, input.targetModel);
+      // 4. Encode to target provider request body, projecting the sidecar
+      const encodedBody = encoder.encodeRequest(irRequest, input.targetModel, decodeResult.value.requestWireOptions);
 
-      // 5. Anthropic Messages target: inject required max_tokens from model defaults
+      // 5. Anthropic Messages target: inject the resolved required max_tokens
+      //    (caller limit first, configured model default as fallback).
       if (input.targetProtocol === "anthropic-messages") {
-        if (
-          typeof input.targetDefaultMaxTokens === "number" &&
-          Number.isSafeInteger(input.targetDefaultMaxTokens) &&
-          input.targetDefaultMaxTokens > 0
-        ) {
-          (encodedBody as Record<string, unknown>).max_tokens = input.targetDefaultMaxTokens;
-        } else {
-          return {
-            ok: false,
-            error: unsupportedCapabilityFailure(
-              "output-token-limit",
-              "Target Anthropic model missing required positive safe integer 'defaults.max_tokens' configuration",
-            ),
-          };
-        }
+        const maxTokens = resolveMessagesMaxTokens(irRequest, input.targetDefaultMaxTokens);
+        if (!maxTokens.ok) return maxTokens;
+        (encodedBody as Record<string, unknown>).max_tokens = maxTokens.value;
       }
 
       return {
@@ -100,7 +118,7 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       const streamDecoder = codecs.streamRequestDecoders[input.sourceProtocol];
       const streamEncoder = codecs.streamRequestEncoders[input.targetProtocol];
 
-      // 1. Decode source stream request into IR and source wire options
+      // 1. Decode source stream request into IR and both wire-option sets
       const decodeResult = streamDecoder.decodeRequest(input.sourceBody);
       if (!decodeResult.ok) {
         return decodeResult;
@@ -118,36 +136,25 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
         return validateResult;
       }
 
-      // 3. Preflight stream capability feasibility
-      const preflightResult = preflightStreamRequest(irRequest, direction);
+      // 3. Preflight stream capability feasibility, including sidecar rows
+      const preflightResult = preflightStreamRequest(irRequest, direction, decodeResult.value.requestWireOptions);
       if (!preflightResult.ok) {
         return preflightResult;
       }
 
-      // 4. Encode to target provider stream request body
+      // 4. Encode to target provider stream request body, projecting the sidecar
       const encodedBody = streamEncoder.encodeRequest(
         irRequest,
         input.targetModel,
         decodeResult.value.sourceWireOptions,
+        decodeResult.value.requestWireOptions,
       );
 
-      // 5. Anthropic Messages target: inject required max_tokens from model defaults
+      // 5. Anthropic Messages target: inject the resolved required max_tokens
       if (input.targetProtocol === "anthropic-messages") {
-        if (
-          typeof input.targetDefaultMaxTokens === "number" &&
-          Number.isSafeInteger(input.targetDefaultMaxTokens) &&
-          input.targetDefaultMaxTokens > 0
-        ) {
-          (encodedBody as Record<string, unknown>).max_tokens = input.targetDefaultMaxTokens;
-        } else {
-          return {
-            ok: false,
-            error: unsupportedCapabilityFailure(
-              "output-token-limit",
-              "Target Anthropic model missing required positive safe integer 'defaults.max_tokens' configuration",
-            ),
-          };
-        }
+        const maxTokens = resolveMessagesMaxTokens(irRequest, input.targetDefaultMaxTokens);
+        if (!maxTokens.ok) return maxTokens;
+        (encodedBody as Record<string, unknown>).max_tokens = maxTokens.value;
       }
 
       return {
@@ -190,7 +197,7 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       const decoder = codecs.ingress[input.targetProtocol];
       const encoder = codecs.egress[input.sourceProtocol];
 
-      // 1. Decode upstream provider response into IR outcome
+      // 1. Decode upstream provider response into IR outcome plus its sidecar
       const decodeResult = decoder.decodeOutcome(input.status, input.headers, input.body);
       if (!decodeResult.ok) {
         return decodeResult;
@@ -198,24 +205,31 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
 
       // Rebuild with canonical logical model name
       const irOutcome: IrOutcome = {
-        ...decodeResult.value,
+        ...decodeResult.value.irOutcome,
         model: input.logicalModel,
       };
 
-      // 2. Validate IR outcome invariants
+      // 2. Validate IR outcome invariants (IR-only: never inspects the sidecar)
       const validateResult = validateIrOutcome(irOutcome);
       if (!validateResult.ok) {
         return validateResult;
       }
 
-      // 3. Preflight outcome finish/parts feasibility
-      const preflightResult = preflightOutcome(irOutcome, direction);
+      // 3. Preflight outcome finish/parts/sidecar feasibility (e.g. moderation
+      //    discovered for a Messages client fails closed here)
+      const preflightResult = preflightOutcome(irOutcome, direction, decodeResult.value.outcomeWireOptions);
       if (!preflightResult.ok) {
         return preflightResult;
       }
 
-      // 4. Encode to client-native outcome representation
-      const clientEncoded = encoder.encodeOutcome(irOutcome);
+      // 4. Normalize the sidecar for the direction, then encode to the
+      //    client-native outcome representation
+      const normalizedWireOptions = normalizeOutcomeWireOptions(
+        decodeResult.value.outcomeWireOptions,
+        input.sourceProtocol,
+        input.targetProtocol,
+      );
+      const clientEncoded = encoder.encodeOutcome(irOutcome, normalizedWireOptions);
 
       return {
         ok: true,

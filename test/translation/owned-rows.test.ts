@@ -1,50 +1,26 @@
+/**
+ * Matrix tier pinning for every owned capability row, plus the transcript
+ * structure, outcome envelope, and stream lifecycle rows shared by all six
+ * translation directions.
+ */
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import type { JsonObject, Protocol } from "../../src/domain/contracts.ts";
 import { ChatEgressEncoder } from "../../src/translation/codecs/chat/egress.ts";
 import { ChatIngressDecoder } from "../../src/translation/codecs/chat/ingress.ts";
+import { ChatProviderStreamDecoder } from "../../src/translation/codecs/chat/stream.ts";
 import { MessagesEgressEncoder } from "../../src/translation/codecs/messages/egress.ts";
 import { MessagesIngressDecoder } from "../../src/translation/codecs/messages/ingress.ts";
+import { MessagesProviderStreamDecoder } from "../../src/translation/codecs/messages/stream.ts";
 import { ResponsesEgressEncoder } from "../../src/translation/codecs/responses/egress.ts";
 import { ResponsesIngressDecoder } from "../../src/translation/codecs/responses/ingress.ts";
-import type { Direction, TranslationCoordinator } from "../../src/translation/contracts.ts";
+import { ResponsesProviderStreamDecoder } from "../../src/translation/codecs/responses/stream.ts";
+import type { Direction } from "../../src/translation/contracts.ts";
 import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
-import type { IrOutcome, IrRequest } from "../../src/translation/ir.ts";
-import { preflightOutcome, preflightRequest } from "../../src/translation/preflight.ts";
-
-/**
- * One direction/tier test per owned plain-text complete capability row.
- * Directions use the fixed [C→R, C→M, R→C, R→M, M→C, M→R] order.
- */
-const ALL_DIRECTIONS: ReadonlyArray<readonly [Protocol, Protocol]> = [
-  ["openai-chat", "openai-responses"],
-  ["openai-chat", "anthropic-messages"],
-  ["openai-responses", "openai-chat"],
-  ["openai-responses", "anthropic-messages"],
-  ["anthropic-messages", "openai-chat"],
-  ["anthropic-messages", "openai-responses"],
-];
-
-function sourceBodyFor(protocol: Protocol): JsonObject {
-  if (protocol === "openai-chat") {
-    return { model: "wire-model", messages: [{ role: "user", content: "Hello!" }] };
-  }
-  if (protocol === "openai-responses") {
-    return { model: "wire-model", input: "Hello!" };
-  }
-  return { model: "wire-model", max_tokens: 1024, messages: [{ role: "user", content: "Hello!" }] };
-}
-
-function translateRequest(coordinator: TranslationCoordinator, source: Protocol, target: Protocol, body: JsonObject) {
-  return coordinator.translateCompleteRequest({
-    sourceProtocol: source,
-    targetProtocol: target,
-    sourceBody: body,
-    logicalModel: "logical-key",
-    targetModel: "upstream-target",
-    targetDefaultMaxTokens: target === "anthropic-messages" ? 2048 : undefined,
-  });
-}
+import type { IrRequest } from "../../src/translation/ir.ts";
+import { getCapabilityRow } from "../../src/translation/matrix.ts";
+import { preflightRequest } from "../../src/translation/preflight.ts";
+import { ALL_DIRECTIONS, sourceBodyFor, translateRequest } from "./owned-rows-helpers.ts";
 
 test.concurrent("row logical-model-selection: logical key resolves to target model and never leaks the wire model", () => {
   const coordinator = createDefaultTranslationCoordinator();
@@ -86,7 +62,7 @@ test.concurrent("row multi-turn-text: alternating turns pass through C↔R uncha
   const decodeRes = chat.decodeRequest(chatBody);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const encoded = new ResponsesEgressEncoder().encodeRequest(decodeRes.value, "t");
+    const encoded = new ResponsesEgressEncoder().encodeRequest(decodeRes.value.irRequest, "t");
     const input = encoded.input as Array<{ role: string }>;
     assert.deepEqual(
       input.map((i) => i.role),
@@ -349,19 +325,6 @@ test.concurrent("row responses-message-phase: Responses phase/status input items
   }
 });
 
-test.concurrent("row multiple-candidates: Chat n>1 rejects before dispatch", () => {
-  const decoder = new ChatIngressDecoder();
-  const res = decoder.decodeRequest({
-    model: "m",
-    messages: [{ role: "user", content: "Hi" }],
-    n: 2,
-  });
-  assert.equal(res.ok, false);
-  if (!res.ok) {
-    assert.equal(res.error.capability, "multiple-candidates");
-  }
-});
-
 test.concurrent("rows single-completed-output / response-envelope-synthesis: one synthesized target-native envelope per outcome", () => {
   const chatDecoder = new ChatIngressDecoder();
   const responsesEgress = new ResponsesEgressEncoder();
@@ -379,7 +342,7 @@ test.concurrent("rows single-completed-output / response-envelope-synthesis: one
   );
   assert.equal(chatOutcome.ok, true);
   if (chatOutcome.ok) {
-    const encoded = responsesEgress.encodeOutcome(chatOutcome.value);
+    const encoded = responsesEgress.encodeOutcome(chatOutcome.value.irOutcome);
     const body = encoded.body as {
       object: string;
       id: string;
@@ -415,10 +378,10 @@ test.concurrent("row ordered-output-parts: multi-part outcomes preserve semantic
   assert.equal(res.ok, true);
   if (res.ok) {
     assert.deepEqual(
-      res.value.parts.map((p) => (p.type === "text" ? p.text : "")),
+      res.value.irOutcome.parts.map((p) => (p.type === "text" ? p.text : "")),
       ["First. ", "Second."],
     );
-    const encoded = chatEgress.encodeOutcome(res.value);
+    const encoded = chatEgress.encodeOutcome(res.value.irOutcome);
     const body = encoded.body as { choices: Array<{ message: { content: string } }> };
     assert.equal(body.choices[0]?.message.content, "First. Second.");
   }
@@ -444,10 +407,10 @@ test.concurrent("row finish-natural: stop maps to C stop / R completed / M end_t
   );
   assert.equal(mRes.ok, true);
   if (mRes.ok) {
-    assert.equal(mRes.value.finish.reason, "stop");
-    const rBody = responsesEgress.encodeOutcome(mRes.value).body as { status: string };
+    assert.equal(mRes.value.irOutcome.finish.reason, "stop");
+    const rBody = responsesEgress.encodeOutcome(mRes.value.irOutcome).body as { status: string };
     assert.equal(rBody.status, "completed");
-    const cBody = chatEgress.encodeOutcome(mRes.value).body as { choices: Array<{ finish_reason: string }> };
+    const cBody = chatEgress.encodeOutcome(mRes.value.irOutcome).body as { choices: Array<{ finish_reason: string }> };
     assert.equal(cBody.choices[0]?.finish_reason, "stop");
   }
 });
@@ -473,14 +436,14 @@ test.concurrent("row finish-length: length maps to C length / R incomplete max_o
   );
   assert.equal(cRes.ok, true);
   if (cRes.ok) {
-    assert.equal(cRes.value.finish.reason, "length");
-    const rBody = responsesEgress.encodeOutcome(cRes.value).body as {
+    assert.equal(cRes.value.irOutcome.finish.reason, "length");
+    const rBody = responsesEgress.encodeOutcome(cRes.value.irOutcome).body as {
       status: string;
       incomplete_details?: { reason: string };
     };
     assert.equal(rBody.status, "incomplete");
     assert.equal(rBody.incomplete_details?.reason, "max_output_tokens");
-    const mBody = messagesEgress.encodeOutcome(cRes.value).body as { stop_reason: string };
+    const mBody = messagesEgress.encodeOutcome(cRes.value.irOutcome).body as { stop_reason: string };
     assert.equal(mBody.stop_reason, "max_tokens");
   }
 
@@ -509,113 +472,9 @@ test.concurrent("row finish-length: length maps to C length / R incomplete max_o
   );
   assert.equal(rRes.ok, true);
   if (rRes.ok) {
-    assert.equal(rRes.value.finish.reason, "length");
-    const cBody = chatEgress.encodeOutcome(rRes.value).body as { choices: Array<{ finish_reason: string }> };
+    assert.equal(rRes.value.irOutcome.finish.reason, "length");
+    const cBody = chatEgress.encodeOutcome(rRes.value.irOutcome).body as { choices: Array<{ finish_reason: string }> };
     assert.equal(cBody.choices[0]?.finish_reason, "length");
-  }
-});
-
-test.concurrent("row usage-input-output-total: totals map directly; M input formula and absent total", () => {
-  const chatDecoder = new ChatIngressDecoder();
-  const messagesEgress = new MessagesEgressEncoder();
-  const messagesDecoder = new MessagesIngressDecoder();
-
-  // C usage -> M: input/output preserved, no fabricated total
-  const cRes = chatDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "chatcmpl-1",
-      object: "chat.completion",
-      created: 1,
-      model: "t",
-      choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
-    },
-  );
-  assert.equal(cRes.ok, true);
-  if (cRes.ok) {
-    const mBody = messagesEgress.encodeOutcome(cRes.value).body as {
-      usage: { input_tokens: number; output_tokens: number; total_tokens?: number };
-    };
-    assert.equal(mBody.usage.input_tokens, 10);
-    assert.equal(mBody.usage.output_tokens, 4);
-    assert.equal(mBody.usage.total_tokens, undefined);
-  }
-
-  // M usage -> IR: input includes cache read + cache creation; total absent
-  const mRes = messagesDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "msg_1",
-      type: "message",
-      role: "assistant",
-      model: "t",
-      content: [{ type: "text", text: "Hi" }],
-      stop_reason: "end_turn",
-      usage: {
-        input_tokens: 10,
-        cache_read_input_tokens: 3,
-        cache_creation_input_tokens: 2,
-        output_tokens: 4,
-      },
-    },
-  );
-  assert.equal(mRes.ok, true);
-  if (mRes.ok) {
-    assert.equal(mRes.value.usage?.input, 15);
-    assert.equal(mRes.value.usage?.cacheReadInput, 3);
-    assert.equal(mRes.value.usage?.cacheWriteInput, 2);
-    assert.equal(mRes.value.usage?.total, undefined);
-  }
-});
-
-test.concurrent("usage-absence: egress omits usage when the IR outcome reports none", () => {
-  const outcome: IrOutcome = {
-    responseId: "resp_1",
-    model: "logical-key",
-    parts: [{ type: "text", partId: "p1", text: "Hi" }],
-    finish: { reason: "stop" },
-  };
-  const chatBody = new ChatEgressEncoder().encodeOutcome(outcome).body as Record<string, unknown>;
-  const responsesBody = new ResponsesEgressEncoder().encodeOutcome(outcome).body as Record<string, unknown>;
-  const messagesBody = new MessagesEgressEncoder().encodeOutcome(outcome).body as Record<string, unknown>;
-  assert.equal("usage" in chatBody, false);
-  assert.equal("usage" in responsesBody, false);
-  assert.equal("usage" in messagesBody, false);
-});
-
-test.concurrent("preflight outcome: non-plain-text outcome discoveries terminate fail-closed with matrix capability IDs", () => {
-  const base = {
-    responseId: "resp_1",
-    model: "logical-key",
-    parts: [{ type: "text" as const, partId: "p1", text: "Hi" }],
-  };
-  const cases: ReadonlyArray<readonly [IrOutcome, string, Direction]> = [
-    [{ ...base, finish: { reason: "tool_calls" } }, "finish-tool-calls", "openai-chat->openai-responses"],
-    [{ ...base, finish: { reason: "refusal" } }, "refusal-content", "openai-chat->openai-responses"],
-    [{ ...base, finish: { reason: "content_filter" } }, "finish-content-filter", "openai-chat->openai-responses"],
-    [{ ...base, finish: { reason: "context_limit" } }, "finish-context-limit", "anthropic-messages->openai-chat"],
-    [{ ...base, finish: { reason: "other" } }, "finish-other-unknown", "openai-chat->openai-responses"],
-    [
-      {
-        ...base,
-        finish: { reason: "stop" },
-        parts: [
-          { type: "tool_call", partId: "p1", call: { type: "function", callId: "c1", name: "f", argumentsText: "{}" } },
-        ],
-      },
-      "function-tool-definition",
-      "openai-chat->openai-responses",
-    ],
-  ];
-  for (const [outcome, capability, direction] of cases) {
-    const res = preflightOutcome(outcome, direction);
-    assert.equal(res.ok, false, capability);
-    if (!res.ok) {
-      assert.equal(res.error.capability, capability);
-    }
   }
 });
 
@@ -661,33 +520,6 @@ test.concurrent("row text-stream-delta: text delta frames encode and decode corr
       const encodeRes = sessionBundle.clientEncoder.encode(evt);
       assert.equal(encodeRes.ok, true, `${source}->${target}`);
     }
-  }
-});
-
-test.concurrent("row stream-final-usage: final usage arrives on end chunk or usage block", () => {
-  const coordinator = createDefaultTranslationCoordinator();
-  const sessionBundle = coordinator.createStreamSession({
-    sourceProtocol: "openai-chat",
-    targetProtocol: "openai-responses",
-    logicalModel: "logical-key",
-    responseId: "resp_u",
-    sourceWireOptions: { includeUsage: true },
-  });
-
-  const endRes = sessionBundle.clientEncoder.encode({
-    type: "response_end",
-    responseId: "resp_u",
-    finish: { reason: "stop" },
-    usage: { input: 12, output: 8, total: 20 },
-  });
-  assert.equal(endRes.ok, true);
-  if (endRes.ok) {
-    // Should include terminal chunk, usage chunk, and [DONE]
-    assert.equal(endRes.value.length, 3);
-    const usageJson = JSON.parse(endRes.value[1]?.data ?? "{}");
-    assert.equal(usageJson.usage.prompt_tokens, 12);
-    assert.equal(usageJson.usage.completion_tokens, 8);
-    assert.equal(usageJson.usage.total_tokens, 20);
   }
 });
 
@@ -815,5 +647,163 @@ test.concurrent("row stream-obfuscation: request decoder accepts include_obfusca
   if (res.ok) {
     const streamOpts = (res.value.body as Record<string, unknown>).stream_options as Record<string, unknown>;
     assert.equal(streamOpts.include_obfuscation, false);
+  }
+});
+
+// =====================================================================
+// Owned rows — matrix ownership (single assignment, tier vectors)
+// =====================================================================
+
+/** Pinned direction/tier vectors for every owned capability row, in [C→R, C→M, R→C, R→M, M→C, M→R] order. */
+const OWNED_ROW_TIERS: ReadonlyArray<readonly [string, string]> = [
+  // Generation controls
+  ["temperature-0-1", "T1,T1,T1,T1,T1,T1"],
+  ["top-p-0-1", "T1,T1,T1,T1,T1,T1"],
+  ["text-verbosity", "T1,T3,T1,T3,T3,T3"],
+  ["output-token-limit", "T1,T1,T1,T1,T1,T1"],
+  ["stop-sequence-request", "T3,T1,T3,T3,T2,T3"],
+  ["matched-stop-sequence", "T3,T2,T3,T2,T2,T2"],
+  ["reasoning-effort-common", "T1,T3,T1,T3,T3,T3"],
+  // Admitted wire-only mappings
+  ["responses-storage", "T1,T3,T1,T3,T3,T3"],
+  ["prompt-cache-key", "T1,T3,T1,T3,T3,T3"],
+  ["prompt-cache-mode", "T1,T3,T1,T3,T3,T3"],
+  ["prompt-cache-ttl", "T1,T3,T1,T3,T3,T3"],
+  ["prompt-cache-breakpoint", "T1,T2,T1,T2,T2,T2"],
+  ["request-metadata", "T1,T2,T1,T2,T2,T2"],
+  ["safety-identifier", "T1,T3,T1,T3,T3,T3"],
+  ["moderation-policy-result", "T1,T3,T1,T3,T3,T3"],
+  ["service-tier", "T1,T2,T1,T2,T2,T2"],
+  // Usage accounting
+  ["usage-input-output-total", "T1,T1,T1,T1,T1,T1"],
+  ["usage-cache-read", "T1,T1,T1,T1,T1,T1"],
+  ["usage-cache-write", "T1,T1,T1,T1,T1,T1"],
+  ["usage-reasoning", "T1,T1,T1,T1,T1,T1"],
+  ["usage-absence", "T2,T2,T1,T1,T1,T1"],
+  ["usage-stream-timing", "T2,T2,T2,T2,T2,T2"],
+  // Native-only rejections (T3 all directions)
+  ["responses-previous-id", "T3,T3,T3,T3,T3,T3"],
+  ["responses-conversation", "T3,T3,T3,T3,T3,T3"],
+  ["responses-background", "T3,T3,T3,T3,T3,T3"],
+  ["responses-compaction", "T3,T3,T3,T3,T3,T3"],
+  ["responses-reusable-prompt", "T3,T3,T3,T3,T3,T3"],
+  ["responses-item-reference", "T3,T3,T3,T3,T3,T3"],
+  ["responses-websocket-continuation", "T3,T3,T3,T3,T3,T3"],
+  ["anthropic-pause-turn", "T3,T3,T3,T3,T3,T3"],
+  ["anthropic-container-reuse", "T3,T3,T3,T3,T3,T3"],
+  ["cache-billing-semantics", "T3,T3,T3,T3,T3,T3"],
+  ["inference-geography", "T3,T3,T3,T3,T3,T3"],
+  ["truncation-policy", "T3,T3,T3,T3,T3,T3"],
+  ["response-storage-retention", "T3,T3,T3,T3,T3,T3"],
+  ["beta-version-control", "T3,T3,T3,T3,T3,T3"],
+  ["frequency-penalty", "T3,T3,T3,T3,T3,T3"],
+  ["presence-penalty", "T3,T3,T3,T3,T3,T3"],
+  ["top-k", "T3,T3,T3,T3,T3,T3"],
+  ["seed-determinism", "T3,T3,T3,T3,T3,T3"],
+  ["token-logit-bias", "T3,T3,T3,T3,T3,T3"],
+  ["token-logprobs", "T3,T3,T3,T3,T3,T3"],
+  ["chat-predicted-outputs", "T3,T3,T3,T3,T3,T3"],
+  ["responses-max-tool-calls", "T3,T3,T3,T3,T3,T3"],
+  ["responses-include", "T3,T3,T3,T3,T3,T3"],
+  ["responses-reasoning-summary", "T3,T3,T3,T3,T3,T3"],
+  ["anthropic-thinking-display", "T3,T3,T3,T3,T3,T3"],
+  ["reasoning-budget", "T3,T3,T3,T3,T3,T3"],
+  ["reasoning-style-context-mode", "T3,T3,T3,T3,T3,T3"],
+  ["readable-reasoning", "T3,T3,T3,T3,T3,T3"],
+  ["reasoning-signature", "T3,T3,T3,T3,T3,T3"],
+  ["encrypted-reasoning", "T3,T3,T3,T3,T3,T3"],
+  ["redacted-reasoning", "T3,T3,T3,T3,T3,T3"],
+];
+
+test.concurrent("owned rows: each of the 53 rows is single-assigned with the pinned six-direction tier vector", () => {
+  assert.equal(OWNED_ROW_TIERS.length, 53);
+  for (const [id, expectedVector] of OWNED_ROW_TIERS) {
+    const row = getCapabilityRow(id);
+    assert.ok(row !== undefined, `missing matrix row for ${id}`);
+    const actualVector = ALL_DIRECTIONS.map(([s, t]) => row.tiers[`${s}->${t}` as Direction]).join(",");
+    assert.equal(actualVector, expectedVector, `tier vector mismatch for ${id}`);
+  }
+});
+
+test.concurrent("post-terminal guards: duplicated stream sentinels fail the provider decoder instead of re-terminating", () => {
+  const chat = new ChatProviderStreamDecoder({
+    responseId: "resp_dupe_c",
+    model: "logical-key",
+    createPartId: () => "p1",
+  });
+  const role = chat.push({
+    event: "chunk",
+    data: '{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+  });
+  assert.equal(role.ok, true);
+  const finish = chat.push({
+    event: "chunk",
+    data: '{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+  });
+  assert.equal(finish.ok, true);
+  assert.equal(chat.push({ event: "done", data: "[DONE]" }).ok, true);
+  const lateDone = chat.push({ event: "done", data: "[DONE]" });
+  assert.equal(lateDone.ok, false);
+  if (!lateDone.ok) assert.equal(lateDone.error.capability, undefined);
+
+  const responses = new ResponsesProviderStreamDecoder({
+    responseId: "resp_dupe_r",
+    model: "logical-key",
+    createPartId: () => "p1",
+  });
+  const started = responses.push({
+    event: "response.created",
+    data: '{"type":"response.created","response":{"id":"resp_dupe_r"},"sequence_number":1}',
+  });
+  assert.equal(started.ok, true);
+  const terminalData = JSON.stringify({
+    type: "response.completed",
+    response: { id: "resp_dupe_r", status: "completed", usage: { input_tokens: 1, output_tokens: 1 } },
+    sequence_number: 2,
+  });
+  assert.equal(responses.push({ event: "response.completed", data: terminalData }).ok, true);
+  const lateTerminal = responses.push({ event: "response.completed", data: terminalData });
+  assert.equal(lateTerminal.ok, false);
+  if (!lateTerminal.ok) assert.equal(lateTerminal.error.capability, undefined);
+
+  const messages = new MessagesProviderStreamDecoder({
+    responseId: "resp_dupe_m",
+    model: "logical-key",
+    createPartId: () => "p1",
+  });
+  const mStop = messages.push({ event: "message_stop", data: '{"type":"message_stop"}' });
+  assert.equal(mStop.ok, true);
+  if (mStop.ok) {
+    assert.equal(mStop.value.length, 1);
+    assert.equal(mStop.value[0]?.type, "response_end");
+  }
+  const lateStop = messages.push({ event: "message_stop", data: '{"type":"message_stop"}' });
+  assert.equal(lateStop.ok, false);
+  if (!lateStop.ok) {
+    assert.equal(lateStop.error.capability, undefined);
+    assert.match(lateStop.error.message, /Messages stream received an event after message_stop/);
+  }
+});
+
+test.concurrent("responses input item with an empty content array fails invalid_request like Chat/Messages", () => {
+  const res = new ResponsesIngressDecoder().decodeRequest({
+    model: "wire-model",
+    input: [{ type: "message", role: "user", content: [] }],
+  });
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.error.capability, undefined);
+    assert.match(res.error.message, /empty content/);
+  }
+
+  // Assistant input items fail closed on an empty content array as well.
+  const assistantRes = new ResponsesIngressDecoder().decodeRequest({
+    model: "wire-model",
+    input: [{ type: "message", role: "assistant", content: [] }],
+  });
+  assert.equal(assistantRes.ok, false);
+  if (!assistantRes.ok) {
+    assert.equal(assistantRes.error.capability, undefined);
+    assert.match(assistantRes.error.message, /empty content/);
   }
 });

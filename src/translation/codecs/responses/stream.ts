@@ -2,384 +2,105 @@ import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type {
   ClientStreamEncoder,
+  OutcomeWireOptions,
   ProviderStreamDecoder,
+  RequestWireOptions,
+  StreamRequestDecodeResult,
   StreamRequestDecoder,
   StreamRequestEncoder,
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
 import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
-import type {
-  IrAssistantPart,
-  IrGenerationControls,
-  IrInputPart,
-  IrItem,
-  IrRequest,
-  IrStreamEvent,
-  NonEmpty,
-} from "../../ir.ts";
+import type { IrRequest, IrStreamEvent } from "../../ir.ts";
 import type { SseFrame } from "../../sse.ts";
-
-const RECOGNIZED_RESPONSES_REQUEST_FIELDS = new Set([
-  "model",
-  "input",
-  "stream",
-  "temperature",
-  "top_p",
-  "max_output_tokens",
-  "parallel_tool_calls",
-  "text",
-  "instructions",
-  "previous_response_id",
-  "conversation",
-  "background",
-  "tools",
-  "tool_choice",
-  "max_tool_calls",
-  "include",
-  "reasoning",
-  "store",
-  "metadata",
-  "safety_identifier",
-  "moderation",
-  "service_tier",
-  "truncation",
-  "prompt_cache_key",
-]);
+import {
+  buildResponsesInput,
+  captureOutcomeWireFacts,
+  chatResponsesRequestFields,
+  parseResponsesUsage,
+  reanchorResponsesBreakpoints,
+  responsesFinishStatus,
+  responsesGenerationFields,
+  responsesOutcomeWireFields,
+  responsesReasoningItemFailure,
+  responsesUsageBody,
+} from "../shared.ts";
+import { parseResponsesRequestBody } from "./ingress.ts";
 
 /**
  * Decodes a streaming OpenAI Responses request.
+ *
+ * Capability rejections, wire-only sidecar capture, transcript items, and
+ * generation controls are shared verbatim with the complete-path ingress.
  */
 export class ResponsesStreamRequestDecoder implements StreamRequestDecoder {
-  decodeRequest(
-    body: JsonObject,
-  ): Result<{ readonly irRequest: IrRequest; readonly sourceWireOptions: StreamWireOptions }, NormalizedFailure> {
-    if (typeof body.model !== "string" || body.model.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Responses request missing required string property 'model'"),
-      };
-    }
-
-    if (body.input === undefined || body.input === null) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Responses request missing required property 'input'"),
-      };
-    }
-
-    if (body.previous_response_id !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-previous-id") };
-    }
-    if (body.conversation !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-conversation") };
-    }
-    if (body.background !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-background") };
-    }
-    if (body.tools !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-    }
-    if (body.tool_choice !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("tool-choice-none-auto-required") };
-    }
-    if (body.parallel_tool_calls !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("parallel-tool-calls") };
-    }
-    if (body.max_tool_calls !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-max-tool-calls") };
-    }
-    if (body.include !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-include") };
-    }
-    if (body.reasoning !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("reasoning-effort-common") };
-    }
-    if (body.store !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-storage") };
-    }
-    if (body.metadata !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("request-metadata") };
-    }
-    if (body.safety_identifier !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("safety-identifier") };
-    }
-    if (body.moderation !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("moderation-policy-result") };
-    }
-    if (body.service_tier !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("service-tier") };
-    }
-    if (body.truncation !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("truncation-policy") };
-    }
-    if (body.prompt_cache_key !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("prompt-cache-key") };
-    }
-
-    const textConfig = body.text as Record<string, unknown> | undefined;
-    if (textConfig?.format !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("structured-json-schema") };
-    }
-
-    for (const key of Object.keys(body)) {
-      if (!RECOGNIZED_RESPONSES_REQUEST_FIELDS.has(key)) {
-        return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
-      }
-    }
-
-    const items: IrItem[] = [];
-
-    if (typeof body.instructions === "string" && body.instructions.trim() !== "") {
-      items.push({
-        type: "instruction",
-        authority: "system",
-        separation: "advisory",
-        text: body.instructions,
-      });
-    }
-
-    if (typeof body.input === "string") {
-      items.push({
-        type: "message",
-        role: "user",
-        content: [{ type: "text", text: body.input }],
-      });
-    } else if (Array.isArray(body.input)) {
-      if (body.input.length === 0 && items.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure("Responses input array is empty"),
-        };
-      }
-
-      for (let i = 0; i < body.input.length; i++) {
-        const rawItem = body.input[i];
-        if (typeof rawItem !== "object" || rawItem === null) {
-          if (typeof rawItem === "string") {
-            items.push({
-              type: "message",
-              role: "user",
-              content: [{ type: "text", text: rawItem }],
-            });
-            continue;
-          }
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Responses input item [${i}] must be an object or string`),
-          };
-        }
-
-        const itemObj = rawItem as Record<string, unknown>;
-
-        if (itemObj.phase !== undefined || itemObj.status !== undefined) {
-          return { ok: false, error: unsupportedCapabilityFailure("responses-message-phase") };
-        }
-        if (itemObj.previous_response_id !== undefined) {
-          return { ok: false, error: unsupportedCapabilityFailure("responses-previous-id") };
-        }
-        if (itemObj.type === "input_image") {
-          return { ok: false, error: unsupportedCapabilityFailure("image-url") };
-        }
-        if (itemObj.type === "input_file") {
-          return { ok: false, error: unsupportedCapabilityFailure("document-inline-bytes") };
-        }
-
-        const role = itemObj.role;
-        if (role === "system" || role === "developer") {
-          let text = "";
-          if (typeof itemObj.content === "string") {
-            text = itemObj.content;
-          } else if (Array.isArray(itemObj.content)) {
-            for (const part of itemObj.content) {
-              const p = part as Record<string, unknown>;
-              if (p?.type === "input_text" && typeof p.text === "string") {
-                text += p.text;
-              }
-            }
-          }
-          items.push({
-            type: "instruction",
-            authority: role,
-            separation: "advisory",
-            text,
-          });
-          continue;
-        }
-
-        if (role === "user" || (itemObj.type === "message" && (role === undefined || role === "user"))) {
-          const parts: IrInputPart[] = [];
-          if (typeof itemObj.content === "string") {
-            parts.push({ type: "text", text: itemObj.content });
-          } else if (Array.isArray(itemObj.content)) {
-            for (let pIdx = 0; pIdx < itemObj.content.length; pIdx++) {
-              const p = itemObj.content[pIdx] as Record<string, unknown>;
-              if (p?.type === "input_text" && typeof p.text === "string") {
-                parts.push({ type: "text", text: p.text });
-              } else if (p?.type === "input_image") {
-                return { ok: false, error: unsupportedCapabilityFailure("image-url") };
-              } else if (p?.type === "input_file") {
-                return { ok: false, error: unsupportedCapabilityFailure("document-inline-bytes") };
-              } else {
-                return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-              }
-            }
-          }
-          if (parts.length > 0) {
-            items.push({
-              type: "message",
-              role: "user",
-              content: parts as unknown as NonEmpty<IrInputPart>,
-            });
-          }
-          continue;
-        }
-
-        if (role === "assistant") {
-          const parts: IrAssistantPart[] = [];
-          if (typeof itemObj.content === "string") {
-            parts.push({ type: "text", text: itemObj.content });
-          } else if (Array.isArray(itemObj.content)) {
-            for (let pIdx = 0; pIdx < itemObj.content.length; pIdx++) {
-              const p = itemObj.content[pIdx] as Record<string, unknown>;
-              if (p?.type === "output_text" && typeof p.text === "string") {
-                parts.push({ type: "text", text: p.text });
-              } else if (p?.type === "refusal") {
-                return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
-              } else {
-                return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-              }
-            }
-          }
-          if (parts.length > 0) {
-            items.push({
-              type: "message",
-              role: "assistant",
-              content: parts as unknown as NonEmpty<IrAssistantPart>,
-            });
-          }
-          continue;
-        }
-
-        if (itemObj.type === "function_call" || itemObj.type === "function_call_output") {
-          return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-        }
-
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Responses input item [${i}] has unrecognized structure`),
-        };
-      }
-    } else {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Responses input must be a string or array"),
-      };
-    }
-
-    let generation: IrGenerationControls | undefined;
-    if (
-      body.temperature !== undefined ||
-      body.top_p !== undefined ||
-      body.max_output_tokens !== undefined ||
-      textConfig?.verbosity !== undefined
-    ) {
-      generation = {
-        temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-        topP: typeof body.top_p === "number" ? body.top_p : undefined,
-        maxOutputTokens: typeof body.max_output_tokens === "number" ? body.max_output_tokens : undefined,
-        verbosity:
-          typeof textConfig?.verbosity === "string" &&
-          (textConfig.verbosity === "low" || textConfig.verbosity === "medium" || textConfig.verbosity === "high")
-            ? textConfig.verbosity
-            : undefined,
-      };
-    }
-
-    const irRequest: IrRequest = {
-      model: body.model,
-      delivery: "stream",
-      items,
-      generation,
-    };
-
+  decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
+    const parsed = parseResponsesRequestBody(body, "stream");
+    if (!parsed.ok) return parsed;
     return {
       ok: true,
       value: {
-        irRequest,
+        irRequest: parsed.value.irRequest,
         sourceWireOptions: {},
+        requestWireOptions: parsed.value.requestWireOptions,
       },
     };
   }
 }
 
 /**
- * Encodes an {@link IrRequest} into target OpenAI Responses stream request JSON.
+ * Encodes an {@link IrRequest} into target OpenAI Responses stream request
+ * JSON, projecting generation controls and the admitted wire-only sidecar
+ * fields exactly like the complete-path encoder.
  */
 export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
-  encodeRequest(request: IrRequest, targetModel: string, _wireOptions: StreamWireOptions): JsonObject {
-    const input: JsonObject[] = [];
+  encodeRequest(
+    request: IrRequest,
+    targetModel: string,
+    _wireOptions: StreamWireOptions,
+    requestWireOptions?: RequestWireOptions,
+  ): JsonObject {
+    const build = buildResponsesInput(request.items);
 
-    for (const item of request.items) {
-      if (item.type === "instruction") {
-        input.push({
-          role: item.authority,
-          content: [
-            {
-              type: "input_text",
-              text: item.text,
-            },
-          ],
-        });
-      } else if (item.type === "message") {
-        if (item.role === "user") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          input.push({
-            type: "message",
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text,
-              },
-            ],
-          });
-        } else if (item.role === "assistant") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          input.push({
-            type: "message",
-            role: "assistant",
-            content: [
-              {
-                type: "output_text",
-                text,
-              },
-            ],
-          });
-        }
-      }
-    }
+    // Re-anchor prompt-cache breakpoints onto the reconstructed input parts.
+    reanchorResponsesBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
 
     return {
       model: targetModel,
-      input,
+      input: build.entries,
       stream: true,
+      ...responsesGenerationFields(request.generation),
+      ...chatResponsesRequestFields(requestWireOptions),
     };
   }
 }
 
 /**
+ * Scans one terminal response object's output array for provider-owned
+ * reasoning items. The `output_item.added` events normally carry every item,
+ * but a terminal payload that includes an unannounced reasoning item must fail
+ * closed too instead of silently vanishing behind a success terminator.
+ */
+function scanTerminalOutputForReasoning(resp: Record<string, unknown>): Result<void, NormalizedFailure> {
+  if (!Array.isArray(resp.output)) return { ok: true, value: undefined };
+  for (const item of resp.output) {
+    const itemObj = item as Record<string, unknown>;
+    if (itemObj?.type === "reasoning") {
+      return { ok: false, error: responsesReasoningItemFailure(itemObj) };
+    }
+  }
+  return { ok: true, value: undefined };
+}
+
+/**
  * Decodes an upstream OpenAI Responses SSE stream into semantic IR stream events.
+ *
+ * Provider-owned reasoning output items fail closed at discovery
+ * (`encrypted-reasoning` when carrying `encrypted_content`, else
+ * `readable-reasoning`). The terminal completion event collapses usage with its
+ * subdivisions into `response_end.usage` and captures the service-tier echo and
+ * moderation result for the outcome wire-options sidecar.
  */
 export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "openai-responses" as const;
@@ -388,12 +109,27 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
   private currentPartId: string | undefined;
   private partStarted = false;
   private completed = false;
+  private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(session: StreamSession) {
     this.session = session;
   }
 
+  getOutcomeWireOptions(): OutcomeWireOptions {
+    return this.outcomeWireOptions;
+  }
+
   push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure> {
+    // The success terminator already went out on the terminal event; any later
+    // event is a misbehaving provider stream and fails closed instead of
+    // re-emitting a second terminal event.
+    if (this.completed) {
+      return {
+        ok: false,
+        error: invalidRequestFailure("Responses stream received an event after the terminal completion event"),
+      };
+    }
+
     if (frame.event === undefined || frame.event.trim() === "") {
       return {
         ok: false,
@@ -455,6 +191,10 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (eventName === "response.output_item.added") {
       const item = chunk.item as Record<string, unknown> | undefined;
+      // Provider-owned reasoning output items fail closed instead of vanishing.
+      if (item?.type === "reasoning") {
+        return { ok: false, error: responsesReasoningItemFailure(item) };
+      }
       if (item?.type !== "message") {
         return {
           ok: false,
@@ -538,18 +278,16 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "response.completed") {
-      this.completed = true;
       const resp = (chunk.response ?? {}) as Record<string, unknown>;
-      const rawUsage = resp.usage as Record<string, unknown> | undefined;
-      const usage =
-        rawUsage !== undefined
-          ? {
-              input: typeof rawUsage.input_tokens === "number" ? rawUsage.input_tokens : 0,
-              output: typeof rawUsage.output_tokens === "number" ? rawUsage.output_tokens : 0,
-              total: typeof rawUsage.total_tokens === "number" ? rawUsage.total_tokens : undefined,
-            }
-          : undefined;
-
+      // Defense-in-depth for items announced only in the terminal payload.
+      const scanResult = scanTerminalOutputForReasoning(resp);
+      if (!scanResult.ok) return scanResult;
+      this.completed = true;
+      const factsResult = captureOutcomeWireFacts(resp, this.outcomeWireOptions, "Responses");
+      if (!factsResult.ok) return factsResult;
+      this.outcomeWireOptions = factsResult.value;
+      const usageResult = parseResponsesUsage(resp.usage);
+      if (!usageResult.ok) return usageResult;
       return {
         ok: true,
         value: [
@@ -557,7 +295,7 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
             type: "response_end",
             responseId: this.session.responseId,
             finish: { reason: "stop" },
-            usage,
+            ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
           },
         ],
       };
@@ -565,6 +303,9 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (eventName === "response.incomplete") {
       const resp = (chunk.response ?? {}) as Record<string, unknown>;
+      // Defense-in-depth for items announced only in the terminal payload.
+      const scanResult = scanTerminalOutputForReasoning(resp);
+      if (!scanResult.ok) return scanResult;
       const details = (resp.incomplete_details ?? {}) as Record<string, unknown>;
       if (details.reason !== "max_output_tokens") {
         return {
@@ -576,16 +317,11 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       }
 
       this.completed = true;
-      const rawUsage = resp.usage as Record<string, unknown> | undefined;
-      const usage =
-        rawUsage !== undefined
-          ? {
-              input: typeof rawUsage.input_tokens === "number" ? rawUsage.input_tokens : 0,
-              output: typeof rawUsage.output_tokens === "number" ? rawUsage.output_tokens : 0,
-              total: typeof rawUsage.total_tokens === "number" ? rawUsage.total_tokens : undefined,
-            }
-          : undefined;
-
+      const factsResult = captureOutcomeWireFacts(resp, this.outcomeWireOptions, "Responses");
+      if (!factsResult.ok) return factsResult;
+      this.outcomeWireOptions = factsResult.value;
+      const usageResult = parseResponsesUsage(resp.usage);
+      if (!usageResult.ok) return usageResult;
       return {
         ok: true,
         value: [
@@ -593,7 +329,7 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
             type: "response_end",
             responseId: this.session.responseId,
             finish: { reason: "length" },
-            usage,
+            ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
           },
         ],
       };
@@ -633,14 +369,23 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
 
 /**
  * Encodes semantic IR stream events into client-native OpenAI Responses SSE frames.
+ *
+ * The terminal completion event carries detailed usage subdivisions plus the
+ * effective service-tier echo and moderation result when one was captured for
+ * this direction.
  */
 export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
   readonly protocol = "openai-responses" as const;
   private readonly session: StreamSession;
   private sequenceNumber = 1;
+  private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(session: StreamSession) {
     this.session = session;
+  }
+
+  setOutcomeWireOptions(options: OutcomeWireOptions): void {
+    this.outcomeWireOptions = options;
   }
 
   encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure> {
@@ -725,29 +470,20 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "response_end") {
-      const usage =
-        event.usage !== undefined
-          ? {
-              input_tokens: event.usage.input,
-              output_tokens: event.usage.output,
-              ...(event.usage.total !== undefined ? { total_tokens: event.usage.total } : {}),
-            }
-          : undefined;
+      const usage = event.usage !== undefined ? responsesUsageBody(event.usage) : undefined;
 
-      if (event.finish.reason === "stop") {
-        frames.push({
-          event: "response.completed",
-          data: JSON.stringify({
-            type: "response.completed",
-            response: {
-              id,
-              status: "completed",
-              ...(usage !== undefined ? { usage } : {}),
-            },
-            sequence_number: this.sequenceNumber++,
-          }),
-        });
-      } else if (event.finish.reason === "length") {
+      const responseExtras: Record<string, unknown> = {
+        ...(usage !== undefined ? { usage } : {}),
+        // Sidecar facts project through the same helper the complete-path
+        // egress uses.
+        ...responsesOutcomeWireFields(this.outcomeWireOptions),
+      };
+
+      // Every terminal outcome produces a success terminator: the length
+      // reason maps to response.incomplete, every other admitted reason to
+      // response.completed — the shared narrowing rule keeps a client stream
+      // from ever hanging without a terminator.
+      if (responsesFinishStatus(event.finish.reason) === "incomplete") {
         frames.push({
           event: "response.incomplete",
           data: JSON.stringify({
@@ -756,7 +492,20 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
               id,
               status: "incomplete",
               incomplete_details: { reason: "max_output_tokens" },
-              ...(usage !== undefined ? { usage } : {}),
+              ...responseExtras,
+            },
+            sequence_number: this.sequenceNumber++,
+          }),
+        });
+      } else {
+        frames.push({
+          event: "response.completed",
+          data: JSON.stringify({
+            type: "response.completed",
+            response: {
+              id,
+              status: "completed",
+              ...responseExtras,
             },
             sequence_number: this.sequenceNumber++,
           }),

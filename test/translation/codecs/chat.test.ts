@@ -19,7 +19,7 @@ test.concurrent("translation codec chat: decodes and encodes request", () => {
   const decodeRes = decoder.decodeRequest(chatBody);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const ir = decodeRes.value;
+    const ir = decodeRes.value.irRequest;
     assert.equal(ir.model, "gpt-4o");
     assert.equal(ir.items.length, 2);
 
@@ -105,7 +105,7 @@ test.concurrent("translation codec chat: decodes and encodes outcome", () => {
   const decodeRes = decoder.decodeOutcome(200, {}, chatResponse);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const outcome = decodeRes.value;
+    const outcome = decodeRes.value.irOutcome;
     assert.equal(outcome.finish.reason, "stop");
     assert.equal(outcome.usage?.total, 18);
 

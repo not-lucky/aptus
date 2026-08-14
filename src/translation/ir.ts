@@ -115,8 +115,16 @@ export type IrToolChoice =
   | { readonly type: "required" }
   | { readonly type: "named"; readonly name: string };
 
+/** Admitted text-verbosity literals (IR range). */
+export const VERBOSITY_VALUES = ["low", "medium", "high"] as const;
+export type Verbosity = (typeof VERBOSITY_VALUES)[number];
+
+/** Admitted common reasoning-effort literals (IR range). */
+export const REASONING_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORT_VALUES)[number];
+
 export interface IrReasoningControl {
-  readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  readonly effort?: ReasoningEffort;
 }
 
 export type IrOutputFormat =
@@ -131,7 +139,7 @@ export type IrOutputFormat =
 
 export interface IrGenerationControls {
   readonly temperature?: number;
-  readonly verbosity?: "low" | "medium" | "high";
+  readonly verbosity?: Verbosity;
   readonly topP?: number;
   readonly maxOutputTokens?: number;
   readonly stopSequences?: NonEmpty<string>;

@@ -1,67 +1,32 @@
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
-import type { EgressEncoder } from "../../contracts.ts";
+import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import { buildMessagesRequestBody, messagesStopReason, messagesUsageBody } from "../shared.ts";
 
 /**
  * Egress encoder for Anthropic Messages requests and responses.
+ *
+ * Request encoding delegates to {@link buildMessagesRequestBody}, which
+ * projects IR generation controls and the T2 wire-only sidecar fields onto
+ * Messages wire fields: metadata collapses to the single user_id entry, only
+ * the `auto` service tier maps, and prompt-cache breakpoints are re-anchored
+ * as per-block `cache_control` markers with declared TTL loss. The required
+ * `max_tokens` is resolved by the coordinator (user value first, model
+ * default as fallback) and is intentionally not emitted here.
+ *
+ * Outcome encoding reconstructs Anthropic usage accounting from the IR totals
+ * (`input_tokens = input - cacheRead - cacheWrite`) and echoes a matched stop
+ * sequence with the `stop_sequence` stop reason.
  */
 export class MessagesEgressEncoder implements EgressEncoder {
-  encodeRequest(request: IrRequest, targetModel: string): JsonObject {
-    const systemBlocks: JsonObject[] = [];
-    const messages: JsonObject[] = [];
-
-    let scanningLeadingInstructions = true;
-
-    for (const item of request.items) {
-      if (item.type === "instruction" && scanningLeadingInstructions) {
-        systemBlocks.push({
-          type: "text",
-          text: item.text,
-        });
-        continue;
-      }
-
-      scanningLeadingInstructions = false;
-
-      if (item.type === "message") {
-        const contentBlocks: JsonObject[] = [];
-        for (const part of item.content) {
-          if (part.type === "text") {
-            contentBlocks.push({
-              type: "text",
-              text: part.text,
-            });
-          }
-        }
-
-        // T2: Turn merging for consecutive same-role turns into Messages
-        const lastMessage = messages[messages.length - 1];
-        if (lastMessage !== undefined && lastMessage.role === item.role) {
-          const existingContent = lastMessage.content as JsonObject[];
-          existingContent.push(...contentBlocks);
-        } else {
-          messages.push({
-            role: item.role,
-            content: contentBlocks,
-          });
-        }
-      }
-    }
-
-    const payload: Record<string, unknown> = {
-      model: targetModel,
-      messages,
-      stream: false,
-    };
-
-    if (systemBlocks.length > 0) {
-      payload.system = systemBlocks;
-    }
-
-    return payload as JsonObject;
+  encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
+    return buildMessagesRequestBody(request, targetModel, false, requestWireOptions);
   }
 
-  encodeOutcome(outcome: IrOutcome): {
+  encodeOutcome(
+    outcome: IrOutcome,
+    _outcomeWireOptions?: OutcomeWireOptions,
+  ): {
     readonly status: number;
     readonly headers: HeaderMap;
     readonly body: JsonObject;
@@ -73,17 +38,15 @@ export class MessagesEgressEncoder implements EgressEncoder {
       }
     }
 
-    const stopReason = outcome.finish.reason === "length" ? "max_tokens" : "end_turn";
+    // A matched stop sequence is echoed with its own stop reason so the M
+    // framing stays valid; other reasons keep their natural spelling.
+    const stopReason = messagesStopReason(outcome.finish);
 
     // Never fabricate usage: absence is distinct from zero, so the field is
-    // omitted unless the IR outcome actually reports counters.
-    const usage: JsonObject | undefined =
-      outcome.usage === undefined
-        ? undefined
-        : {
-            input_tokens: outcome.usage.input,
-            output_tokens: outcome.usage.output,
-          };
+    // omitted unless the IR outcome actually reports counters. The base input
+    // excludes the cached subdivisions because M's `input_tokens` counts only
+    // tokens after the last cache breakpoint (subdivisions are never re-added).
+    const usage = outcome.usage !== undefined ? messagesUsageBody(outcome.usage) : undefined;
 
     const id = outcome.responseId.startsWith("msg_") ? outcome.responseId : `msg_${outcome.responseId}`;
 

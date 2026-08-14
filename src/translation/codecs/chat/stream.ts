@@ -2,144 +2,47 @@ import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type {
   ClientStreamEncoder,
+  OutcomeWireOptions,
   ProviderStreamDecoder,
+  RequestWireOptions,
+  StreamRequestDecodeResult,
   StreamRequestDecoder,
   StreamRequestEncoder,
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
 import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
-import type {
-  IrAssistantPart,
-  IrGenerationControls,
-  IrInputPart,
-  IrItem,
-  IrRequest,
-  IrStreamEvent,
-  IrUsage,
-  NonEmpty,
-} from "../../ir.ts";
+import type { IrRequest, IrStreamEvent, IrUsage } from "../../ir.ts";
 import type { SseFrame } from "../../sse.ts";
-
-const RECOGNIZED_CHAT_REQUEST_FIELDS = new Set([
-  "model",
-  "messages",
-  "stream",
-  "temperature",
-  "top_p",
-  "max_completion_tokens",
-  "max_tokens",
-  "stop",
-  "verbosity",
-  "reasoning_effort",
-  "parallel_tool_calls",
-  "n",
-  "store",
-  "metadata",
-  "user",
-  "seed",
-  "logit_bias",
-  "logprobs",
-  "top_logprobs",
-  "frequency_penalty",
-  "presence_penalty",
-  "moderation",
-  "service_tier",
-  "safety_identifier",
-  "prediction",
-  "stream_options",
-  "functions",
-  "function_call",
-  "tools",
-  "tool_choice",
-  "response_format",
-  "audio",
-  "modalities",
-]);
+import {
+  buildChatMessages,
+  captureOutcomeWireFacts,
+  chatFinishReason,
+  chatGenerationFields,
+  chatOutcomeWireFields,
+  chatResponsesRequestFields,
+  chatUsageBody,
+  parseChatUsage,
+  reanchorChatBreakpoints,
+} from "../shared.ts";
+import { parseChatRequestBody } from "./ingress.ts";
 
 /**
  * Decodes a streaming OpenAI Chat Completions request.
+ *
+ * Capability rejections, wire-only sidecar capture, transcript items, and
+ * generation controls are shared verbatim with the complete-path ingress; this
+ * decoder adds only the stream-specific `stream_options` handling.
  */
 export class ChatStreamRequestDecoder implements StreamRequestDecoder {
-  decodeRequest(
-    body: JsonObject,
-  ): Result<{ readonly irRequest: IrRequest; readonly sourceWireOptions: StreamWireOptions }, NormalizedFailure> {
-    if (typeof body.model !== "string" || body.model.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Chat request missing required string property 'model'"),
-      };
-    }
-
-    if (!Array.isArray(body.messages) || body.messages.length === 0) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Chat request missing required non-empty array property 'messages'"),
-      };
-    }
-
-    if (body.n !== undefined && body.n !== 1) {
-      return { ok: false, error: unsupportedCapabilityFailure("multiple-candidates") };
-    }
-    if (body.store !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("responses-storage") };
-    }
-    if (body.metadata !== undefined || body.user !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("request-metadata") };
-    }
-    if (body.seed !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("seed-determinism") };
-    }
-    if (body.logit_bias !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("token-logit-bias") };
-    }
-    if (body.logprobs !== undefined || body.top_logprobs !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("token-logprobs") };
-    }
-    if (body.frequency_penalty !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("frequency-penalty") };
-    }
-    if (body.presence_penalty !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("presence-penalty") };
-    }
-    if (body.moderation !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("moderation-policy-result") };
-    }
-    if (body.service_tier !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("service-tier") };
-    }
-    if (body.safety_identifier !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("safety-identifier") };
-    }
-    if (body.prediction !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("chat-predicted-outputs") };
-    }
-    if (body.functions !== undefined || body.function_call !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("chat-legacy-functions") };
-    }
-    if (body.max_tokens !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("chat-legacy-max-tokens") };
-    }
-    if (body.tools !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-    }
-    if (body.tool_choice !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("tool-choice-none-auto-required") };
-    }
-    if (body.parallel_tool_calls !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("parallel-tool-calls") };
-    }
-    if (body.response_format !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("structured-json-schema") };
-    }
-    if (body.audio !== undefined || body.modalities !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("audio-input") };
-    }
-
+  decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
+    // The wire documents `stream_options` as object OR null: explicit null is
+    // absence; any other non-object fails. `include_usage` is parsed strictly
+    // in the same pass: absent or null means off, and any non-boolean value is
+    // malformed Chat wire instead of a silent coercion.
     let includeUsage = false;
-
-    if (body.stream_options !== undefined) {
-      if (typeof body.stream_options !== "object" || body.stream_options === null) {
+    if (body.stream_options !== undefined && body.stream_options !== null) {
+      if (typeof body.stream_options !== "object") {
         return { ok: false, error: invalidRequestFailure("Chat 'stream_options' must be an object") };
       }
       const streamOptions = body.stream_options as Record<string, unknown>;
@@ -147,263 +50,76 @@ export class ChatStreamRequestDecoder implements StreamRequestDecoder {
       // wire-only OpenAI concern and the translated target always disables it.
       for (const key of Object.keys(streamOptions)) {
         if (key === "include_usage") {
-          includeUsage = streamOptions.include_usage === true;
-        } else if (key !== "include_obfuscation") {
+          const rawIncludeUsage = streamOptions.include_usage;
+          if (rawIncludeUsage !== undefined && rawIncludeUsage !== null) {
+            if (typeof rawIncludeUsage !== "boolean") {
+              return {
+                ok: false,
+                error: invalidRequestFailure("stream_options.include_usage must be a boolean when present"),
+              };
+            }
+            includeUsage = rawIncludeUsage;
+          }
+          continue;
+        }
+        if (key !== "include_obfuscation") {
           return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
         }
       }
     }
 
-    for (const key of Object.keys(body)) {
-      if (!RECOGNIZED_CHAT_REQUEST_FIELDS.has(key)) {
-        return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
-      }
-    }
-
-    const items: IrItem[] = [];
-    for (let i = 0; i < body.messages.length; i++) {
-      const msg = body.messages[i];
-      if (typeof msg !== "object" || msg === null) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Chat message [${i}] must be an object`),
-        };
-      }
-      const rawMsg = msg as Record<string, unknown>;
-      const role = rawMsg.role;
-
-      if (rawMsg.name !== undefined && rawMsg.name !== null && String(rawMsg.name).trim() !== "") {
-        return { ok: false, error: unsupportedCapabilityFailure("message-name") };
-      }
-
-      if (role === "system" || role === "developer") {
-        let text = "";
-        if (typeof rawMsg.content === "string") {
-          text = rawMsg.content;
-        } else if (Array.isArray(rawMsg.content)) {
-          for (const rawPart of rawMsg.content) {
-            const part = rawPart as Record<string, unknown>;
-            if (part?.type === "text" && typeof part.text === "string") {
-              text += part.text;
-            } else {
-              return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-            }
-          }
-        } else {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Instruction message [${i}] missing string or array content`),
-          };
-        }
-        items.push({
-          type: "instruction",
-          authority: role,
-          separation: "advisory",
-          text,
-        });
-        continue;
-      }
-
-      if (role === "user") {
-        const parts: IrInputPart[] = [];
-        if (typeof rawMsg.content === "string") {
-          parts.push({ type: "text", text: rawMsg.content });
-        } else if (Array.isArray(rawMsg.content)) {
-          for (let pIdx = 0; pIdx < rawMsg.content.length; pIdx++) {
-            const rawPart = rawMsg.content[pIdx] as Record<string, unknown>;
-            if (rawPart?.type === "text" && typeof rawPart.text === "string") {
-              parts.push({ type: "text", text: rawPart.text });
-            } else if (rawPart?.type === "image_url") {
-              return { ok: false, error: unsupportedCapabilityFailure("image-url") };
-            } else if (rawPart?.type === "input_audio") {
-              return { ok: false, error: unsupportedCapabilityFailure("audio-input") };
-            } else {
-              return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-            }
-          }
-        } else {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`User message [${i}] missing string or array content`),
-          };
-        }
-        if (parts.length === 0) {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`User message [${i}] has empty content`),
-          };
-        }
-        items.push({
-          type: "message",
-          role: "user",
-          content: parts as unknown as NonEmpty<IrInputPart>,
-        });
-        continue;
-      }
-
-      if (role === "assistant") {
-        if (rawMsg.tool_calls !== undefined) {
-          return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-        }
-        if (rawMsg.audio !== undefined) {
-          return { ok: false, error: unsupportedCapabilityFailure("audio-output") };
-        }
-
-        const parts: IrAssistantPart[] = [];
-        if (typeof rawMsg.content === "string") {
-          parts.push({ type: "text", text: rawMsg.content });
-        } else if (Array.isArray(rawMsg.content)) {
-          for (let pIdx = 0; pIdx < rawMsg.content.length; pIdx++) {
-            const rawPart = rawMsg.content[pIdx] as Record<string, unknown>;
-            if (rawPart?.type === "text" && typeof rawPart.text === "string") {
-              parts.push({ type: "text", text: rawPart.text });
-            } else if (rawPart?.type === "refusal") {
-              return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
-            } else {
-              return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-            }
-          }
-        } else if (rawMsg.refusal !== undefined && rawMsg.refusal !== null) {
-          return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
-        } else {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Assistant message [${i}] missing string or array content`),
-          };
-        }
-        if (parts.length === 0) {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Assistant message [${i}] has empty content`),
-          };
-        }
-        items.push({
-          type: "message",
-          role: "assistant",
-          content: parts as unknown as NonEmpty<IrAssistantPart>,
-        });
-        continue;
-      }
-
-      if (role === "function") {
-        return { ok: false, error: unsupportedCapabilityFailure("chat-legacy-function-role") };
-      }
-      if (role === "tool") {
-        return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-      }
-
-      return {
-        ok: false,
-        error: invalidRequestFailure(`Unknown role '${String(role)}' in Chat message [${i}]`),
-      };
-    }
-
-    let generation: IrGenerationControls | undefined;
-    if (
-      body.temperature !== undefined ||
-      body.top_p !== undefined ||
-      body.max_completion_tokens !== undefined ||
-      body.stop !== undefined ||
-      body.verbosity !== undefined ||
-      body.reasoning_effort !== undefined
-    ) {
-      let stopSequences: NonEmpty<string> | undefined;
-      if (typeof body.stop === "string") {
-        stopSequences = [body.stop];
-      } else if (Array.isArray(body.stop) && body.stop.length > 0) {
-        stopSequences = body.stop as unknown as NonEmpty<string>;
-      }
-
-      generation = {
-        temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-        topP: typeof body.top_p === "number" ? body.top_p : undefined,
-        maxOutputTokens: typeof body.max_completion_tokens === "number" ? body.max_completion_tokens : undefined,
-        verbosity:
-          typeof body.verbosity === "string" &&
-          (body.verbosity === "low" || body.verbosity === "medium" || body.verbosity === "high")
-            ? body.verbosity
-            : undefined,
-        stopSequences,
-        reasoning:
-          typeof body.reasoning_effort === "string"
-            ? { effort: body.reasoning_effort as "low" | "medium" | "high" }
-            : undefined,
-      };
-    }
-
-    const irRequest: IrRequest = {
-      model: body.model,
-      delivery: "stream",
-      items,
-      generation,
-    };
+    const parsed = parseChatRequestBody(body, "stream");
+    if (!parsed.ok) return parsed;
 
     return {
       ok: true,
       value: {
-        irRequest,
-        sourceWireOptions: {
-          includeUsage,
-        },
+        irRequest: parsed.value.irRequest,
+        sourceWireOptions: { includeUsage },
+        requestWireOptions: parsed.value.requestWireOptions,
       },
     };
   }
 }
 
 /**
- * Encodes an {@link IrRequest} into target OpenAI Chat stream request JSON.
+ * Encodes an {@link IrRequest} into target OpenAI Chat stream request JSON,
+ * projecting generation controls and the admitted wire-only sidecar fields
+ * exactly like the complete-path encoder.
  */
 export class ChatStreamRequestEncoder implements StreamRequestEncoder {
-  encodeRequest(request: IrRequest, targetModel: string, wireOptions: StreamWireOptions): JsonObject {
-    const messages: JsonObject[] = [];
+  encodeRequest(
+    request: IrRequest,
+    targetModel: string,
+    wireOptions: StreamWireOptions,
+    requestWireOptions?: RequestWireOptions,
+  ): JsonObject {
+    const build = buildChatMessages(request.items);
 
-    for (const item of request.items) {
-      if (item.type === "instruction") {
-        messages.push({
-          role: item.authority,
-          content: item.text,
-        });
-      } else if (item.type === "message") {
-        if (item.role === "user") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          messages.push({
-            role: "user",
-            content: text,
-          });
-        } else if (item.role === "assistant") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          messages.push({
-            role: "assistant",
-            content: text,
-          });
-        }
-      }
-    }
+    // Re-anchor prompt-cache breakpoints onto the reconstructed message parts.
+    reanchorChatBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
 
     return {
       model: targetModel,
-      messages,
+      messages: build.entries,
       stream: true,
       stream_options: {
         include_usage: wireOptions.includeUsage ?? false,
         include_obfuscation: false,
       },
+      ...chatGenerationFields(request.generation),
+      ...chatResponsesRequestFields(requestWireOptions),
     };
   }
 }
 
 /**
  * Decodes an upstream OpenAI Chat SSE stream into semantic IR stream events.
+ *
+ * The final usage chunk collapses into `response_end.usage` with its
+ * cache/reasoning subdivisions (`usage-stream-timing`). The service-tier echo
+ * and moderation result are documented optional fields on every chunk and are
+ * captured last-write-wins for the outcome wire-options sidecar.
  */
 export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "openai-chat" as const;
@@ -415,12 +131,24 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
   private sawDone = false;
   private finishReason: "stop" | "length" | undefined;
   private pendingUsage: IrUsage | undefined;
+  private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(session: StreamSession) {
     this.session = session;
   }
 
+  getOutcomeWireOptions(): OutcomeWireOptions {
+    return this.outcomeWireOptions;
+  }
+
   push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure> {
+    // The success terminator already went out on [DONE]; any later frame is a
+    // misbehaving provider stream and fails closed instead of re-emitting a
+    // second terminal event.
+    if (this.sawDone) {
+      return { ok: false, error: invalidRequestFailure("Chat stream received frame after the [DONE] sentinel") };
+    }
+
     const trimmedData = frame.data.trim();
     if (trimmedData === "[DONE]") {
       this.sawDone = true;
@@ -430,7 +158,7 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
           type: "response_end",
           responseId: this.session.responseId,
           finish: { reason: this.finishReason },
-          usage: this.pendingUsage,
+          ...(this.pendingUsage !== undefined ? { usage: this.pendingUsage } : {}),
         });
       }
       return { ok: true, value: events };
@@ -475,19 +203,28 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
       };
     }
 
+    // Per-chunk wire-only sidecar capture (last-write-wins): both fields are
+    // documented optional on every chunk, not only the terminal usage chunk.
+    const factsResult = captureOutcomeWireFacts(chunk, this.outcomeWireOptions, "Chat stream chunk");
+    if (!factsResult.ok) return factsResult;
+    this.outcomeWireOptions = factsResult.value;
+
     const events: IrStreamEvent[] = [];
 
     // Final usage chunk (empty choices array)
     if (chunk.choices.length === 0) {
-      if (chunk.usage !== undefined && chunk.usage !== null && typeof chunk.usage === "object") {
-        const rawUsage = chunk.usage as Record<string, unknown>;
-        this.pendingUsage = {
-          input: typeof rawUsage.prompt_tokens === "number" ? rawUsage.prompt_tokens : 0,
-          output: typeof rawUsage.completion_tokens === "number" ? rawUsage.completion_tokens : 0,
-          total: typeof rawUsage.total_tokens === "number" ? rawUsage.total_tokens : undefined,
-        };
-      }
+      // The usage shape rules (null is absence, non-object fails closed) live
+      // in parseChatUsage so the complete and stream paths cannot drift.
+      const usageResult = parseChatUsage(chunk.usage);
+      if (!usageResult.ok) return usageResult;
+      this.pendingUsage = usageResult.value;
       return { ok: true, value: [] };
+    }
+
+    // Multiple candidates in one chunk evade the request-side `n` check; the
+    // streaming wire carries exactly one choice per chunk.
+    if (chunk.choices.length > 1) {
+      return { ok: false, error: unsupportedCapabilityFailure("multiple-candidates") };
     }
 
     const choice = chunk.choices[0] as Record<string, unknown>;
@@ -591,12 +328,20 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
 
 /**
  * Encodes semantic IR stream events into client-native OpenAI Chat SSE frames.
+ *
+ * When the client asked for usage (`include_usage`), the final usage chunk is
+ * synthesized with totals plus cache/reasoning subdivisions. The effective
+ * service-tier echo and the moderation result (re-wrapped into the Chat verdict
+ * envelope per side, preserving the `{input, output}` split) ride on that usage
+ * chunk when present, otherwise on the terminal finish chunk — neither is lost
+ * when `include_usage` was not requested.
  */
 export class ChatClientStreamEncoder implements ClientStreamEncoder {
   readonly protocol = "openai-chat" as const;
   private readonly session: StreamSession;
   private readonly wireOptions: StreamWireOptions;
   private readonly created: number;
+  private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(
     session: StreamSession,
@@ -606,6 +351,10 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
     this.session = session;
     this.wireOptions = wireOptions;
     this.created = now();
+  }
+
+  setOutcomeWireOptions(options: OutcomeWireOptions): void {
+    this.outcomeWireOptions = options;
   }
 
   encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure> {
@@ -654,7 +403,14 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
     if (event.type === "response_end") {
       const frames: SseFrame[] = [];
 
-      // Terminal finish chunk
+      const emitUsageChunk = this.wireOptions.includeUsage === true && event.usage !== undefined;
+      // Outcome sidecar facts re-wrapped to the Chat client wire shape by the
+      // same projection the complete-path egress uses.
+      const sidecarExtras: Record<string, unknown> = chatOutcomeWireFields(this.outcomeWireOptions);
+
+      // Terminal finish chunk. C/R never report a matched stop string, so a
+      // captured IrFinish.stopSequence maps to the natural stop reason via the
+      // shared narrowing rule.
       const terminalChunk = {
         id,
         object: "chat.completion.chunk",
@@ -664,25 +420,23 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
           {
             index: 0,
             delta: {},
-            finish_reason: event.finish.reason,
+            finish_reason: chatFinishReason(event.finish.reason),
           },
         ],
+        ...(!emitUsageChunk ? sidecarExtras : {}),
       };
       frames.push({ data: JSON.stringify(terminalChunk) });
 
-      // Optional final usage chunk
-      if (this.wireOptions.includeUsage === true && event.usage !== undefined) {
+      // Optional final usage chunk with detailed subdivisions.
+      if (emitUsageChunk) {
         const usageChunk = {
           id,
           object: "chat.completion.chunk",
           created,
           model,
           choices: [],
-          usage: {
-            prompt_tokens: event.usage.input,
-            completion_tokens: event.usage.output,
-            ...(event.usage.total !== undefined ? { total_tokens: event.usage.total } : {}),
-          },
+          usage: chatUsageBody(event.usage),
+          ...sidecarExtras,
         };
         frames.push({ data: JSON.stringify(usageChunk) });
       }

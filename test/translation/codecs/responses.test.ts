@@ -16,7 +16,7 @@ test.concurrent("translation codec responses: decodes and encodes request", () =
   const decodeRes = decoder.decodeRequest(responsesBody);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const ir = decodeRes.value;
+    const ir = decodeRes.value.irRequest;
     assert.equal(ir.model, "gpt-5.4");
     assert.equal(ir.items.length, 2);
 
@@ -76,7 +76,7 @@ test.concurrent("translation codec responses: decodes and encodes outcome", () =
   const decodeRes = decoder.decodeOutcome(200, {}, responsesResponse);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const outcome = decodeRes.value;
+    const outcome = decodeRes.value.irOutcome;
     assert.equal(outcome.finish.reason, "stop");
     assert.equal(outcome.usage?.input, 15);
     assert.equal(outcome.usage?.output, 12);
@@ -89,4 +89,35 @@ test.concurrent("translation codec responses: decodes and encodes outcome", () =
     assert.equal(body.output[0]?.content[0]?.text, "Hello from Responses!");
     assert.equal(body.usage.input_tokens, 15);
   }
+});
+
+test.concurrent("translation codec responses: text null fails invalid_request on the shared request parser", () => {
+  // `text` is documented as an object (the verbosity wrapper), so an explicit
+  // null is malformed wire, never silently coerced to absence.
+  const decoder = new ResponsesIngressDecoder();
+  const res = decoder.decodeRequest({
+    model: "wire-model",
+    input: "Hello!",
+    text: null,
+  });
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.equal(res.error.capability, undefined);
+});
+
+test.concurrent("translation codec responses: prompt_cache_breakpoint on an assistant output_text part fails invalid_request", () => {
+  // The R wire admits breakpoint markers only on input_text/input_image/input_file
+  // parts; an assistant output_text part carrying one is malformed wire.
+  const decoder = new ResponsesIngressDecoder();
+  const res = decoder.decodeRequest({
+    model: "wire-model",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "Hi", prompt_cache_breakpoint: { mode: "explicit" } }] },
+      {
+        role: "assistant",
+        content: [{ type: "output_text", text: "prev", prompt_cache_breakpoint: { mode: "explicit" } }],
+      },
+    ],
+  });
+  assert.equal(res.ok, false);
+  if (!res.ok) assert.equal(res.error.capability, undefined);
 });

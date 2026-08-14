@@ -1,9 +1,24 @@
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
-import type { EgressEncoder } from "../../contracts.ts";
+import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import {
+  buildChatMessages,
+  chatFinishReason,
+  chatGenerationFields,
+  chatOutcomeWireFields,
+  chatResponsesRequestFields,
+  chatUsageBody,
+  reanchorChatBreakpoints,
+} from "../shared.ts";
 
 /**
  * Egress encoder for OpenAI Chat Completions requests and responses.
+ *
+ * Request encoding projects IR generation controls and the admitted wire-only
+ * sidecar fields onto Chat wire fields; per-part prompt-cache breakpoints are
+ * re-anchored onto the reconstructed message parts. Outcome encoding emits
+ * usage subdivisions, the moderation result (re-wrapped into the Chat verdict
+ * envelope), and the effective service-tier echo.
  */
 export class ChatEgressEncoder implements EgressEncoder {
   /**
@@ -16,50 +31,25 @@ export class ChatEgressEncoder implements EgressEncoder {
     this.now = now;
   }
 
-  encodeRequest(request: IrRequest, targetModel: string): JsonObject {
-    const messages: JsonObject[] = [];
+  encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
+    const build = buildChatMessages(request.items);
 
-    for (const item of request.items) {
-      if (item.type === "instruction") {
-        messages.push({
-          role: item.authority,
-          content: item.text,
-        });
-      } else if (item.type === "message") {
-        if (item.role === "user") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          messages.push({
-            role: "user",
-            content: text,
-          });
-        } else if (item.role === "assistant") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          messages.push({
-            role: "assistant",
-            content: text,
-          });
-        }
-      }
-    }
+    // Re-anchor prompt-cache breakpoints onto the reconstructed message parts.
+    reanchorChatBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
 
     return {
       model: targetModel,
-      messages,
+      messages: build.entries,
       stream: false,
+      ...chatGenerationFields(request.generation),
+      ...chatResponsesRequestFields(requestWireOptions),
     };
   }
 
-  encodeOutcome(outcome: IrOutcome): {
+  encodeOutcome(
+    outcome: IrOutcome,
+    outcomeWireOptions?: OutcomeWireOptions,
+  ): {
     readonly status: number;
     readonly headers: HeaderMap;
     readonly body: JsonObject;
@@ -71,18 +61,13 @@ export class ChatEgressEncoder implements EgressEncoder {
       }
     }
 
-    const finishReason = outcome.finish.reason === "length" ? "length" : "stop";
+    const finishReason = chatFinishReason(outcome.finish.reason);
 
     // Never fabricate usage: Chat may omit it, so the field is present only when
     // the IR outcome actually reports counters (absence is distinct from zero).
-    const usage: JsonObject | undefined =
-      outcome.usage === undefined
-        ? undefined
-        : {
-            prompt_tokens: outcome.usage.input,
-            completion_tokens: outcome.usage.output,
-            ...(outcome.usage.total !== undefined ? { total_tokens: outcome.usage.total } : {}),
-          };
+    // Subdivisions ride in the documented details objects and are never
+    // re-added to the totals.
+    const usage = outcome.usage !== undefined ? chatUsageBody(outcome.usage) : undefined;
 
     const body: JsonObject = {
       id: `chatcmpl-${outcome.responseId}`,
@@ -101,6 +86,10 @@ export class ChatEgressEncoder implements EgressEncoder {
         },
       ],
       ...(usage !== undefined ? { usage } : {}),
+      // The moderation result re-wraps into the Chat verdict envelope and the
+      // tier echo passes through; both projections are shared with the
+      // streaming client encoder.
+      ...chatOutcomeWireFields(outcomeWireOptions),
     };
 
     return {

@@ -261,6 +261,7 @@ test.concurrent("process: plain-text complete translation succeeds in all six di
       model: "gpt-5.4",
       messages: [{ role: "user", content: "Hello, Claude" }],
       stream: false,
+      max_completion_tokens: 1024,
     });
     const mToCBody = (await mToCRes.json()) as {
       type: string;
@@ -285,6 +286,7 @@ test.concurrent("process: plain-text complete translation succeeds in all six di
       model: "gpt-5.4",
       input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Hello, Claude" }] }],
       stream: false,
+      max_output_tokens: 1024,
     });
     const mToRBody = (await mToRRes.json()) as {
       type: string;

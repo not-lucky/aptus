@@ -98,8 +98,9 @@ test.concurrent("messages stream decoder: consumes ping and aggregates cumulativ
     assert.equal(r6.value[0]?.type, "response_end");
     if (r6.value[0]?.type === "response_end") {
       assert.equal(r6.value[0].finish.reason, "stop");
-      // Collapse cumulative usage: input 10 + cache_read 5 + cache_creation 2 = 17 input tokens
-      assert.deepEqual(r6.value[0].usage, { input: 17, output: 8 });
+      // Collapse cumulative usage: input 10 + cache_read 5 + cache_creation 2 = 17
+      // input tokens; cache subdivisions ride as observations on the totals.
+      assert.deepEqual(r6.value[0].usage, { input: 17, output: 8, cacheReadInput: 5, cacheWriteInput: 2 });
     }
   }
 
@@ -126,7 +127,7 @@ test.concurrent("messages stream decoder: collapses cumulative message_delta usa
     if (end?.type === "response_end") {
       // message_delta usage is cumulative, so the final value must win (10 + 5 = 15),
       // not be re-added to message_start (which would double to 30).
-      assert.deepEqual(end.usage, { input: 15, output: 8 });
+      assert.deepEqual(end.usage, { input: 15, output: 8, cacheReadInput: 5 });
     }
   }
 });
@@ -176,6 +177,60 @@ test.concurrent("messages stream encoder: encodes canonical named sequence with 
   const msgDeltaJson = JSON.parse(f5.value![0]?.data ?? "{}");
   assert.equal(msgDeltaJson.delta.stop_reason, "max_tokens");
   assert.deepEqual(msgDeltaJson.usage, { input_tokens: 17, output_tokens: 8 });
+});
+
+test.concurrent("messages stream encoder: reconstructs input_tokens from cache subdivisions and emits thinking_tokens", () => {
+  const encoder = new MessagesClientStreamEncoder(session);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
+
+  const endEvt: IrStreamEvent = {
+    type: "response_end",
+    responseId: "resp_123",
+    finish: { reason: "stop" },
+    usage: { input: 10, output: 4, cacheReadInput: 3, cacheWriteInput: 2, reasoningOutput: 5 },
+  };
+  const f = encoder.encode(endEvt);
+  assert.equal(f.ok, true);
+  if (f.ok) {
+    assert.equal(f.value[0]?.event, "message_delta");
+    const msgDeltaJson = JSON.parse(f.value[0]?.data ?? "{}");
+    // input_tokens = input - cacheReadInput - cacheWriteInput = 10 - 3 - 2 = 5;
+    // thinking_tokens rides under output_tokens_details as an observation.
+    assert.deepEqual(msgDeltaJson.usage, {
+      input_tokens: 5,
+      output_tokens: 4,
+      cache_read_input_tokens: 3,
+      cache_creation_input_tokens: 2,
+      output_tokens_details: { thinking_tokens: 5 },
+    });
+  }
+});
+
+test.concurrent("messages stream decoder: usage.inference_geo on message_start or message_delta fails closed", () => {
+  // Output-side discovery on message_start: no success terminator may follow.
+  const startDecoder = new MessagesProviderStreamDecoder(session);
+  const startRes = startDecoder.push({
+    event: "message_start",
+    data:
+      '{"type":"message_start","message":{"id":"msg_geo","type":"message","role":"assistant","content":[],"model":"claude","usage":{"input_tokens":10,"output_tokens":1,"inference_geo":"global"}}}',
+  });
+  assert.equal(startRes.ok, false);
+  if (!startRes.ok) assert.equal(startRes.error.capability, "inference-geography");
+
+  // Output-side discovery on message_delta: same fail-closed row.
+  const deltaDecoder = new MessagesProviderStreamDecoder(session);
+  deltaDecoder.push({
+    event: "message_start",
+    data:
+      '{"type":"message_start","message":{"id":"msg_geo","type":"message","role":"assistant","content":[],"model":"claude","usage":{"input_tokens":10,"output_tokens":1}}}',
+  });
+  const deltaRes = deltaDecoder.push({
+    event: "message_delta",
+    data:
+      '{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8,"inference_geo":"global"}}',
+  });
+  assert.equal(deltaRes.ok, false);
+  if (!deltaRes.ok) assert.equal(deltaRes.error.capability, "inference-geography");
 });
 
 test.concurrent("messages stream encoder: tracks monotonic part indices across multiple stream parts", () => {

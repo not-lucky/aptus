@@ -1,10 +1,26 @@
 import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
-import type { EgressEncoder } from "../../contracts.ts";
+import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import {
+  buildResponsesInput,
+  chatResponsesRequestFields,
+  reanchorResponsesBreakpoints,
+  responsesFinishStatus,
+  responsesGenerationFields,
+  responsesOutcomeWireFields,
+  responsesUsageBody,
+} from "../shared.ts";
 
 /**
  * Egress encoder for OpenAI Responses requests and responses.
+ *
+ * Request encoding projects IR generation controls (including `text.verbosity`
+ * and `reasoning.effort`) and the admitted wire-only sidecar fields onto
+ * Responses wire fields; per-part prompt-cache breakpoints are re-anchored onto
+ * the reconstructed input parts. Outcome encoding emits usage subdivisions,
+ * the moderation result in Responses' singular-verdict form, and the effective
+ * service-tier echo.
  */
 export class ResponsesEgressEncoder implements EgressEncoder {
   /**
@@ -17,67 +33,25 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     this.now = now;
   }
 
-  encodeRequest(request: IrRequest, targetModel: string): JsonObject {
-    const input: JsonObject[] = [];
+  encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
+    const build = buildResponsesInput(request.items);
 
-    for (const item of request.items) {
-      if (item.type === "instruction") {
-        input.push({
-          role: item.authority,
-          content: [
-            {
-              type: "input_text",
-              text: item.text,
-            },
-          ],
-        });
-      } else if (item.type === "message") {
-        if (item.role === "user") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          input.push({
-            type: "message",
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text,
-              },
-            ],
-          });
-        } else if (item.role === "assistant") {
-          let text = "";
-          for (const part of item.content) {
-            if (part.type === "text") {
-              text += part.text;
-            }
-          }
-          input.push({
-            type: "message",
-            role: "assistant",
-            content: [
-              {
-                type: "output_text",
-                text,
-              },
-            ],
-          });
-        }
-      }
-    }
+    // Re-anchor prompt-cache breakpoints onto the reconstructed input parts.
+    reanchorResponsesBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
 
     return {
       model: targetModel,
-      input,
+      input: build.entries,
       stream: false,
+      ...responsesGenerationFields(request.generation),
+      ...chatResponsesRequestFields(requestWireOptions),
     };
   }
 
-  encodeOutcome(outcome: IrOutcome): {
+  encodeOutcome(
+    outcome: IrOutcome,
+    outcomeWireOptions?: OutcomeWireOptions,
+  ): {
     readonly status: number;
     readonly headers: HeaderMap;
     readonly body: JsonObject;
@@ -90,18 +64,12 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     }
 
     const isLength = outcome.finish.reason === "length";
-    const status = isLength ? "incomplete" : "completed";
+    const status = responsesFinishStatus(outcome.finish.reason);
 
     // Never fabricate usage: the IR outcome decides presence, and absence is
-    // distinct from zero (a Chat source may omit usage entirely).
-    const usage: JsonObject | undefined =
-      outcome.usage === undefined
-        ? undefined
-        : {
-            input_tokens: outcome.usage.input,
-            output_tokens: outcome.usage.output,
-            ...(outcome.usage.total !== undefined ? { total_tokens: outcome.usage.total } : {}),
-          };
+    // distinct from zero (a Chat source may omit usage entirely). Subdivisions
+    // ride in the documented details objects and are never re-added.
+    const usage = outcome.usage !== undefined ? responsesUsageBody(outcome.usage) : undefined;
 
     const msgId = `msg_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const outputItem: JsonObject = {
@@ -127,6 +95,10 @@ export class ResponsesEgressEncoder implements EgressEncoder {
       model: outcome.model,
       output: [outputItem],
       ...(usage !== undefined ? { usage } : {}),
+      // The moderation result rides in Responses' singular-verdict form and the
+      // tier echo passes through; both projections are shared with the
+      // streaming client encoder.
+      ...responsesOutcomeWireFields(outcomeWireOptions),
     };
 
     return {

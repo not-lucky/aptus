@@ -37,6 +37,23 @@ test.concurrent("chat stream request: decodes and encodes stream options", () =>
   }
 });
 
+test.concurrent("chat stream request: stream_options null is treated as absent (include_usage off)", () => {
+  // An explicit null wrapper is absence on the request side: decode succeeds
+  // and usage inclusion stays off instead of failing closed.
+  const decoder = new ChatStreamRequestDecoder();
+  const res = decoder.decodeRequest({
+    model: "gpt-main",
+    messages: [{ role: "user", content: "hello" }],
+    stream: true,
+    stream_options: null,
+  });
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.value.irRequest.delivery, "stream");
+    assert.equal(res.value.sourceWireOptions.includeUsage, false);
+  }
+});
+
 test.concurrent("chat stream decoder: decodes chunks, usage, and [DONE]", () => {
   const decoder = new ChatProviderStreamDecoder(session);
 
@@ -139,5 +156,94 @@ test.concurrent("chat stream encoder: encodes clean frames and usage only when r
     assert.deepEqual(usageChunk.usage, { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 });
 
     assert.equal(f3.value[2]?.data, "[DONE]");
+  }
+});
+
+test.concurrent("chat stream encoder: emits detailed usage subdivisions only when include_usage is on", () => {
+  const endEvt: IrStreamEvent = {
+    type: "response_end",
+    responseId: "resp_123",
+    finish: { reason: "stop" },
+    usage: { input: 10, output: 4, cacheReadInput: 3, cacheWriteInput: 2, reasoningOutput: 5 },
+  };
+
+  const encoder = new ChatClientStreamEncoder(session, { includeUsage: true }, () => 1700000000);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "gpt-main" });
+  const f = encoder.encode(endEvt);
+  assert.equal(f.ok, true);
+  if (f.ok) {
+    assert.equal(f.value.length, 3); // finish chunk, usage chunk, [DONE]
+    const usageChunk = JSON.parse(f.value[1]?.data ?? "{}");
+    assert.equal(usageChunk.choices.length, 0);
+    assert.deepEqual(usageChunk.usage, {
+      prompt_tokens: 10,
+      completion_tokens: 4,
+      prompt_tokens_details: { cached_tokens: 3, cache_write_tokens: 2 },
+      completion_tokens_details: { reasoning_tokens: 5 },
+    });
+  }
+
+  // With include_usage off, no usage chunk is emitted even when usage is present.
+  const gatedEncoder = new ChatClientStreamEncoder(session, {}, () => 1700000000);
+  gatedEncoder.encode({ type: "response_start", responseId: "resp_123", model: "gpt-main" });
+  const gated = gatedEncoder.encode(endEvt);
+  assert.equal(gated.ok, true);
+  if (gated.ok) {
+    assert.equal(gated.value.length, 2); // finish chunk, [DONE]
+    for (const frame of gated.value) {
+      if (frame.data !== "[DONE]") {
+        assert.equal(JSON.parse(frame.data).usage, undefined);
+      }
+    }
+  }
+});
+
+test.concurrent("chat stream encoder: emits no final usage chunk when the provider never reported usage", () => {
+  // The provider never sent a terminal usage chunk, so response_end carries no
+  // usage; include_usage=true must not synthesize a zeroed final chunk.
+  const endWithoutUsage: IrStreamEvent = {
+    type: "response_end",
+    responseId: "resp_123",
+    finish: { reason: "stop" },
+  };
+
+  const encoder = new ChatClientStreamEncoder(session, { includeUsage: true }, () => 1700000000);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "gpt-main" });
+  const f = encoder.encode(endWithoutUsage);
+  assert.equal(f.ok, true);
+  if (f.ok) {
+    assert.equal(f.value.length, 2); // finish chunk, [DONE] — no usage chunk
+    const finishChunk = JSON.parse(f.value[0]?.data ?? "{}");
+    assert.equal(finishChunk.choices[0]?.finish_reason, "stop");
+    assert.equal("usage" in finishChunk, false);
+    assert.equal(f.value[1]?.data, "[DONE]");
+  }
+
+  // Full decoder→encoder parity: a provider stream with include_usage requested
+  // but no usage chunk produces the same no-usage client framing.
+  const decoder = new ChatProviderStreamDecoder(session);
+  const deltaRes = decoder.push({
+    data: JSON.stringify({
+      id: "c1",
+      object: "chat.completion.chunk",
+      created: 100,
+      model: "upstream",
+      choices: [{ index: 0, delta: { content: "hi" }, finish_reason: "stop" }],
+    }),
+  });
+  assert.equal(deltaRes.ok, true);
+  const doneRes = decoder.push({ data: "[DONE]" });
+  assert.equal(doneRes.ok, true);
+  if (doneRes.ok) {
+    const endEvt = doneRes.value.find((evt) => evt.type === "response_end");
+    assert.ok(endEvt);
+    assert.equal(endEvt.type === "response_end" ? endEvt.usage : true, undefined);
+    const clientEncoder = new ChatClientStreamEncoder(session, { includeUsage: true }, () => 1700000000);
+    clientEncoder.encode({ type: "response_start", responseId: "resp_123", model: "gpt-main" });
+    const encodedEnd = clientEncoder.encode(endEvt);
+    assert.equal(encodedEnd.ok, true);
+    if (encodedEnd.ok) {
+      assert.equal(encodedEnd.value.length, 2); // finish chunk, [DONE] — no usage chunk
+    }
   }
 });

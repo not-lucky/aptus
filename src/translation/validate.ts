@@ -12,13 +12,94 @@ import type {
   IrRequest,
   IrUsage,
 } from "./ir.ts";
+import { REASONING_EFFORT_VALUES, VERBOSITY_VALUES } from "./ir.ts";
 
 const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "content_filter", "context_limit", "other"]);
+
+// Admitted control literals are defined once beside the codec parsers so the
+// decode and validation layers can never drift apart.
+const VERBOSITY_LITERALS = new Set<string>(VERBOSITY_VALUES);
+
+const REASONING_EFFORT_LITERALS = new Set<string>(REASONING_EFFORT_VALUES);
 
 const BASE64_REGEX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function isNonNegativeSafeInteger(n: unknown): n is number {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+}
+
+/** Validates one sampling control as a finite number within the IR range [0, 1]. */
+function validateUnitInterval(value: unknown, fieldName: string): Result<void, NormalizedFailure> {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    return {
+      ok: false,
+      error: invalidRequestFailure(`IrRequest.generation.${fieldName} must be a finite number within [0, 1]`),
+    };
+  }
+  return { ok: true, value: undefined };
+}
+
+/**
+ * Validates the normative invariants of decoded generation controls: sampling
+ * controls are bounded to the IR range [0, 1], output limits are positive safe
+ * integers, stop sequences are non-empty strings, and the verbosity/effort
+ * unions carry only their admitted literals.
+ */
+function validateGenerationControls(generation: IrRequest["generation"]): Result<void, NormalizedFailure> {
+  if (generation === undefined) return { ok: true, value: undefined };
+  if (generation.temperature !== undefined) {
+    const temperatureResult = validateUnitInterval(generation.temperature, "temperature");
+    if (!temperatureResult.ok) return temperatureResult;
+  }
+  if (generation.topP !== undefined) {
+    const topPResult = validateUnitInterval(generation.topP, "topP");
+    if (!topPResult.ok) return topPResult;
+  }
+  if (
+    generation.maxOutputTokens !== undefined &&
+    (typeof generation.maxOutputTokens !== "number" ||
+      !Number.isSafeInteger(generation.maxOutputTokens) ||
+      generation.maxOutputTokens <= 0)
+  ) {
+    return {
+      ok: false,
+      error: invalidRequestFailure("IrRequest.generation.maxOutputTokens must be a positive safe integer"),
+    };
+  }
+  if (generation.stopSequences !== undefined) {
+    if (!Array.isArray(generation.stopSequences) || generation.stopSequences.length === 0) {
+      return {
+        ok: false,
+        error: invalidRequestFailure("IrRequest.generation.stopSequences must be a non-empty array when present"),
+      };
+    }
+    for (let i = 0; i < generation.stopSequences.length; i++) {
+      const sequence = generation.stopSequences[i];
+      if (typeof sequence !== "string" || sequence.length === 0) {
+        return {
+          ok: false,
+          error: invalidRequestFailure(`IrRequest.generation.stopSequences[${i}] must be a non-empty string`),
+        };
+      }
+    }
+  }
+  if (generation.verbosity !== undefined && !VERBOSITY_LITERALS.has(generation.verbosity)) {
+    return {
+      ok: false,
+      error: invalidRequestFailure(
+        `IrRequest.generation.verbosity must be one of: ${[...VERBOSITY_LITERALS].join(", ")}`,
+      ),
+    };
+  }
+  if (generation.reasoning?.effort !== undefined && !REASONING_EFFORT_LITERALS.has(generation.reasoning.effort)) {
+    return {
+      ok: false,
+      error: invalidRequestFailure(
+        `IrRequest.generation.reasoning.effort must be one of: ${[...REASONING_EFFORT_LITERALS].join(", ")}`,
+      ),
+    };
+  }
+  return { ok: true, value: undefined };
 }
 
 function validateBinarySource(source: IrBinarySource, context: string): Result<void, NormalizedFailure> {
@@ -244,6 +325,9 @@ export function validateIrRequest(req: IrRequest): Result<void, NormalizedFailur
       error: invalidRequestFailure("IrRequest.delivery must be 'complete' or 'stream'"),
     };
   }
+
+  const generationResult = validateGenerationControls(req.generation);
+  if (!generationResult.ok) return generationResult;
 
   if (!Array.isArray(req.items) || req.items.length === 0) {
     return {

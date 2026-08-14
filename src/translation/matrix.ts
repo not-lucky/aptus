@@ -294,14 +294,14 @@ export const MATRIX: readonly MatrixRow[] = [
     irSymbol: "`IrFinish.stopSequence`",
     tiers: {
       "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
+      "openai-chat->anthropic-messages": "T2",
       "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
+      "openai-responses->anthropic-messages": "T2",
       "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T3",
+      "anthropic-messages->openai-responses": "T2",
     },
     caveat:
-      "only M reports the stop_sequence reason; C/R never report the matched string (source absence → T3) and R has no stop field (T3); the field is set only when a target explicitly reports one; M-origin stop maps to C stop with the echo omitted (T2).",
+      "only M reports the matched stop string; C/R never report one, so C→R / R→C are source-absence T3; into M (C→M / R→M) the target emits the documented `stop_sequence: null` wire label at T2; out of M (M→C / M→R) the M-origin stop maps to the client's natural stop with the matched string omitted at T2 (captured in IrFinish.stopSequence, echoed only by the M client encoder).",
   },
   {
     id: "frequency-penalty",
@@ -1342,7 +1342,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T3",
     },
     caveat:
-      "R code_interpreter container and container_file_citation vs M container param/container_upload; provider-owned state; never cross; native passthrough.",
+      "R code_interpreter container and container_file_citation vs M container_upload block; provider-owned hosted-tool state that never crosses; the M top-level `container` reuse param is the separate anthropic-container-reuse row; native passthrough.",
   },
   {
     id: "provider-uploaded-file",
@@ -1402,7 +1402,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T3",
     },
     caveat:
-      "C↔R share `low|medium|high|xhigh|max`. M uses the same literals but does not define cross-provider semantic equivalence; all M directions are a **Blocked Capability**.",
+      "C↔R share `low|medium|high|xhigh|max`. The valid-but-native-only C/R literals `none` and `minimal` are deliberately excluded from the IR and fail closed with this row's ID (never invalid_request, never a silent drop). M uses the shared literals but does not define cross-provider semantic equivalence; all M directions are a **Blocked Capability**.",
   },
   {
     id: "responses-reasoning-summary",
@@ -1573,7 +1573,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T3",
     },
     caveat:
-      "C store ↔ R store explicit-value mapping (defaults differ: C false, R stored); always emit the explicit value; M absent → M directions reject; native passthrough.",
+      "C store ↔ R store explicit-value mapping (defaults differ and C is account-dependent unless explicit — schema documents false while new accounts store by default — so only explicit values map and no default is ever fabricated); M absent → M directions reject; native passthrough.",
   },
   {
     id: "responses-background",
@@ -1700,7 +1700,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T2",
     },
     caveat:
-      "C↔R per-part breakpoints direct; M per-block cache_control markers are TTL-bound (5m/1h vs 30m) → mapping is marker-only with declared TTL loss; M-origin markers map to breakpoints.",
+      "C↔R per-part breakpoints direct; the R wire admits per-part markers only on input_text/input_image/input_file blocks (a marker on an output_text block fails invalid_request at R decode), so breakpoints anchored to assistant content are rejected with `prompt-cache-breakpoint` when the target is Responses (the R wire cannot carry them); M per-block cache_control markers are TTL-bound (5m/1h vs 30m) → mapping is marker-only with declared TTL loss; M-origin markers map to breakpoints.",
   },
   {
     id: "prompt-cache-mode",
@@ -1757,7 +1757,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T2",
     },
     caveat:
-      "C/R metadata identical (16 kv, ≤64/≤512) → direct; M accepts only metadata.user_id → subset preflight into M; M user_id maps to a kv entry out.",
+      "C/R metadata identical (16 kv, ≤64/≤512) → direct; the C/R legacy `user` string rides in this row for C↔R passthrough only and is declared loss into M (never re-mapped into safety_identifier/prompt_cache_key — separate rows); M accepts only metadata.user_id → subset preflight into M; M user_id maps to a kv entry out.",
   },
   {
     id: "safety-identifier",
@@ -1785,7 +1785,8 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-chat": "T3",
       "anthropic-messages->openai-responses": "T3",
     },
-    caveat: "C↔R moderation param and result shapes match; M has no moderation control → reject.",
+    caveat:
+      'the request param `{model, policy?}` is identical in C and R → verbatim passthrough. The response result is `{input, output}` in BOTH protocols, each side holding one verdict; only the inner verdict wrapper differs (C wraps each verdict as {type:"moderation_results", model, results:[moderation_result]} while R carries each verdict as a singular moderation_result), so the target egress re-wraps/unwraps deterministically and never drops the input/output split. M has no moderation control → reject.',
   },
   {
     id: "service-tier",
@@ -1800,7 +1801,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T2",
     },
     caveat:
-      "C↔R share the six-value enum → direct; M accepts only auto|standard_only with different routing semantics → only auto maps, others reject.",
+      "C↔R share the six-value enum → direct (request param AND response echo: C/R responses echo the effective six-value tier). M accepts only auto|standard_only with different routing semantics → only auto maps, others reject. M responses echo standard|priority|batch inside usage; although `priority` appears in both enums its routing semantics differ, so an out-of-M echo is declared loss and a tier is never fabricated.",
   },
   {
     id: "inference-geography",
@@ -2039,7 +2040,8 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-chat": "T1",
       "anthropic-messages->openai-responses": "T1",
     },
-    caveat: "C/R reasoning_tokens ↔ M thinking_tokens; subdivision never re-added to totals.",
+    caveat:
+      "C/R reasoning_tokens ↔ M usage.output_tokens_details.thinking_tokens (nested under output_tokens_details; M output_tokens remains the inclusive billing total and thinking_tokens ≤ output_tokens); subdivision never re-added to totals.",
   },
   {
     id: "usage-audio",

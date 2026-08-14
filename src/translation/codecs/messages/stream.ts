@@ -2,339 +2,100 @@ import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type {
   ClientStreamEncoder,
+  OutcomeWireOptions,
   ProviderStreamDecoder,
+  RequestWireOptions,
+  StreamRequestDecodeResult,
   StreamRequestDecoder,
   StreamRequestEncoder,
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
 import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
-import type {
-  IrAssistantPart,
-  IrFinishReason,
-  IrGenerationControls,
-  IrInputPart,
-  IrItem,
-  IrRequest,
-  IrStreamEvent,
-  IrUsage,
-  NonEmpty,
-} from "../../ir.ts";
+import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import type { SseFrame } from "../../sse.ts";
-
-const RECOGNIZED_MESSAGES_REQUEST_FIELDS = new Set([
-  "model",
-  "max_tokens",
-  "messages",
-  "system",
-  "stream",
-  "temperature",
-  "top_p",
-  "stop_sequences",
-  "tools",
-  "tool_choice",
-  "thinking",
-  "container",
-  "metadata",
-  "top_k",
-  "output_config",
-]);
+import {
+  accumulateMessagesUsage,
+  buildMessagesRequestBody,
+  collapseMessagesUsage,
+  type MessagesUsageAccumulator,
+  messagesStopReason,
+  messagesUsageBody,
+} from "../shared.ts";
+import { parseMessagesRequestBody } from "./ingress.ts";
 
 /**
  * Decodes a streaming Anthropic Messages request.
+ *
+ * Capability rejections (including the thinking/output_config splits), wire-only
+ * sidecar capture, transcript items, and generation controls are shared
+ * verbatim with the complete-path ingress.
  */
 export class MessagesStreamRequestDecoder implements StreamRequestDecoder {
-  decodeRequest(
-    body: JsonObject,
-  ): Result<{ readonly irRequest: IrRequest; readonly sourceWireOptions: StreamWireOptions }, NormalizedFailure> {
-    if (typeof body.model !== "string" || body.model.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Messages request missing required string property 'model'"),
-      };
-    }
-
-    if (typeof body.max_tokens !== "number" || !Number.isSafeInteger(body.max_tokens) || body.max_tokens <= 0) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Messages request missing required positive safe integer property 'max_tokens'"),
-      };
-    }
-
-    if (!Array.isArray(body.messages) || body.messages.length === 0) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Messages request missing required non-empty array property 'messages'"),
-      };
-    }
-
-    if (body.tools !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-    }
-    if (body.tool_choice !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("tool-choice-none-auto-required") };
-    }
-    if (body.thinking !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("reasoning-effort-common") };
-    }
-    if (body.container !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("provider-container") };
-    }
-    if (body.metadata !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("request-metadata") };
-    }
-    if (body.top_k !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("top-k") };
-    }
-    if (body.output_config !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("structured-json-schema") };
-    }
-
-    for (const key of Object.keys(body)) {
-      if (!RECOGNIZED_MESSAGES_REQUEST_FIELDS.has(key)) {
-        return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
-      }
-    }
-
-    const items: IrItem[] = [];
-
-    if (typeof body.system === "string" && body.system.trim() !== "") {
-      items.push({
-        type: "instruction",
-        authority: "system",
-        separation: "advisory",
-        text: body.system,
-      });
-    } else if (Array.isArray(body.system)) {
-      for (const block of body.system) {
-        if (typeof block === "string") {
-          items.push({
-            type: "instruction",
-            authority: "system",
-            separation: "advisory",
-            text: block,
-          });
-        } else if (typeof block === "object" && block !== null) {
-          const b = block as Record<string, unknown>;
-          if (b.type === "text" && typeof b.text === "string") {
-            items.push({
-              type: "instruction",
-              authority: "system",
-              separation: "advisory",
-              text: b.text,
-            });
-          }
-        }
-      }
-    }
-
-    for (let i = 0; i < body.messages.length; i++) {
-      const rawMsg = body.messages[i];
-      if (typeof rawMsg !== "object" || rawMsg === null) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Messages message [${i}] must be an object`),
-        };
-      }
-      const msgObj = rawMsg as Record<string, unknown>;
-      const role = msgObj.role;
-
-      if (role === "mid_conv_system") {
-        return { ok: false, error: unsupportedCapabilityFailure("mid-conversation-instruction") };
-      }
-
-      if (role === "user") {
-        const parts: IrInputPart[] = [];
-        if (typeof msgObj.content === "string") {
-          parts.push({ type: "text", text: msgObj.content });
-        } else if (Array.isArray(msgObj.content)) {
-          for (let pIdx = 0; pIdx < msgObj.content.length; pIdx++) {
-            const block = msgObj.content[pIdx] as Record<string, unknown>;
-            if (block?.type === "text" && typeof block.text === "string") {
-              parts.push({ type: "text", text: block.text });
-            } else if (block?.type === "image") {
-              return { ok: false, error: unsupportedCapabilityFailure("image-url") };
-            } else if (block?.type === "document") {
-              return { ok: false, error: unsupportedCapabilityFailure("document-inline-bytes") };
-            } else if (block?.type === "tool_result") {
-              return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-            } else {
-              return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-            }
-          }
-        } else {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Messages user message [${i}] missing string or array content`),
-          };
-        }
-        if (parts.length === 0) {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Messages user message [${i}] has empty content`),
-          };
-        }
-        items.push({
-          type: "message",
-          role: "user",
-          content: parts as unknown as NonEmpty<IrInputPart>,
-        });
-        continue;
-      }
-
-      if (role === "assistant") {
-        const parts: IrAssistantPart[] = [];
-        if (typeof msgObj.content === "string") {
-          parts.push({ type: "text", text: msgObj.content });
-        } else if (Array.isArray(msgObj.content)) {
-          for (let pIdx = 0; pIdx < msgObj.content.length; pIdx++) {
-            const block = msgObj.content[pIdx] as Record<string, unknown>;
-            if (block?.type === "text" && typeof block.text === "string") {
-              parts.push({ type: "text", text: block.text });
-            } else if (block?.type === "tool_use") {
-              return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-            } else if (block?.type === "thinking" || block?.type === "redacted_thinking") {
-              return { ok: false, error: unsupportedCapabilityFailure("reasoning-effort-common") };
-            } else {
-              return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-            }
-          }
-        } else {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Messages assistant message [${i}] missing string or array content`),
-          };
-        }
-        if (parts.length === 0) {
-          return {
-            ok: false,
-            error: invalidRequestFailure(`Messages assistant message [${i}] has empty content`),
-          };
-        }
-        items.push({
-          type: "message",
-          role: "assistant",
-          content: parts as unknown as NonEmpty<IrAssistantPart>,
-        });
-        continue;
-      }
-
-      return {
-        ok: false,
-        error: invalidRequestFailure(`Messages message [${i}] has unrecognized role '${String(role)}'`),
-      };
-    }
-
-    let generation: IrGenerationControls | undefined;
-    if (body.temperature !== undefined || body.top_p !== undefined || body.stop_sequences !== undefined) {
-      let stopSequences: NonEmpty<string> | undefined;
-      if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
-        stopSequences = body.stop_sequences as unknown as NonEmpty<string>;
-      }
-
-      generation = {
-        temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-        topP: typeof body.top_p === "number" ? body.top_p : undefined,
-        stopSequences,
-      };
-    }
-
-    const irRequest: IrRequest = {
-      model: body.model,
-      delivery: "stream",
-      items,
-      generation,
-    };
-
+  decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
+    const parsed = parseMessagesRequestBody(body, "stream");
+    if (!parsed.ok) return parsed;
     return {
       ok: true,
       value: {
-        irRequest,
+        irRequest: parsed.value.irRequest,
         sourceWireOptions: {},
+        requestWireOptions: parsed.value.requestWireOptions,
       },
     };
   }
 }
 
 /**
- * Encodes an {@link IrRequest} into target Anthropic Messages stream request JSON.
+ * Encodes an {@link IrRequest} into target Anthropic Messages stream request
+ * JSON, sharing body assembly, generation-control projection, sidecar
+ * projection, and breakpoint re-anchoring with the complete-path encoder.
  */
 export class MessagesStreamRequestEncoder implements StreamRequestEncoder {
-  encodeRequest(request: IrRequest, targetModel: string, _wireOptions: StreamWireOptions): JsonObject {
-    const systemBlocks: JsonObject[] = [];
-    const messages: JsonObject[] = [];
-
-    let scanningLeadingInstructions = true;
-
-    for (const item of request.items) {
-      if (item.type === "instruction" && scanningLeadingInstructions) {
-        systemBlocks.push({
-          type: "text",
-          text: item.text,
-        });
-        continue;
-      }
-
-      scanningLeadingInstructions = false;
-
-      if (item.type === "message") {
-        const contentBlocks: JsonObject[] = [];
-        for (const part of item.content) {
-          if (part.type === "text") {
-            contentBlocks.push({
-              type: "text",
-              text: part.text,
-            });
-          }
-        }
-
-        const lastMessage = messages[messages.length - 1];
-        if (lastMessage !== undefined && lastMessage.role === item.role) {
-          const existingContent = lastMessage.content as JsonObject[];
-          existingContent.push(...contentBlocks);
-        } else {
-          messages.push({
-            role: item.role,
-            content: contentBlocks,
-          });
-        }
-      }
-    }
-
-    const payload: Record<string, unknown> = {
-      model: targetModel,
-      messages,
-      stream: true,
-    };
-
-    if (systemBlocks.length > 0) {
-      payload.system = systemBlocks;
-    }
-
-    return payload as JsonObject;
+  encodeRequest(
+    request: IrRequest,
+    targetModel: string,
+    _wireOptions: StreamWireOptions,
+    requestWireOptions?: RequestWireOptions,
+  ): JsonObject {
+    return buildMessagesRequestBody(request, targetModel, true, requestWireOptions);
   }
 }
 
 /**
  * Decodes an upstream Anthropic Messages SSE stream into semantic IR stream events.
+ *
+ * Provider-owned reasoning blocks fail closed at discovery. The matched stop
+ * sequence reported on `message_delta` is captured into
+ * `response_end.finish.stopSequence` (echoed only by the M client encoder), and
+ * cumulative usage collapses into `response_end.usage`.
  */
 export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "anthropic-messages" as const;
   private readonly session: StreamSession;
   private readonly partIndexMap = new Map<number, string>();
-  private inputTokens = 0;
-  private cacheReadInput = 0;
-  private cacheWriteInput = 0;
-  private outputTokens = 0;
-  private sawUsage = false;
+  private readonly usageState: MessagesUsageAccumulator = { sawUsage: false };
   private recordedFinish: IrFinishReason | undefined;
+  private recordedStopSequence: string | undefined;
   private sawMessageStop = false;
+  private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(session: StreamSession) {
     this.session = session;
   }
 
+  getOutcomeWireOptions(): OutcomeWireOptions {
+    return this.outcomeWireOptions;
+  }
+
   push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure> {
+    // The success terminator already went out on message_stop; any later frame
+    // is a misbehaving provider stream and fails closed instead of re-emitting
+    // a second terminal event.
+    if (this.sawMessageStop) {
+      return { ok: false, error: invalidRequestFailure("Messages stream received an event after message_stop") };
+    }
+
     if (frame.event === undefined || frame.event.trim() === "") {
       return {
         ok: false,
@@ -363,15 +124,15 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (eventName === "message_start") {
       const msg = (chunk.message ?? {}) as Record<string, unknown>;
-      const rawUsage = msg.usage as Record<string, unknown> | undefined;
-      if (rawUsage !== undefined) {
-        this.sawUsage = true;
-        this.inputTokens = typeof rawUsage.input_tokens === "number" ? rawUsage.input_tokens : 0;
-        this.cacheReadInput =
-          typeof rawUsage.cache_read_input_tokens === "number" ? rawUsage.cache_read_input_tokens : 0;
-        this.cacheWriteInput =
-          typeof rawUsage.cache_creation_input_tokens === "number" ? rawUsage.cache_creation_input_tokens : 0;
-        this.outputTokens = typeof rawUsage.output_tokens === "number" ? rawUsage.output_tokens : 0;
+      // Explicit null is treated as a missing usage record (absence), never
+      // a crash and never a fabricated zero.
+      const rawUsage = msg.usage as Record<string, unknown> | null | undefined;
+      if (rawUsage !== undefined && rawUsage !== null) {
+        const usageResult = accumulateMessagesUsage(this.usageState, rawUsage);
+        if (!usageResult.ok) return usageResult;
+        if (typeof rawUsage.service_tier === "string") {
+          this.outcomeWireOptions = { ...this.outcomeWireOptions, serviceTier: rawUsage.service_tier };
+        }
       }
 
       return {
@@ -389,6 +150,14 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     if (eventName === "content_block_start") {
       const index = typeof chunk.index === "number" ? chunk.index : 0;
       const block = chunk.content_block as Record<string, unknown> | undefined;
+
+      // Provider-owned reasoning payloads fail closed at discovery.
+      if (block?.type === "thinking") {
+        return { ok: false, error: unsupportedCapabilityFailure("readable-reasoning") };
+      }
+      if (block?.type === "redacted_thinking") {
+        return { ok: false, error: unsupportedCapabilityFailure("redacted-reasoning") };
+      }
       if (block?.type !== "text") {
         return {
           ok: false,
@@ -396,6 +165,9 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
             block?.type === "tool_use" ? "function-tool-definition" : "unknown-content-item",
           ),
         };
+      }
+      if (block.signature !== undefined) {
+        return { ok: false, error: unsupportedCapabilityFailure("reasoning-signature") };
       }
 
       const partId = this.session.createPartId();
@@ -474,14 +246,12 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       const delta = (chunk.delta ?? {}) as Record<string, unknown>;
       const stopReason = delta.stop_reason;
 
-      if (delta.stop_sequence !== null && delta.stop_sequence !== undefined) {
-        return { ok: false, error: unsupportedCapabilityFailure("matched-stop-sequence") };
-      }
-
       if (stopReason === "end_turn") {
         this.recordedFinish = "stop";
       } else if (stopReason === "max_tokens") {
         this.recordedFinish = "length";
+      } else if (stopReason === "stop_sequence") {
+        this.recordedFinish = "stop";
       } else if (stopReason === "tool_use") {
         return { ok: false, error: unsupportedCapabilityFailure("finish-tool-calls") };
       } else if (stopReason === "refusal") {
@@ -496,18 +266,34 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         this.recordedFinish = "stop";
       }
 
-      const rawUsage = chunk.usage as Record<string, unknown> | undefined;
-      if (rawUsage !== undefined) {
-        // Anthropic message_delta usage is cumulative: each present field is the
-        // latest total, so overwrite rather than sum. Collapse to the final value.
-        this.sawUsage = true;
-        if (typeof rawUsage.output_tokens === "number") this.outputTokens = rawUsage.output_tokens;
-        if (typeof rawUsage.input_tokens === "number") this.inputTokens = rawUsage.input_tokens;
-        if (typeof rawUsage.cache_read_input_tokens === "number") {
-          this.cacheReadInput = rawUsage.cache_read_input_tokens;
+      // The matched stop string is only meaningful with the `stop_sequence`
+      // stop reason: capture it for the M-client echo only in that pairing
+      // (C/R clients map to their natural stop with the string omitted), and
+      // fail closed on a stray string beside any other reason.
+      const rawStopSequence = delta.stop_sequence;
+      if (rawStopSequence !== undefined && rawStopSequence !== null) {
+        if (typeof rawStopSequence !== "string") {
+          return { ok: false, error: invalidRequestFailure("delta.stop_sequence must be a string when present") };
         }
-        if (typeof rawUsage.cache_creation_input_tokens === "number") {
-          this.cacheWriteInput = rawUsage.cache_creation_input_tokens;
+        if (stopReason !== "stop_sequence") {
+          return {
+            ok: false,
+            error: invalidRequestFailure("delta.stop_sequence is only valid with stop_reason 'stop_sequence'"),
+          };
+        }
+        this.recordedStopSequence = rawStopSequence;
+      }
+
+      // Explicit null is treated as a missing usage record (absence), never
+      // a crash and never a fabricated zero.
+      const rawUsage = chunk.usage as Record<string, unknown> | null | undefined;
+      if (rawUsage !== undefined && rawUsage !== null) {
+        // Anthropic message_delta usage is cumulative: each present field is the
+        // latest total, so the shared accumulator overwrites rather than sums.
+        const usageResult = accumulateMessagesUsage(this.usageState, rawUsage);
+        if (!usageResult.ok) return usageResult;
+        if (typeof rawUsage.service_tier === "string") {
+          this.outcomeWireOptions = { ...this.outcomeWireOptions, serviceTier: rawUsage.service_tier };
         }
       }
 
@@ -516,20 +302,33 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (eventName === "message_stop") {
       this.sawMessageStop = true;
-      const usage: IrUsage | undefined = this.sawUsage
-        ? {
-            input: this.inputTokens + this.cacheReadInput + this.cacheWriteInput,
-            output: this.outputTokens,
-          }
-        : undefined;
+      // Presence parity with the complete path: once any usage record was seen,
+      // both billing totals must have been reported. Collapsing a partial record
+      // would fabricate zero totals, violating absence-vs-zero non-fabrication.
+      if (this.usageState.sawUsage && this.usageState.inputTokens === undefined) {
+        return {
+          ok: false,
+          error: invalidRequestFailure("usage.input_tokens must be a finite number when usage is present"),
+        };
+      }
+      if (this.usageState.sawUsage && this.usageState.outputTokens === undefined) {
+        return {
+          ok: false,
+          error: invalidRequestFailure("usage.output_tokens must be a finite number when usage is present"),
+        };
+      }
+      const usage = collapseMessagesUsage(this.usageState);
       return {
         ok: true,
         value: [
           {
             type: "response_end",
             responseId: this.session.responseId,
-            finish: { reason: this.recordedFinish ?? "stop" },
-            usage,
+            finish: {
+              reason: this.recordedFinish ?? "stop",
+              ...(this.recordedStopSequence !== undefined ? { stopSequence: this.recordedStopSequence } : {}),
+            },
+            ...(usage !== undefined ? { usage } : {}),
           },
         ],
       };
@@ -571,6 +370,11 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 
 /**
  * Encodes semantic IR stream events into client-native Anthropic Messages SSE frames.
+ *
+ * The terminal `message_delta` reconstructs M usage accounting from the IR
+ * totals (`input_tokens = input - cacheRead - cacheWrite`) with the cache
+ * subdivisions and thinking breakdown, and echoes a matched stop sequence with
+ * the `stop_sequence` stop reason.
  */
 export class MessagesClientStreamEncoder implements ClientStreamEncoder {
   readonly protocol = "anthropic-messages" as const;
@@ -580,6 +384,16 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
 
   constructor(session: StreamSession) {
     this.session = session;
+  }
+
+  /**
+   * No-op by contract: the M wire has no outcome-side sidecar surface.
+   * Moderation results destined for an M client fail closed before encoding,
+   * and M-touching service-tier echoes are stripped as declared loss during
+   * normalization, so the pump never delivers non-empty options here.
+   */
+  setOutcomeWireOptions(_options: OutcomeWireOptions): void {
+    // Intentionally empty — see doc comment above.
   }
 
   encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure> {
@@ -646,20 +460,19 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "response_end") {
-      const stopReason = event.finish.reason === "length" ? "max_tokens" : "end_turn";
-      const usage =
-        event.usage !== undefined
-          ? {
-              input_tokens: event.usage.input,
-              output_tokens: event.usage.output,
-            }
-          : undefined;
+      const matchedStop = event.finish.stopSequence;
+      const stopReason = messagesStopReason(event.finish);
+
+      let usage: JsonObject | undefined;
+      if (event.usage !== undefined) {
+        usage = messagesUsageBody(event.usage);
+      }
 
       frames.push({
         event: "message_delta",
         data: JSON.stringify({
           type: "message_delta",
-          delta: { stop_reason: stopReason, stop_sequence: null },
+          delta: { stop_reason: stopReason, stop_sequence: matchedStop ?? null },
           ...(usage !== undefined ? { usage } : {}),
         }),
       });

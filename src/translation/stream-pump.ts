@@ -1,7 +1,8 @@
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { ClientStreamEncoder, ProviderStreamDecoder } from "./contracts.ts";
+import type { ClientStreamEncoder, OutcomeWireOptions, ProviderStreamDecoder } from "./contracts.ts";
 import type { IrStreamEvent, IrUsage } from "./ir.ts";
+import { normalizeOutcomeWireOptions, outcomeWireOptionsFailure } from "./preflight.ts";
 import type { SseDecoder, SseEncoder, SseFrame } from "./sse.ts";
 import type { IrStreamStateMachine } from "./stream-state.ts";
 
@@ -123,8 +124,21 @@ export class TranslatedStreamPump {
       return { ok: false, error: smResult.error };
     }
     this.onEvent(evt);
+    // Terminal usage invariants (input ≥ cached subdivisions, total ≥
+    // input + output) are enforced inside the IR state machine's feed above,
+    // which fails closed before any client frame encodes.
     if (evt.type === "response_end" && evt.usage !== undefined) {
       this.observedUsage = evt.usage;
+    }
+    // Outcome wire-options channel: the stream path bypasses the complete-path
+    // outcome preflight, so direction feasibility for the response-side sidecar
+    // runs here, at the terminal event, before the final client frame encodes.
+    // By this point the provider decoder has parsed the terminal frame that
+    // carried any moderation result or service-tier echo.
+    if (evt.type === "response_end") {
+      const wireOptions = this.providerDecoder.getOutcomeWireOptions();
+      const failResult = this.applyOutcomeWireOptions(wireOptions);
+      if (!failResult.ok) return failResult;
     }
     const clientResult = this.clientEncoder.encode(evt);
     if (!clientResult.ok) {
@@ -132,6 +146,28 @@ export class TranslatedStreamPump {
     }
     for (const frame of clientResult.value) {
       chunks.push(this.sseEncoder.encode(frame));
+    }
+    return { ok: true, value: undefined };
+  }
+
+  /**
+   * Applies direction feasibility to the outcome sidecar and hands the
+   * normalized options to the client encoder. Both rules are shared with the
+   * complete-path outcome preflight, which the stream path bypasses.
+   */
+  private applyOutcomeWireOptions(wireOptions: OutcomeWireOptions): Result<void, NormalizedFailure> {
+    if (wireOptions.moderation === undefined && wireOptions.serviceTier === undefined) {
+      return { ok: true, value: undefined };
+    }
+    const failure = outcomeWireOptionsFailure(this.clientEncoder.protocol, wireOptions);
+    if (failure !== undefined) return { ok: false, error: failure };
+    const normalized = normalizeOutcomeWireOptions(
+      wireOptions,
+      this.clientEncoder.protocol,
+      this.providerDecoder.protocol,
+    );
+    if (normalized.moderation !== undefined || normalized.serviceTier !== undefined) {
+      this.clientEncoder.setOutcomeWireOptions(normalized);
     }
     return { ok: true, value: undefined };
   }

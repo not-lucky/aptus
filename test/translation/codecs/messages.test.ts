@@ -18,7 +18,7 @@ test.concurrent("translation codec messages: decodes and encodes request", () =>
   const decodeRes = decoder.decodeRequest(messagesBody);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const ir = decodeRes.value;
+    const ir = decodeRes.value.irRequest;
     assert.equal(ir.model, "claude-3-7-sonnet");
     assert.equal(ir.items.length, 2);
 
@@ -109,7 +109,7 @@ test.concurrent("translation codec messages: decodes and encodes outcome", () =>
   const decodeRes = decoder.decodeOutcome(200, {}, messagesResponse);
   assert.equal(decodeRes.ok, true);
   if (decodeRes.ok) {
-    const outcome = decodeRes.value;
+    const outcome = decodeRes.value.irOutcome;
     assert.equal(outcome.finish.reason, "stop");
     assert.equal(outcome.usage?.input, 20);
     assert.equal(outcome.usage?.output, 15);
