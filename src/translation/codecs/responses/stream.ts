@@ -11,23 +11,19 @@ import type {
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
-import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
 import type { IrRequest, IrStreamEvent } from "../../ir.ts";
+import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
+import { responsesReasoningItemFailure } from "../shared/hosted-tools.ts";
+import { responsesToolFields } from "../shared/tool-fields.ts";
+import { buildResponsesInput, responsesFinishStatus, responsesGenerationFields } from "../shared/transcript.ts";
+import { parseResponsesUsage, responsesUsageBody } from "../shared/usage.ts";
 import {
-  buildResponsesInput,
   captureOutcomeWireFacts,
   chatResponsesRequestFields,
-  parseResponsesUsage,
-  reanchorResponsesBreakpoints,
-  responsesFinishStatus,
-  responsesGenerationFields,
   responsesOutcomeWireFields,
-  responsesReasoningItemFailure,
-  responsesUsageBody,
-} from "../shared.ts";
+} from "../shared/wire-options.ts";
 import { parseResponsesRequestBody } from "./ingress.ts";
-
 /**
  * Decodes a streaming OpenAI Responses request.
  *
@@ -38,14 +34,11 @@ export class ResponsesStreamRequestDecoder implements StreamRequestDecoder {
   decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
     const parsed = parseResponsesRequestBody(body, "stream");
     if (!parsed.ok) return parsed;
-    return {
-      ok: true,
-      value: {
-        irRequest: parsed.value.irRequest,
-        sourceWireOptions: {},
-        requestWireOptions: parsed.value.requestWireOptions,
-      },
-    };
+    return ok({
+      irRequest: parsed.value.irRequest,
+      sourceWireOptions: {},
+      requestWireOptions: parsed.value.requestWireOptions,
+    });
   }
 }
 
@@ -61,17 +54,18 @@ export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
     _wireOptions: StreamWireOptions,
     requestWireOptions?: RequestWireOptions,
   ): JsonObject {
-    const build = buildResponsesInput(request.items);
-
-    // Re-anchor prompt-cache breakpoints onto the reconstructed input parts.
-    reanchorResponsesBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
+    const markedItems = new Set(
+      (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
+    );
+    const input = buildResponsesInput(request.items, markedItems);
 
     return {
       model: targetModel,
-      input: build.entries,
+      input,
       stream: true,
       ...responsesGenerationFields(request.generation),
       ...chatResponsesRequestFields(requestWireOptions),
+      ...responsesToolFields(request, requestWireOptions),
     };
   }
 }
@@ -83,14 +77,14 @@ export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
  * closed too instead of silently vanishing behind a success terminator.
  */
 function scanTerminalOutputForReasoning(resp: Record<string, unknown>): Result<void, NormalizedFailure> {
-  if (!Array.isArray(resp.output)) return { ok: true, value: undefined };
+  if (!Array.isArray(resp.output)) return ok(undefined);
   for (const item of resp.output) {
     const itemObj = item as Record<string, unknown>;
     if (itemObj?.type === "reasoning") {
-      return { ok: false, error: responsesReasoningItemFailure(itemObj) };
+      return failure(responsesReasoningItemFailure(itemObj));
     }
   }
-  return { ok: true, value: undefined };
+  return ok(undefined);
 }
 
 /**
@@ -124,48 +118,31 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     // event is a misbehaving provider stream and fails closed instead of
     // re-emitting a second terminal event.
     if (this.completed) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Responses stream received an event after the terminal completion event"),
-      };
+      return invalidRequest("Responses stream received an event after the terminal completion event");
     }
 
     if (frame.event === undefined || frame.event.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Responses stream frame missing required named 'event'"),
-      };
+      return invalidRequest("Responses stream frame missing required named 'event'");
     }
 
     let chunk: Record<string, unknown>;
     try {
       chunk = JSON.parse(frame.data) as Record<string, unknown>;
     } catch (err) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(
-          `Responses stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      };
+      return invalidRequest(
+        `Responses stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     if (chunk.type !== frame.event) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(
-          `Responses frame event '${frame.event}' does not match JSON type '${String(chunk.type)}'`,
-        ),
-      };
+      return invalidRequest(`Responses frame event '${frame.event}' does not match JSON type '${String(chunk.type)}'`);
     }
 
     if (typeof chunk.sequence_number === "number") {
       if (!Number.isSafeInteger(chunk.sequence_number) || chunk.sequence_number <= this.lastSequenceNumber) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(
-            `Responses stream sequence_number must be strictly increasing (expected > ${this.lastSequenceNumber}, got ${chunk.sequence_number})`,
-          ),
-        };
+        return invalidRequest(
+          `Responses stream sequence_number must be strictly increasing (expected > ${this.lastSequenceNumber}, got ${chunk.sequence_number})`,
+        );
       }
       this.lastSequenceNumber = chunk.sequence_number;
     }
@@ -173,60 +150,48 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     const eventName = frame.event;
 
     if (eventName === "response.created") {
-      return {
-        ok: true,
-        value: [
-          {
-            type: "response_start",
-            responseId: this.session.responseId,
-            model: this.session.model,
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "response_start",
+          responseId: this.session.responseId,
+          model: this.session.model,
+        },
+      ]);
     }
 
     if (eventName === "response.in_progress") {
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     if (eventName === "response.output_item.added") {
       const item = chunk.item as Record<string, unknown> | undefined;
       // Provider-owned reasoning output items fail closed instead of vanishing.
       if (item?.type === "reasoning") {
-        return { ok: false, error: responsesReasoningItemFailure(item) };
+        return failure(responsesReasoningItemFailure(item));
       }
       if (item?.type !== "message") {
-        return {
-          ok: false,
-          error: unsupportedCapabilityFailure(
-            item?.type === "function_call" ? "function-tool-definition" : "unknown-content-item",
-          ),
-        };
+        return unsupportedCapability(
+          item?.type === "function_call" ? "function-tool-definition" : "unknown-content-item",
+        );
       }
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     if (eventName === "response.content_part.added") {
       const part = chunk.part as Record<string, unknown> | undefined;
       if (part?.type !== "output_text") {
-        return {
-          ok: false,
-          error: unsupportedCapabilityFailure(part?.type === "refusal" ? "refusal-content" : "unknown-content-item"),
-        };
+        return unsupportedCapability(part?.type === "refusal" ? "refusal-content" : "unknown-content-item");
       }
       this.currentPartId = this.session.createPartId();
       this.partStarted = true;
-      return {
-        ok: true,
-        value: [
-          {
-            type: "part_start",
-            responseId: this.session.responseId,
-            partId: this.currentPartId,
-            part: { type: "text" },
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "part_start",
+          responseId: this.session.responseId,
+          partId: this.currentPartId,
+          part: { type: "text" },
+        },
+      ]);
     }
 
     if (eventName === "response.output_text.delta") {
@@ -248,33 +213,27 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         partId: this.currentPartId,
         text,
       });
-      return {
-        ok: true,
-        value: events,
-      };
+      return ok(events);
     }
 
     if (eventName === "response.output_text.done") {
       if (!this.partStarted || this.currentPartId === undefined) {
-        return { ok: true, value: [] };
+        return ok([]);
       }
       const partId = this.currentPartId;
       this.partStarted = false;
-      return {
-        ok: true,
-        value: [
-          {
-            type: "part_end",
-            responseId: this.session.responseId,
-            partId,
-            partType: "text",
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "part_end",
+          responseId: this.session.responseId,
+          partId,
+          partType: "text",
+        },
+      ]);
     }
 
     if (eventName === "response.content_part.done" || eventName === "response.output_item.done") {
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     if (eventName === "response.completed") {
@@ -288,17 +247,14 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       this.outcomeWireOptions = factsResult.value;
       const usageResult = parseResponsesUsage(resp.usage);
       if (!usageResult.ok) return usageResult;
-      return {
-        ok: true,
-        value: [
-          {
-            type: "response_end",
-            responseId: this.session.responseId,
-            finish: { reason: "stop" },
-            ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "response_end",
+          responseId: this.session.responseId,
+          finish: { reason: "stop" },
+          ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
+        },
+      ]);
     }
 
     if (eventName === "response.incomplete") {
@@ -308,12 +264,9 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       if (!scanResult.ok) return scanResult;
       const details = (resp.incomplete_details ?? {}) as Record<string, unknown>;
       if (details.reason !== "max_output_tokens") {
-        return {
-          ok: false,
-          error: unsupportedCapabilityFailure(
-            details.reason === "content_filter" ? "finish-content-filter" : "finish-other-unknown",
-          ),
-        };
+        return unsupportedCapability(
+          details.reason === "content_filter" ? "finish-content-filter" : "finish-other-unknown",
+        );
       }
 
       this.completed = true;
@@ -322,48 +275,39 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       this.outcomeWireOptions = factsResult.value;
       const usageResult = parseResponsesUsage(resp.usage);
       if (!usageResult.ok) return usageResult;
-      return {
-        ok: true,
-        value: [
-          {
-            type: "response_end",
-            responseId: this.session.responseId,
-            finish: { reason: "length" },
-            ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "response_end",
+          responseId: this.session.responseId,
+          finish: { reason: "length" },
+          ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
+        },
+      ]);
     }
 
     if (eventName === "response.failed" || eventName === "error") {
       const err = (chunk.error ?? (chunk.response as Record<string, unknown>)?.error ?? {}) as Record<string, unknown>;
-      return {
-        ok: false,
-        error: {
-          category: "provider",
-          message: typeof err.message === "string" ? err.message : "Responses provider stream error",
-          code: typeof err.code === "string" ? err.code : undefined,
-          retryable: false,
-        },
-      };
+      return failure({
+        category: "provider",
+        message: typeof err.message === "string" ? err.message : "Responses provider stream error",
+        code: typeof err.code === "string" ? err.code : undefined,
+        retryable: false,
+      });
     }
 
     // Unmapped non-semantic wire event (ignored)
-    return { ok: true, value: [] };
+    return ok([]);
   }
 
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
     if (!this.completed) {
-      return {
-        ok: false,
-        error: {
-          category: "stream_interrupted",
-          message: "Responses stream ended unexpectedly before completion event",
-          retryable: false,
-        },
-      };
+      return failure({
+        category: "stream_interrupted",
+        message: "Responses stream ended unexpectedly before completion event",
+        retryable: false,
+      });
     }
-    return { ok: true, value: [] };
+    return ok([]);
   }
 }
 
@@ -408,7 +352,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
           sequence_number: this.sequenceNumber++,
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "part_start") {
@@ -429,7 +373,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
           sequence_number: this.sequenceNumber++,
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "text_delta") {
@@ -441,7 +385,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
           sequence_number: this.sequenceNumber++,
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "part_end") {
@@ -466,7 +410,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
           sequence_number: this.sequenceNumber++,
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "response_end") {
@@ -511,20 +455,17 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
           }),
         });
       }
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "error") {
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
-    return {
-      ok: false,
-      error: unsupportedCapabilityFailure("unknown-stream-event"),
-    };
+    return unsupportedCapability("unknown-stream-event");
   }
 
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
-    return { ok: true, value: [] };
+    return ok([]);
   }
 }

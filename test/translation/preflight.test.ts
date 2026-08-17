@@ -57,7 +57,7 @@ test.concurrent("translation preflight: rejects streaming request with semantic-
   }
 });
 
-test.concurrent("translation preflight: rejects tools with function-tool-definition", () => {
+test.concurrent("translation preflight: admits function tools with an object schema in every direction", () => {
   const req: IrRequest = {
     model: "claude-3-7-sonnet",
     delivery: "complete",
@@ -73,16 +73,52 @@ test.concurrent("translation preflight: rejects tools with function-tool-definit
         type: "function",
         name: "get_weather",
         description: "Get weather",
-        inputSchema: {},
+        inputSchema: { type: "object", properties: {} },
       },
     ],
   };
 
-  const res = preflightRequest(req, "openai-chat->anthropic-messages");
-  assert.equal(res.ok, false);
-  if (!res.ok) {
-    assert.equal(res.error.capability, "function-tool-definition");
+  const directions = [
+    "openai-chat->openai-responses",
+    "openai-chat->anthropic-messages",
+    "openai-responses->openai-chat",
+    "openai-responses->anthropic-messages",
+    "anthropic-messages->openai-chat",
+    "anthropic-messages->openai-responses",
+  ] as const;
+  for (const direction of directions) {
+    const res = preflightRequest(req, direction);
+    assert.equal(res.ok, true, `Failed for direction ${direction}`);
   }
+});
+
+test.concurrent("translation preflight: rejects custom tools into Messages with their format row", () => {
+  const req: IrRequest = {
+    model: "claude-3-7-sonnet",
+    delivery: "complete",
+    items: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "text", text: "Hello!" }],
+      },
+    ],
+    tools: [
+      {
+        type: "custom",
+        name: "render",
+        format: { type: "text" },
+      },
+    ],
+  };
+
+  const intoMessages = preflightRequest(req, "openai-chat->anthropic-messages");
+  assert.equal(intoMessages.ok, false);
+  if (!intoMessages.ok) assert.equal(intoMessages.error.capability, "custom-text-tool");
+
+  const outOfMessages = preflightRequest(req, "anthropic-messages->openai-chat");
+  assert.equal(outOfMessages.ok, false);
+  if (!outOfMessages.ok) assert.equal(outOfMessages.error.capability, "custom-text-tool");
 });
 
 test.concurrent("translation preflight: rejects mid-conversation instruction into Messages", () => {

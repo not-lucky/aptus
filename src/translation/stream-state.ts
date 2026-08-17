@@ -1,9 +1,8 @@
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import { invalidRequestFailure, unsupportedCapabilityFailure } from "./failures.ts";
 import type { IrStreamEvent } from "./ir.ts";
+import { invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import { validateUsage } from "./validate.ts";
-
 /**
  * Options for configuring an {@link IrStreamStateMachine}.
  */
@@ -53,218 +52,155 @@ export class IrStreamStateMachine {
 
   feed(event: IrStreamEvent): Result<void, NormalizedFailure> {
     if (this.phase === "terminal") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("IrStreamEvent received after terminal state"),
-      };
+      return invalidRequest("IrStreamEvent received after terminal state");
     }
 
     if (event.type === "error") {
       if (this.responseId !== undefined && event.responseId !== this.responseId) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(
-            `Error event responseId '${event.responseId}' does not match stream session '${this.responseId}'`,
-          ),
-        };
+        return invalidRequest(
+          `Error event responseId '${event.responseId}' does not match stream session '${this.responseId}'`,
+        );
       }
       this.phase = "terminal";
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
     if (this.phase === "awaiting_start") {
       if (event.type !== "response_start") {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Expected 'response_start' as first stream event, received '${event.type}'`),
-        };
+        return invalidRequest(`Expected 'response_start' as first stream event, received '${event.type}'`);
       }
 
       if (typeof event.responseId !== "string" || event.responseId.trim() === "") {
-        return {
-          ok: false,
-          error: invalidRequestFailure("response_start must have a non-empty responseId"),
-        };
+        return invalidRequest("response_start must have a non-empty responseId");
       }
 
       if (this.expectedResponseId !== undefined && event.responseId !== this.expectedResponseId) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(
-            `response_start responseId '${event.responseId}' does not match expected '${this.expectedResponseId}'`,
-          ),
-        };
+        return invalidRequest(
+          `response_start responseId '${event.responseId}' does not match expected '${this.expectedResponseId}'`,
+        );
       }
 
       if (typeof event.model !== "string" || event.model.trim() === "") {
-        return {
-          ok: false,
-          error: invalidRequestFailure("response_start must have a non-empty model"),
-        };
+        return invalidRequest("response_start must have a non-empty model");
       }
 
       if (this.expectedModel !== undefined && event.model !== this.expectedModel) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(
-            `response_start model '${event.model}' does not match expected '${this.expectedModel}'`,
-          ),
-        };
+        return invalidRequest(`response_start model '${event.model}' does not match expected '${this.expectedModel}'`);
       }
 
       this.responseId = event.responseId;
       this.phase = "streaming";
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
     // Phase is "streaming"
     if (event.type === "response_start") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Duplicate 'response_start' received during active stream"),
-      };
+      return invalidRequest("Duplicate 'response_start' received during active stream");
     }
 
     if (event.responseId !== this.responseId) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(
-          `Stream event responseId '${event.responseId}' does not match active stream '${this.responseId}'`,
-        ),
-      };
+      return invalidRequest(
+        `Stream event responseId '${event.responseId}' does not match active stream '${this.responseId}'`,
+      );
     }
 
     if (event.type === "part_start") {
       if (typeof event.partId !== "string" || event.partId.trim() === "") {
-        return {
-          ok: false,
-          error: invalidRequestFailure("part_start must have a non-empty partId"),
-        };
+        return invalidRequest("part_start must have a non-empty partId");
       }
 
       if (this.seenPartIds.has(event.partId)) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Duplicate partId '${event.partId}' in part_start`),
-        };
+        return invalidRequest(`Duplicate partId '${event.partId}' in part_start`);
       }
 
       // Plain-text streaming profile gating
       if (event.part.type === "refusal") {
-        return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
+        return unsupportedCapability("refusal-content");
       }
       if (event.part.type === "function_call") {
-        return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
+        return unsupportedCapability("function-tool-definition");
       }
       if (event.part.type === "custom_call") {
-        return { ok: false, error: unsupportedCapabilityFailure("custom-tool-streaming") };
+        return unsupportedCapability("custom-tool-streaming");
       }
 
       if (event.part.type !== "text") {
-        return {
-          ok: false,
-          error: invalidRequestFailure(
-            `Unsupported part descriptor type: '${String((event.part as { type?: unknown }).type)}'`,
-          ),
-        };
+        return invalidRequest(`Unsupported part descriptor type: '${String((event.part as { type?: unknown }).type)}'`);
       }
 
       this.seenPartIds.add(event.partId);
       this.openParts.set(event.partId, event.part.type);
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
     if (event.type === "text_delta") {
       const partType = this.openParts.get(event.partId);
       if (partType === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`text_delta received for non-open or unknown partId '${event.partId}'`),
-        };
+        return invalidRequest(`text_delta received for non-open or unknown partId '${event.partId}'`);
       }
 
       if (partType !== "text") {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`text_delta received for partId '${event.partId}' of type '${partType}'`),
-        };
+        return invalidRequest(`text_delta received for partId '${event.partId}' of type '${partType}'`);
       }
 
       if (typeof event.text !== "string") {
-        return {
-          ok: false,
-          error: invalidRequestFailure("text_delta.text must be a string"),
-        };
+        return invalidRequest("text_delta.text must be a string");
       }
 
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
     if (event.type === "refusal_delta") {
-      return { ok: false, error: unsupportedCapabilityFailure("refusal-stream-delta") };
+      return unsupportedCapability("refusal-stream-delta");
     }
 
     if (event.type === "tool_arguments_delta") {
-      return { ok: false, error: unsupportedCapabilityFailure("tool-stream-delta") };
+      return unsupportedCapability("tool-stream-delta");
     }
 
     if (event.type === "citation") {
-      return { ok: false, error: unsupportedCapabilityFailure("citation-stream-timing") };
+      return unsupportedCapability("citation-stream-timing");
     }
 
     if (event.type === "part_end") {
       const partType = this.openParts.get(event.partId);
       if (partType === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`part_end received for non-open partId '${event.partId}'`),
-        };
+        return invalidRequest(`part_end received for non-open partId '${event.partId}'`);
       }
 
       if (partType !== event.partType) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(
-            `part_end partType '${event.partType}' does not match open part type '${partType}'`,
-          ),
-        };
+        return invalidRequest(`part_end partType '${event.partType}' does not match open part type '${partType}'`);
       }
 
       this.openParts.delete(event.partId);
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
     if (event.type === "response_end") {
       if (this.openParts.size > 0) {
         const remaining = [...this.openParts.keys()].join(", ");
-        return {
-          ok: false,
-          error: invalidRequestFailure(`response_end received while parts [${remaining}] remain open`),
-        };
+        return invalidRequest(`response_end received while parts [${remaining}] remain open`);
       }
 
       // Finish reason gating
       const reason = event.finish.reason;
       if (reason === "tool_calls") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-tool-calls") };
+        return unsupportedCapability("finish-tool-calls");
       }
       if (reason === "refusal") {
-        return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
+        return unsupportedCapability("refusal-content");
       }
       if (reason === "content_filter") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-content-filter") };
+        return unsupportedCapability("finish-content-filter");
       }
       if (reason === "context_limit") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-context-limit") };
+        return unsupportedCapability("finish-context-limit");
       }
       if (reason === "other") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-other-unknown") };
+        return unsupportedCapability("finish-other-unknown");
       }
       if (reason !== "stop" && reason !== "length") {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Unrecognized finish reason '${String(reason)}'`),
-        };
+        return invalidRequest(`Unrecognized finish reason '${String(reason)}'`);
       }
 
       if (event.usage !== undefined) {
@@ -275,13 +211,10 @@ export class IrStreamStateMachine {
       }
 
       this.phase = "terminal";
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
-    return {
-      ok: false,
-      error: invalidRequestFailure(`Unrecognized stream event type '${String((event as { type?: unknown }).type)}'`),
-    };
+    return invalidRequest(`Unrecognized stream event type '${String((event as { type?: unknown }).type)}'`);
   }
 }
 

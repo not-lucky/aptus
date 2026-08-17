@@ -1,37 +1,27 @@
-import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type {
   IngressDecoder,
   OutcomeDecodeResult,
-  OutcomeWireOptions,
   PromptCacheBreakpoint,
   RequestDecodeResult,
   RequestWireOptions,
 } from "../../contracts.ts";
 import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
-import type {
-  IrAssistantPart,
-  IrFinishReason,
-  IrGenerationControls,
-  IrInputPart,
-  IrItem,
-  IrOutcome,
-  IrOutputPart,
-  IrRequest,
-  IrUsage,
-  NonEmpty,
-} from "../../ir.ts";
+import type { IrGenerationControls, IrItem, IrRequest, IrToolChoice, NonEmpty } from "../../ir.ts";
+import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import {
-  accumulateMessagesUsage,
   asNonEmptyStopSequences,
-  collapseMessagesUsage,
+  firstUnknownKey,
   MESSAGES_SERVICE_TIERS,
-  type MessagesUsageAccumulator,
   parseEnumLiteral,
   parseStopSequenceEntries,
   parseUnitIntervalControl,
-} from "../shared.ts";
+} from "../shared/controls.ts";
+import { MESSAGES_HOSTED_TOOL_TYPES } from "../shared/hosted-tools.ts";
+import { parseToolArray, parseToolChoice, type ToolWireSpec } from "../shared/tool-parsing.ts";
+import { decodeMessagesContent, messagesHostedBlockFailure, parseMessagesCacheControl } from "./content.ts";
+import { parseMessagesOutcome } from "./outcome.ts";
 
 const RECOGNIZED_MESSAGES_REQUEST_FIELDS = new Set([
   "model",
@@ -53,34 +43,6 @@ const RECOGNIZED_MESSAGES_REQUEST_FIELDS = new Set([
   "inference_geo",
   "cache_control",
 ]);
-
-/** TTL literals admitted on Anthropic cache_control markers (declared loss in translation). */
-const MESSAGES_CACHE_CONTROL_TTLS = new Set(["5m", "1h"]);
-
-/**
- * Validates one Anthropic `cache_control` marker: exactly `{type: "ephemeral"}`
- * with an optional documented TTL (`5m|1h`). The TTL is accepted and then
- * deliberately dropped — cross-protocol mapping is marker-only with declared
- * TTL loss (`prompt-cache-breakpoint` row).
- */
-function parseMessagesCacheControl(path: string, value: unknown): Result<void, NormalizedFailure> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return { ok: false, error: invalidRequestFailure(`${path} cache_control must be an object`) };
-  }
-  const marker = value as Record<string, unknown>;
-  for (const key of Object.keys(marker)) {
-    if (key !== "type" && key !== "ttl") {
-      return { ok: false, error: invalidRequestFailure(`${path} cache_control.${key} is not recognized`) };
-    }
-  }
-  if (marker.type !== "ephemeral") {
-    return { ok: false, error: invalidRequestFailure(`${path} cache_control.type must be 'ephemeral'`) };
-  }
-  if (marker.ttl !== undefined && (typeof marker.ttl !== "string" || !MESSAGES_CACHE_CONTROL_TTLS.has(marker.ttl))) {
-    return { ok: false, error: invalidRequestFailure(`${path} cache_control.ttl must be '5m' or '1h'`) };
-  }
-  return { ok: true, value: undefined };
-}
 
 /**
  * Classifies the `thinking` request control into its matrix-row failure: a
@@ -112,11 +74,8 @@ function parseMessagesOutputConfig(value: unknown): NormalizedFailure {
     return invalidRequestFailure("output_config must be an object");
   }
   const raw = value as Record<string, unknown>;
-  for (const key of Object.keys(raw)) {
-    if (key !== "effort" && key !== "format") {
-      return invalidRequestFailure(`output_config.${key} is not recognized`);
-    }
-  }
+  const extra = firstUnknownKey(raw, ["effort", "format"]);
+  if (extra !== undefined) return invalidRequestFailure(`output_config.${extra} is not recognized`);
   if (raw.effort !== undefined) {
     return unsupportedCapabilityFailure("reasoning-effort-common");
   }
@@ -125,6 +84,43 @@ function parseMessagesOutputConfig(value: unknown): NormalizedFailure {
   }
   return invalidRequestFailure("output_config must carry 'effort' or 'format'");
 }
+
+const MESSAGES_ALLOWED_CALLERS: ReadonlySet<string> = new Set([
+  "direct",
+  "code_execution_20250825",
+  "code_execution_20260120",
+  "code_execution_20260521",
+]);
+
+function rejectMessagesToolNative(raw: Record<string, unknown>, context: string): NormalizedFailure | undefined {
+  const type = raw.type;
+  if (type !== undefined && type !== "custom") {
+    if (typeof type !== "string") return invalidRequestFailure(`${context}: type must be a string`);
+    const hostedCapability = MESSAGES_HOSTED_TOOL_TYPES[type];
+    return hostedCapability === undefined
+      ? invalidRequestFailure(`${context}: type '${type}' is not recognized`)
+      : unsupportedCapabilityFailure(hostedCapability);
+  }
+  // Capability rejections precede the unknown-field scan so recognized native
+  // facts report their exact row rather than being hidden as unknown fields.
+  if (raw.cache_control !== undefined) return unsupportedCapabilityFailure("prompt-cache-breakpoint");
+  if (raw.defer_loading !== undefined) return unsupportedCapabilityFailure("deferred-tools");
+  if (raw.input_examples !== undefined) return unsupportedCapabilityFailure("tool-input-examples");
+  if (raw.eager_input_streaming !== undefined) return unsupportedCapabilityFailure("eager-tool-streaming");
+  return undefined;
+}
+
+const MESSAGES_TOOL_SPEC: ToolWireSpec = {
+  shape: "messages",
+  schemaField: "input_schema",
+  requireObjectSchemaType: true,
+  strictRequired: false,
+  choiceShape: "messages",
+  missingSchema: "invalid",
+  allowCallers: true,
+  documentedCallers: MESSAGES_ALLOWED_CALLERS,
+  rejectNative: rejectMessagesToolNative,
+};
 
 /**
  * Parses a Messages request body shared verbatim by the complete ingress
@@ -136,74 +132,47 @@ export function parseMessagesRequestBody(
   delivery: "complete" | "stream",
 ): Result<RequestDecodeResult, NormalizedFailure> {
   if (typeof body.model !== "string" || body.model.trim() === "") {
-    return {
-      ok: false,
-      error: invalidRequestFailure("Messages request missing required string property 'model'"),
-    };
+    return invalidRequest("Messages request missing required string property 'model'");
   }
 
   // Anthropic Messages wire format requires max_tokens as a positive integer
   if (typeof body.max_tokens !== "number" || !Number.isSafeInteger(body.max_tokens) || body.max_tokens <= 0) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("Messages request missing required positive safe integer property 'max_tokens'"),
-    };
+    return invalidRequest("Messages request missing required positive safe integer property 'max_tokens'");
   }
 
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("Messages request missing required non-empty array property 'messages'"),
-    };
+    return invalidRequest("Messages request missing required non-empty array property 'messages'");
   }
 
   // Decoder-level capability rejections for recognized native-only facts.
-  if (body.tools !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-  }
-  if (body.tool_choice !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("tool-choice-none-auto-required") };
-  }
   // The top-level `container` reuse param is the anthropic-container-reuse
   // row; the hosted code-execution resource (container_upload block) is the
   // separate provider-container row owned by client tools.
   if (body.container !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("anthropic-container-reuse") };
+    return unsupportedCapability("anthropic-container-reuse");
   }
   if (body.inference_geo !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("inference-geography") };
+    return unsupportedCapability("inference-geography");
   }
   if (body.top_k !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("top-k") };
+    return unsupportedCapability("top-k");
   }
   if (body.thinking !== undefined) {
-    return { ok: false, error: parseMessagesThinking(body.thinking) };
+    return failure(parseMessagesThinking(body.thinking));
   }
   if (body.output_config !== undefined) {
-    return { ok: false, error: parseMessagesOutputConfig(body.output_config) };
+    return failure(parseMessagesOutputConfig(body.output_config));
   }
 
   // Check for unknown request fields outside recognized schema
   for (const key of Object.keys(body)) {
     if (!RECOGNIZED_MESSAGES_REQUEST_FIELDS.has(key)) {
-      return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
+      return unsupportedCapability("unknown-request-field");
     }
   }
 
   // ---- Wire-only sidecar capture (T2-admitted fields) ----
   const breakpoints: PromptCacheBreakpoint[] = [];
-
-  // Validates one per-block cache_control marker and records its IR anchor.
-  const captureBreakpoint = (
-    path: string,
-    marker: unknown,
-    anchor: PromptCacheBreakpoint,
-  ): Result<void, NormalizedFailure> => {
-    const markerResult = parseMessagesCacheControl(path, marker);
-    if (!markerResult.ok) return markerResult;
-    breakpoints.push(anchor);
-    return { ok: true, value: undefined };
-  };
 
   // metadata accepts only the user_id kv entry. The M wire documents no
   // other key, so a foreign key is malformed M wire (`invalid_request`) —
@@ -212,21 +181,17 @@ export function parseMessagesRequestBody(
   let metadata: Record<string, string> | undefined;
   if (body.metadata !== undefined) {
     if (typeof body.metadata !== "object" || body.metadata === null || Array.isArray(body.metadata)) {
-      return { ok: false, error: invalidRequestFailure("metadata must be an object when present") };
+      return invalidRequest("metadata must be an object when present");
     }
     const rawMetadata = body.metadata as Record<string, unknown>;
-    for (const key of Object.keys(rawMetadata)) {
-      if (key !== "user_id") {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`metadata supports only the 'user_id' key on the Messages wire, got '${key}'`),
-        };
-      }
+    const extra = firstUnknownKey(rawMetadata, ["user_id"]);
+    if (extra !== undefined) {
+      return invalidRequest(`metadata supports only the 'user_id' key on the Messages wire, got '${extra}'`);
     }
     const userId = rawMetadata.user_id;
     if (userId !== undefined) {
       if (typeof userId !== "string") {
-        return { ok: false, error: invalidRequestFailure("metadata.user_id must be a string") };
+        return invalidRequest("metadata.user_id must be a string");
       }
       metadata = { user_id: userId };
     }
@@ -243,6 +208,20 @@ export function parseMessagesRequestBody(
     const markerResult = parseMessagesCacheControl("request", body.cache_control);
     if (!markerResult.ok) return markerResult;
     hasTopLevelMarker = true;
+  }
+
+  // ---- Client tool surfaces (definitions, choice, parallelism) ----
+  const toolsResult = parseToolArray(body.tools, "tools", MESSAGES_TOOL_SPEC);
+  if (!toolsResult.ok) return toolsResult;
+  const tools = toolsResult.value.tools;
+
+  let toolChoice: IrToolChoice | undefined;
+  let parallelToolCalls: boolean | undefined;
+  if (body.tool_choice !== undefined) {
+    const choiceResult = parseToolChoice(body.tool_choice, "tool_choice", MESSAGES_TOOL_SPEC);
+    if (!choiceResult.ok) return choiceResult;
+    toolChoice = choiceResult.value.choice;
+    parallelToolCalls = choiceResult.value.parallelToolCalls;
   }
 
   const items: IrItem[] = [];
@@ -268,6 +247,11 @@ export function parseMessagesRequestBody(
       } else if (typeof block === "object" && block !== null) {
         const b = block as Record<string, unknown>;
         if (b.type === "text" && typeof b.text === "string") {
+          // A system text block's own keys are provider wire keys, exactly
+          // like message text blocks: an encryption marker on one is a hosted
+          // payload, never translatable instruction text.
+          const hosted = messagesHostedBlockFailure(b);
+          if (hosted !== undefined) return failure(hosted);
           items.push({
             type: "instruction",
             authority: "system",
@@ -275,16 +259,20 @@ export function parseMessagesRequestBody(
             text: b.text,
           });
           if (b.cache_control !== undefined) {
-            const markerResult = captureBreakpoint(`system block [${bIdx}]`, b.cache_control, {
-              itemIndex: items.length - 1,
-            });
+            const markerResult = parseMessagesCacheControl(`system block [${bIdx}]`, b.cache_control);
             if (!markerResult.ok) return markerResult;
+            breakpoints.push({ itemIndex: items.length - 1 });
           }
         } else {
-          return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
+          // System blocks are the same provider wire-key container as message
+          // content blocks: recognized hosted/provider block types report
+          // their exact row instead of a generic unknown-structure error.
+          const hosted = messagesHostedBlockFailure(b);
+          if (hosted !== undefined) return failure(hosted);
+          return unsupportedCapability("unknown-content-item");
         }
       } else {
-        return { ok: false, error: invalidRequestFailure(`system block [${bIdx}] must be a string or object`) };
+        return invalidRequest(`system block [${bIdx}] must be a string or object`);
       }
     }
   }
@@ -293,142 +281,63 @@ export function parseMessagesRequestBody(
   for (let i = 0; i < body.messages.length; i++) {
     const rawMsg = body.messages[i];
     if (typeof rawMsg !== "object" || rawMsg === null) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`Messages message [${i}] must be an object`),
-      };
+      return invalidRequest(`Messages message [${i}] must be an object`);
     }
     const msgObj = rawMsg as Record<string, unknown>;
     const role = msgObj.role;
 
     // M schema accepts `mid_conv_system`, but official prose prohibits a
     // system message role: the `mid-conversation-instruction` Blocked
-    // Capability applies to every M direction (protocol-ir.md).
+    // Capability applies to every M direction (the IR contract).
     if (role === "mid_conv_system") {
-      return { ok: false, error: unsupportedCapabilityFailure("mid-conversation-instruction") };
+      return unsupportedCapability("mid-conversation-instruction");
     }
 
-    // Item index this message's IR item will occupy.
-    const itemIndex = items.length;
-
     if (role === "user") {
-      const parts: IrInputPart[] = [];
       if (typeof msgObj.content === "string") {
-        parts.push({ type: "text", text: msgObj.content });
-      } else if (Array.isArray(msgObj.content)) {
-        for (let pIdx = 0; pIdx < msgObj.content.length; pIdx++) {
-          const block = msgObj.content[pIdx] as Record<string, unknown>;
-          if (block?.type === "text" && typeof block.text === "string") {
-            parts.push({ type: "text", text: block.text });
-            if (block.cache_control !== undefined) {
-              const markerResult = captureBreakpoint(`message [${i}] block [${pIdx}]`, block.cache_control, {
-                itemIndex,
-                partIndex: pIdx,
-              });
-              if (!markerResult.ok) return markerResult;
-            }
-          } else if (block?.type === "image") {
-            return { ok: false, error: unsupportedCapabilityFailure("image-url") };
-          } else if (block?.type === "document") {
-            return { ok: false, error: unsupportedCapabilityFailure("document-inline-bytes") };
-          } else if (block?.type === "tool_result") {
-            return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-          } else {
-            return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-          }
-        }
-      } else {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Messages user message [${i}] missing string or array content`),
-        };
+        items.push({ type: "message", role: "user", content: [{ type: "text", text: msgObj.content }] });
+        continue;
       }
-      if (parts.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Messages user message [${i}] has empty content`),
-        };
-      }
-      items.push({
-        type: "message",
-        role: "user",
-        content: parts as unknown as NonEmpty<IrInputPart>,
-      });
+      const contentResult = decodeMessagesContent(msgObj.content, "user", i, items, breakpoints);
+      if (!contentResult.ok) return contentResult;
       continue;
     }
 
     if (role === "assistant") {
-      const parts: IrAssistantPart[] = [];
       if (typeof msgObj.content === "string") {
-        parts.push({ type: "text", text: msgObj.content });
-      } else if (Array.isArray(msgObj.content)) {
-        for (let pIdx = 0; pIdx < msgObj.content.length; pIdx++) {
-          const block = msgObj.content[pIdx] as Record<string, unknown>;
-          if (block?.type === "text" && typeof block.text === "string") {
-            // A signature outside a thinking block is still a provider-owned
-            // reasoning continuation handle; fail closed before any capture.
-            if (block.signature !== undefined) {
-              return { ok: false, error: unsupportedCapabilityFailure("reasoning-signature") };
-            }
-            parts.push({ type: "text", text: block.text });
-            if (block.cache_control !== undefined) {
-              const markerResult = captureBreakpoint(`message [${i}] block [${pIdx}]`, block.cache_control, {
-                itemIndex,
-                partIndex: pIdx,
-              });
-              if (!markerResult.ok) return markerResult;
-            }
-          } else if (block?.type === "tool_use") {
-            return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-          } else if (block?.type === "thinking") {
-            // Provider-owned readable reasoning with continuation semantics.
-            return { ok: false, error: unsupportedCapabilityFailure("readable-reasoning") };
-          } else if (block?.type === "redacted_thinking") {
-            // Provider-redacted reasoning payload; never synthesized.
-            return { ok: false, error: unsupportedCapabilityFailure("redacted-reasoning") };
-          } else {
-            return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-          }
-        }
-      } else {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Messages assistant message [${i}] missing string or array content`),
-        };
+        items.push({ type: "message", role: "assistant", content: [{ type: "text", text: msgObj.content }] });
+        continue;
       }
-      if (parts.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Messages assistant message [${i}] has empty content`),
-        };
-      }
-      items.push({
-        type: "message",
-        role: "assistant",
-        content: parts as unknown as NonEmpty<IrAssistantPart>,
-      });
+      const contentResult = decodeMessagesContent(msgObj.content, "assistant", i, items, breakpoints);
+      if (!contentResult.ok) return contentResult;
       continue;
     }
 
-    return {
-      ok: false,
-      error: invalidRequestFailure(`Messages message [${i}] has unrecognized role '${String(role)}'`),
-    };
+    return invalidRequest(`Messages message [${i}] has unrecognized role '${String(role)}'`);
   }
 
   // Anchor the top-level auto-marker sentinel to the final content block.
   if (hasTopLevelMarker) {
     const lastIndex = items.length - 1;
-    // The last item is provably a message: body.messages is validated non-empty
-    // and every decoded message pushes exactly one message item.
-    const lastItem = items[lastIndex] as Extract<IrItem, { type: "message" }>;
-    breakpoints.push({ itemIndex: lastIndex, partIndex: lastItem.content.length - 1 });
+    const lastItem = items[lastIndex];
+    if (lastItem !== undefined) {
+      if (lastItem.type === "message") {
+        breakpoints.push({ itemIndex: lastIndex, partIndex: lastItem.content.length - 1 });
+      } else {
+        // Turn splitting lets the request end on a tool_call or tool_result
+        // item; both carry their markers item-only.
+        breakpoints.push({ itemIndex: lastIndex });
+      }
+    }
   }
 
   const wireOptions: RequestWireOptions = {
     ...(metadata !== undefined ? { metadata } : {}),
     ...(tierResult.value !== undefined ? { serviceTier: tierResult.value } : {}),
     ...(breakpoints.length > 0 ? { promptCacheBreakpoints: breakpoints } : {}),
+    ...(toolsResult.value.directCallerNames.length > 0
+      ? { toolAllowedCallers: toolsResult.value.directCallerNames }
+      : {}),
   };
 
   // ---- Generation controls (strict bounds; never clamped, never dropped) ----
@@ -440,12 +349,12 @@ export function parseMessagesRequestBody(
   let stopSequences: NonEmpty<string> | undefined;
   if (body.stop_sequences !== undefined && body.stop_sequences !== null) {
     if (!Array.isArray(body.stop_sequences)) {
-      return { ok: false, error: invalidRequestFailure("stop_sequences must be an array of strings") };
+      return invalidRequest("stop_sequences must be an array of strings");
     }
-    // The IR admits stop sequences only as a non-empty set (protocol-ir.md),
+    // The IR admits stop sequences only as a non-empty set (the IR contract).
     // so an empty array is invalid M wire rather than absence.
     if (body.stop_sequences.length === 0) {
-      return { ok: false, error: invalidRequestFailure("stop_sequences must contain at least one entry when present") };
+      return invalidRequest("stop_sequences must contain at least one entry when present");
     }
     const entriesResult = parseStopSequenceEntries("stop_sequences", body.stop_sequences);
     if (!entriesResult.ok) return entriesResult;
@@ -466,9 +375,12 @@ export function parseMessagesRequestBody(
     delivery,
     items,
     generation,
+    ...(tools !== undefined ? { tools } : {}),
+    ...(toolChoice !== undefined ? { toolChoice } : {}),
+    ...(parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
   };
 
-  return { ok: true, value: { irRequest, requestWireOptions: wireOptions } };
+  return ok({ irRequest, requestWireOptions: wireOptions });
 }
 
 /**
@@ -487,166 +399,6 @@ export class MessagesIngressDecoder implements IngressDecoder {
   }
 
   decodeOutcome(status: number, _headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
-    if (typeof body !== "object" || body === null) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Messages response body must be an object"),
-      };
-    }
-
-    if (body.type === "error" || status >= 400) {
-      const err = (body.error ?? {}) as Record<string, unknown>;
-      return {
-        ok: false,
-        error: {
-          category: "provider",
-          message: typeof err.message === "string" ? err.message : `Messages provider error HTTP ${status}`,
-          code: typeof err.type === "string" ? err.type : undefined,
-          retryable: false,
-        },
-      };
-    }
-
-    if (body.type !== "message") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Messages response body must have type 'message'"),
-      };
-    }
-
-    const parts: IrOutputPart[] = [];
-    if (Array.isArray(body.content)) {
-      for (const block of body.content) {
-        const b = block as Record<string, unknown>;
-        if (b?.type === "text") {
-          parts.push({
-            type: "text",
-            partId: randomUUID(),
-            text: typeof b.text === "string" ? b.text : "",
-          });
-          // A signature on a non-reasoning text block is still a provider-owned
-          // reasoning continuation handle.
-          if (b.signature !== undefined) {
-            return { ok: false, error: unsupportedCapabilityFailure("reasoning-signature") };
-          }
-        } else if (b?.type === "tool_use") {
-          parts.push({
-            type: "tool_call",
-            partId: randomUUID(),
-            call: {
-              type: "function",
-              callId: String(b.id ?? randomUUID()),
-              name: String(b.name ?? ""),
-              argumentsText: JSON.stringify(b.input ?? {}),
-            },
-          });
-        } else if (b?.type === "thinking") {
-          // Provider-owned readable reasoning discovered on the outcome fails
-          // closed instead of vanishing.
-          return { ok: false, error: unsupportedCapabilityFailure("readable-reasoning") };
-        } else if (b?.type === "redacted_thinking") {
-          return { ok: false, error: unsupportedCapabilityFailure("redacted-reasoning") };
-        } else {
-          // Unknown content blocks never vanish behind a success terminator;
-          // parity with the stream decoder's unknown-block rejection.
-          return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
-        }
-      }
-    }
-
-    let finishReason: IrFinishReason = "stop";
-    const rawStopReason = body.stop_reason;
-    if (rawStopReason === "end_turn") {
-      finishReason = "stop";
-    } else if (rawStopReason === "max_tokens") {
-      finishReason = "length";
-    } else if (rawStopReason === "stop_sequence") {
-      finishReason = "stop";
-    } else if (rawStopReason === "refusal") {
-      finishReason = "refusal";
-    } else if (rawStopReason === "tool_use") {
-      finishReason = "tool_calls";
-    } else if (rawStopReason === "model_context_window_exceeded") {
-      finishReason = "context_limit";
-    } else if (rawStopReason === "pause_turn") {
-      return { ok: false, error: unsupportedCapabilityFailure("anthropic-pause-turn") };
-    } else if (rawStopReason !== null && rawStopReason !== undefined) {
-      finishReason = "other";
-    }
-
-    // Explicit null is treated as a missing usage record (absence), never
-    // a crash and never a fabricated zero.
-    const rawUsage = body.usage as Record<string, unknown> | null | undefined;
-
-    // Output-side discovery of the inference geography echo fails closed; the
-    // foreign detail stays on the provider wire (trace), never in the IR.
-    if (rawUsage?.inference_geo !== undefined) {
-      return { ok: false, error: unsupportedCapabilityFailure("inference-geography") };
-    }
-
-    // Usage counters parse through the same shared accumulator the provider
-    // stream decoder uses: every present counter must be a finite number, an
-    // explicitly reported zero is preserved (absence is distinct from zero),
-    // the M input formula sums the cache subdivisions, and `total` is never
-    // fabricated. A complete M response must additionally report both billing
-    // totals.
-    let usage: IrUsage | undefined;
-    if (rawUsage !== undefined && rawUsage !== null) {
-      const accumulator: MessagesUsageAccumulator = { sawUsage: false };
-      const accumulateResult = accumulateMessagesUsage(accumulator, rawUsage);
-      if (!accumulateResult.ok) return accumulateResult;
-      if (accumulator.inputTokens === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure("usage.input_tokens must be a finite number when usage is present"),
-        };
-      }
-      if (accumulator.outputTokens === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure("usage.output_tokens must be a finite number when usage is present"),
-        };
-      }
-      usage = collapseMessagesUsage(accumulator);
-    }
-
-    // Response-side wire-only fact: the effective serving-tier echo
-    // (standard|priority|batch). Out-of-M it is declared loss and never
-    // fabricated into a C/R tier.
-    let outcomeWireOptions: OutcomeWireOptions = {};
-    if (typeof rawUsage?.service_tier === "string") {
-      outcomeWireOptions = { serviceTier: rawUsage.service_tier };
-    }
-
-    // The matched stop string is only meaningful with the `stop_sequence`
-    // stop reason: a stray value paired with any other reason is malformed M
-    // wire, and the capture is gated so the M-client echo pairing stays valid.
-    const rawStopSequence = body.stop_sequence;
-    if (rawStopSequence !== undefined && rawStopSequence !== null) {
-      if (typeof rawStopSequence !== "string") {
-        return { ok: false, error: invalidRequestFailure("stop_sequence must be a string when present") };
-      }
-      if (rawStopReason !== "stop_sequence") {
-        return {
-          ok: false,
-          error: invalidRequestFailure("stop_sequence is only valid with stop_reason 'stop_sequence'"),
-        };
-      }
-    }
-
-    const outcome: IrOutcome = {
-      responseId: typeof body.id === "string" && body.id.trim() !== "" ? body.id : `msg_${randomUUID()}`,
-      model: typeof body.model === "string" ? body.model : "unknown",
-      parts,
-      finish: {
-        reason: finishReason,
-        ...(rawStopReason === "stop_sequence" && typeof rawStopSequence === "string"
-          ? { stopSequence: rawStopSequence }
-          : {}),
-      },
-      ...(usage !== undefined ? { usage } : {}),
-    };
-
-    return { ok: true, value: { irOutcome: outcome, outcomeWireOptions } };
+    return parseMessagesOutcome(status, body);
   }
 }

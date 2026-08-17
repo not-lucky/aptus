@@ -158,8 +158,8 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
   const env = seededEnv("skips");
   const cli = await startCli(harness, "skips");
   try {
-    // 1. Ingress Chat request with tools targeting multi-protocol-route [claude-main (M), gpt-main (C), responses-main (R)]
-    // Should skip candidate 0 (claude-main) with zero dispatch due to unsupported tool translation in plain-text,
+    // 1. Ingress Chat request with a hosted tool field targeting multi-protocol-route [claude-main (M), gpt-main (C), responses-main (R)]
+    // Should skip candidate 0 (claude-main) with zero dispatch due to the hosted web-search capability,
     // then match and dispatch candidate 1 (gpt-main) natively
     harness.chatOrigin.enqueue({ status: 200, body: COMPLETE_CHAT_BYTES });
 
@@ -170,7 +170,7 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
       JSON.stringify({
         ...MINIMAL_CHAT_REQUEST,
         model: "multi-protocol-route",
-        tools: [{ type: "function", function: { name: "get_weather" } }],
+        web_search_options: { search_context_size: "low" },
       }),
     );
     assert.equal(chatResponse.status, 200);
@@ -200,7 +200,7 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
       provider: "anthropic-primary",
       targetProtocol: "anthropic-messages",
       category: "unsupported_capability",
-      capability: "function-tool-definition",
+      capability: "hosted-web-search",
     });
 
     // 2. Ingress Messages request targeting multi-protocol-route
@@ -220,8 +220,8 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
     assert.equal(harness.messagesOrigin.dispatchCount(), 1, "messagesOrigin should now have 1 request");
     assert.equal(harness.responsesOrigin.dispatchCount(), 0, "responsesOrigin should still have 0 requests");
 
-    // 3. Ingress Responses request with tools targeting multi-protocol-route
-    // Should skip candidate 0 (claude-main) and candidate 1 (gpt-main) with zero dispatch due to unsupported tool translation, then match candidate 2 (responses-main) natively
+    // 3. Ingress Responses request with a hosted tool targeting multi-protocol-route
+    // Should skip candidate 0 (claude-main) and candidate 1 (gpt-main) with zero dispatch due to the hosted web-search capability, then match candidate 2 (responses-main) natively
     harness.responsesOrigin.enqueue({ status: 200, body: COMPLETE_RESPONSES_BYTES });
 
     const responsesResponse = await postJson(
@@ -231,7 +231,7 @@ test.concurrent("process: mixed-protocol route skips incompatible candidates wit
       JSON.stringify({
         ...MINIMAL_RESPONSES_REQUEST,
         model: "multi-protocol-route",
-        tools: [{ type: "function", name: "get_weather" }],
+        tools: [{ type: "web_search" }],
       }),
     );
     assert.equal(responsesResponse.status, 200);

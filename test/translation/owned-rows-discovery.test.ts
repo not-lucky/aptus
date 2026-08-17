@@ -43,22 +43,10 @@ test.concurrent("preflight outcome: non-plain-text outcome discoveries terminate
     parts: [{ type: "text" as const, partId: "p1", text: "Hi" }],
   };
   const cases: ReadonlyArray<readonly [IrOutcome, string, Direction]> = [
-    [{ ...base, finish: { reason: "tool_calls" } }, "finish-tool-calls", "openai-chat->openai-responses"],
     [{ ...base, finish: { reason: "refusal" } }, "refusal-content", "openai-chat->openai-responses"],
     [{ ...base, finish: { reason: "content_filter" } }, "finish-content-filter", "openai-chat->openai-responses"],
     [{ ...base, finish: { reason: "context_limit" } }, "finish-context-limit", "anthropic-messages->openai-chat"],
     [{ ...base, finish: { reason: "other" } }, "finish-other-unknown", "openai-chat->openai-responses"],
-    [
-      {
-        ...base,
-        finish: { reason: "stop" },
-        parts: [
-          { type: "tool_call", partId: "p1", call: { type: "function", callId: "c1", name: "f", argumentsText: "{}" } },
-        ],
-      },
-      "function-tool-definition",
-      "openai-chat->openai-responses",
-    ],
   ];
   for (const [outcome, capability, direction] of cases) {
     const res = preflightOutcome(outcome, direction);
@@ -602,10 +590,92 @@ test.concurrent("complete-path outcome decoders reject unrecognized block/item t
       object: "response",
       status: "completed",
       model: "upstream-target",
-      output: [{ type: "web_search_call", id: "ws_1", status: "completed" }],
+      output: [{ type: "totally_unknown_item", id: "unk_1" }],
       usage: { input_tokens: 1, output_tokens: 1 },
     },
   );
   assert.equal(rRes.ok, false);
   if (!rRes.ok) assert.equal(rRes.error.capability, "unknown-content-item");
+});
+
+test.concurrent("complete-path request decode: hosted blocks in assistant content reject with their exact rows", () => {
+  // A hosted/provider block carries the same row regardless of which role's
+  // content it appears in — user and assistant branches must agree.
+  for (const [blockType, capability] of [
+    ["web_search_tool_result", "hosted-web-search"],
+    ["container_upload", "provider-container"],
+    ["search_result", "hosted-web-search"],
+  ] as const) {
+    const body = {
+      model: "wire-model",
+      max_tokens: 1024,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "assistant", content: [{ type: blockType } as unknown as Record<string, unknown>] },
+      ],
+    };
+    const res = new MessagesIngressDecoder().decodeRequest(body as never);
+    assert.equal(res.ok, false, `assistant ${blockType} should reject`);
+    if (!res.ok) assert.equal(res.error.capability, capability);
+  }
+  // The documented nesting: encrypted payloads ride inside web_search_result
+  // elements of a tool_result; the recursive scan catches them in user content.
+  const encrypted = {
+    model: "wire-model",
+    max_tokens: 1024,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "w", input: {} }],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: [{ type: "web_search_result", encrypted_content: "zzz", title: "t", url: "https://example.com" }],
+          },
+        ],
+      },
+    ],
+  };
+  const encRes = new MessagesIngressDecoder().decodeRequest(encrypted as never);
+  assert.equal(encRes.ok, false, "encrypted web_search_result should reject");
+  if (!encRes.ok) assert.equal(encRes.error.capability, "hosted-tool-result-encryption");
+});
+
+test.concurrent("complete-path outcome decode: a text block with a missing or non-string text field fails closed", () => {
+  const mRes = new MessagesIngressDecoder().decodeOutcome(
+    200,
+    {},
+    {
+      id: "msg_no_text",
+      type: "message",
+      role: "assistant",
+      model: "upstream-target",
+      content: [{ type: "text" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  );
+  assert.equal(mRes.ok, false, "M text block without text should reject");
+  if (!mRes.ok) assert.equal(mRes.error.category, "invalid_request");
+
+  const rRes = new ResponsesIngressDecoder().decodeOutcome(
+    200,
+    {},
+    {
+      id: "resp_no_text",
+      object: "response",
+      status: "completed",
+      model: "upstream-target",
+      output: [{ type: "message", id: "m1", role: "assistant", content: [{ type: "output_text" }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  );
+  assert.equal(rRes.ok, false, "R output_text without text should reject");
+  if (!rRes.ok) assert.equal(rRes.error.category, "invalid_request");
 });

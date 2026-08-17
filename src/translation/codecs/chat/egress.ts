@@ -1,15 +1,15 @@
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import { chatToolFields } from "../shared/tool-fields.ts";
 import {
   buildChatMessages,
   chatFinishReason,
   chatGenerationFields,
-  chatOutcomeWireFields,
-  chatResponsesRequestFields,
-  chatUsageBody,
-  reanchorChatBreakpoints,
-} from "../shared.ts";
+  partitionOutcomeParts,
+} from "../shared/transcript.ts";
+import { chatUsageBody } from "../shared/usage.ts";
+import { chatOutcomeWireFields, chatResponsesRequestFields } from "../shared/wire-options.ts";
 
 /**
  * Egress encoder for OpenAI Chat Completions requests and responses.
@@ -32,17 +32,18 @@ export class ChatEgressEncoder implements EgressEncoder {
   }
 
   encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
-    const build = buildChatMessages(request.items);
-
-    // Re-anchor prompt-cache breakpoints onto the reconstructed message parts.
-    reanchorChatBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
+    const markedItems = new Set(
+      (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
+    );
+    const messages = buildChatMessages(request.items, markedItems);
 
     return {
       model: targetModel,
-      messages: build.entries,
+      messages,
       stream: false,
       ...chatGenerationFields(request.generation),
       ...chatResponsesRequestFields(requestWireOptions),
+      ...chatToolFields(request, requestWireOptions),
     };
   }
 
@@ -54,12 +55,28 @@ export class ChatEgressEncoder implements EgressEncoder {
     readonly headers: HeaderMap;
     readonly body: JsonObject;
   } {
-    let text = "";
-    for (const part of outcome.parts) {
-      if (part.type === "text") {
-        text += part.text;
-      }
-    }
+    // One coalescing rule for every wire: text runs collapse in
+    // partitionOutcomeParts, so Chat cannot drift from Messages and Responses.
+    const segments = partitionOutcomeParts(outcome.parts);
+    const textRuns = segments.flatMap((segment) => (segment.type === "text" ? [segment.text] : []));
+    const text = textRuns.join("");
+    const toolCalls: JsonObject[] = segments.flatMap((segment): JsonObject[] =>
+      segment.type !== "tool_call"
+        ? []
+        : [
+            segment.call.type === "function"
+              ? {
+                  id: segment.call.callId,
+                  type: "function",
+                  function: { name: segment.call.name, arguments: segment.call.argumentsText },
+                }
+              : {
+                  id: segment.call.callId,
+                  type: "custom",
+                  custom: { name: segment.call.name, input: segment.call.inputText },
+                },
+          ],
+    );
 
     const finishReason = chatFinishReason(outcome.finish.reason);
 
@@ -79,7 +96,10 @@ export class ChatEgressEncoder implements EgressEncoder {
           index: 0,
           message: {
             role: "assistant",
-            content: text,
+            // Tool-only outcomes carry null content; any text part (even one
+            // concatenating to empty) is the scalar content spelling.
+            content: textRuns.length > 0 ? text : toolCalls.length > 0 ? null : "",
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
           },
           finish_reason: finishReason,
           logprobs: null,

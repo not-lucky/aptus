@@ -31,16 +31,16 @@ test.concurrent("translation codec responses: decodes and encodes request", () =
   }
 });
 
-test.concurrent("translation codec responses: rejects parallel_tool_calls fail-closed", () => {
+test.concurrent("translation codec responses: admits parallel_tool_calls into the IR", () => {
   const decoder = new ResponsesIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "gpt-5.4",
     input: "Hello!",
     parallel_tool_calls: true,
   });
-  assert.equal(decodeRes.ok, false);
-  if (!decodeRes.ok) {
-    assert.equal(decodeRes.error.capability, "parallel-tool-calls");
+  assert.equal(decodeRes.ok, true);
+  if (decodeRes.ok) {
+    assert.equal(decodeRes.value.irRequest.parallelToolCalls, true);
   }
 });
 

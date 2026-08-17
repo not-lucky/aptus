@@ -193,6 +193,23 @@ test.concurrent("process: C->R streaming translation", async () => {
         messages: [{ role: "user", content: "hi" }],
         stream: true,
         stream_options: { include_usage: true },
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "get_weather",
+              description: "Get weather",
+              parameters: {
+                type: "object",
+                properties: { city: { type: "string" } },
+                required: ["city"],
+                additionalProperties: false,
+              },
+            },
+          },
+        ],
+        tool_choice: { type: "function", function: { name: "get_weather" } },
+        parallel_tool_calls: false,
       }),
     );
 
@@ -209,6 +226,22 @@ test.concurrent("process: C->R streaming translation", async () => {
     assert.equal(req.url, "/v1/responses");
     const reqBody = JSON.parse(new TextDecoder().decode(req.body));
     assert.equal(reqBody.stream, true);
+    assert.deepEqual(reqBody.tools, [
+      {
+        type: "function",
+        name: "get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+    ]);
+    assert.deepEqual(reqBody.tool_choice, { type: "function", name: "get_weather" });
+    assert.equal(reqBody.parallel_tool_calls, false);
 
     // Verify trace files
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
@@ -283,6 +316,22 @@ test.concurrent("process: R->C streaming translation", async () => {
         model: "route-r-to-c",
         input: "hi",
         stream: true,
+        tools: [
+          {
+            type: "function",
+            name: "get_weather",
+            description: "Get weather",
+            parameters: {
+              type: "object",
+              properties: { city: { type: "string" } },
+              required: ["city"],
+              additionalProperties: false,
+            },
+            strict: false,
+          },
+        ],
+        tool_choice: { type: "function", name: "get_weather" },
+        parallel_tool_calls: false,
       }),
     );
 
@@ -293,6 +342,29 @@ test.concurrent("process: R->C streaming translation", async () => {
     assert.ok(streamText.includes("Hello"));
     assert.ok(streamText.includes("event: response.completed"));
     assert.ok(!streamText.includes("[DONE]"));
+
+    const req = harness.chatOrigin.lastRequest();
+    assert.ok(req);
+    assert.equal(req.url, "/v1/chat/completions");
+    const reqBody = JSON.parse(new TextDecoder().decode(req.body));
+    assert.equal(reqBody.stream, true);
+    assert.deepEqual(reqBody.tools, [
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get weather",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+            additionalProperties: false,
+          },
+        },
+      },
+    ]);
+    assert.deepEqual(reqBody.tool_choice, { type: "function", function: { name: "get_weather" } });
+    assert.equal(reqBody.parallel_tool_calls, false);
   } finally {
     await cli.stop();
     await harness.closeAll();

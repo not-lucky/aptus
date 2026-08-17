@@ -11,22 +11,15 @@ import type {
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
-import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
-import type { IrRequest, IrStreamEvent, IrUsage } from "../../ir.ts";
-import type { SseFrame } from "../../sse.ts";
-import {
-  buildChatMessages,
-  captureOutcomeWireFacts,
-  chatFinishReason,
-  chatGenerationFields,
-  chatOutcomeWireFields,
-  chatResponsesRequestFields,
-  chatUsageBody,
-  parseChatUsage,
-  reanchorChatBreakpoints,
-} from "../shared.ts";
-import { parseChatRequestBody } from "./ingress.ts";
 
+import type { IrRequest, IrStreamEvent, IrUsage } from "../../ir.ts";
+import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
+import type { SseFrame } from "../../sse.ts";
+import { chatToolFields } from "../shared/tool-fields.ts";
+import { buildChatMessages, chatFinishReason, chatGenerationFields } from "../shared/transcript.ts";
+import { chatUsageBody, parseChatUsage } from "../shared/usage.ts";
+import { captureOutcomeWireFacts, chatOutcomeWireFields, chatResponsesRequestFields } from "../shared/wire-options.ts";
+import { parseChatRequestBody } from "./ingress.ts";
 /**
  * Decodes a streaming OpenAI Chat Completions request.
  *
@@ -43,7 +36,7 @@ export class ChatStreamRequestDecoder implements StreamRequestDecoder {
     let includeUsage = false;
     if (body.stream_options !== undefined && body.stream_options !== null) {
       if (typeof body.stream_options !== "object") {
-        return { ok: false, error: invalidRequestFailure("Chat 'stream_options' must be an object") };
+        return invalidRequest("Chat 'stream_options' must be an object");
       }
       const streamOptions = body.stream_options as Record<string, unknown>;
       // `include_obfuscation` is recognized but never propagated: obfuscation is a
@@ -53,17 +46,14 @@ export class ChatStreamRequestDecoder implements StreamRequestDecoder {
           const rawIncludeUsage = streamOptions.include_usage;
           if (rawIncludeUsage !== undefined && rawIncludeUsage !== null) {
             if (typeof rawIncludeUsage !== "boolean") {
-              return {
-                ok: false,
-                error: invalidRequestFailure("stream_options.include_usage must be a boolean when present"),
-              };
+              return invalidRequest("stream_options.include_usage must be a boolean when present");
             }
             includeUsage = rawIncludeUsage;
           }
           continue;
         }
         if (key !== "include_obfuscation") {
-          return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
+          return unsupportedCapability("unknown-request-field");
         }
       }
     }
@@ -71,14 +61,11 @@ export class ChatStreamRequestDecoder implements StreamRequestDecoder {
     const parsed = parseChatRequestBody(body, "stream");
     if (!parsed.ok) return parsed;
 
-    return {
-      ok: true,
-      value: {
-        irRequest: parsed.value.irRequest,
-        sourceWireOptions: { includeUsage },
-        requestWireOptions: parsed.value.requestWireOptions,
-      },
-    };
+    return ok({
+      irRequest: parsed.value.irRequest,
+      sourceWireOptions: { includeUsage },
+      requestWireOptions: parsed.value.requestWireOptions,
+    });
   }
 }
 
@@ -94,14 +81,14 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
     wireOptions: StreamWireOptions,
     requestWireOptions?: RequestWireOptions,
   ): JsonObject {
-    const build = buildChatMessages(request.items);
-
-    // Re-anchor prompt-cache breakpoints onto the reconstructed message parts.
-    reanchorChatBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
+    const markedItems = new Set(
+      (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
+    );
+    const messages = buildChatMessages(request.items, markedItems);
 
     return {
       model: targetModel,
-      messages: build.entries,
+      messages,
       stream: true,
       stream_options: {
         include_usage: wireOptions.includeUsage ?? false,
@@ -109,6 +96,7 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
       },
       ...chatGenerationFields(request.generation),
       ...chatResponsesRequestFields(requestWireOptions),
+      ...chatToolFields(request, requestWireOptions),
     };
   }
 }
@@ -146,7 +134,7 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
     // misbehaving provider stream and fails closed instead of re-emitting a
     // second terminal event.
     if (this.sawDone) {
-      return { ok: false, error: invalidRequestFailure("Chat stream received frame after the [DONE] sentinel") };
+      return invalidRequest("Chat stream received frame after the [DONE] sentinel");
     }
 
     const trimmedData = frame.data.trim();
@@ -161,46 +149,32 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
           ...(this.pendingUsage !== undefined ? { usage: this.pendingUsage } : {}),
         });
       }
-      return { ok: true, value: events };
+      return ok(events);
     }
 
     let chunk: Record<string, unknown>;
     try {
       chunk = JSON.parse(frame.data) as Record<string, unknown>;
     } catch (err) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(
-          `Chat stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      };
+      return invalidRequest(`Chat stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     if (chunk.error !== undefined && chunk.error !== null) {
       const err = chunk.error as Record<string, unknown>;
-      return {
-        ok: false,
-        error: {
-          category: "provider",
-          message: typeof err.message === "string" ? err.message : "Chat provider stream in-band error",
-          code: typeof err.code === "string" ? err.code : undefined,
-          retryable: false,
-        },
-      };
+      return failure({
+        category: "provider",
+        message: typeof err.message === "string" ? err.message : "Chat provider stream in-band error",
+        code: typeof err.code === "string" ? err.code : undefined,
+        retryable: false,
+      });
     }
 
     if (chunk.object !== "chat.completion.chunk") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Chat stream chunk missing expected object 'chat.completion.chunk'"),
-      };
+      return invalidRequest("Chat stream chunk missing expected object 'chat.completion.chunk'");
     }
 
     if (!Array.isArray(chunk.choices)) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Chat stream chunk missing choices array"),
-      };
+      return invalidRequest("Chat stream chunk missing choices array");
     }
 
     // Per-chunk wire-only sidecar capture (last-write-wins): both fields are
@@ -218,18 +192,18 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
       const usageResult = parseChatUsage(chunk.usage);
       if (!usageResult.ok) return usageResult;
       this.pendingUsage = usageResult.value;
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     // Multiple candidates in one chunk evade the request-side `n` check; the
     // streaming wire carries exactly one choice per chunk.
     if (chunk.choices.length > 1) {
-      return { ok: false, error: unsupportedCapabilityFailure("multiple-candidates") };
+      return unsupportedCapability("multiple-candidates");
     }
 
     const choice = chunk.choices[0] as Record<string, unknown>;
     if (choice.index !== 0) {
-      return { ok: false, error: unsupportedCapabilityFailure("multiple-candidates") };
+      return unsupportedCapability("multiple-candidates");
     }
 
     if (!this.responseStartEmitted) {
@@ -244,10 +218,10 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
     const delta = choice.delta as Record<string, unknown> | undefined;
     if (delta !== undefined && delta !== null) {
       if (delta.tool_calls !== undefined) {
-        return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
+        return unsupportedCapability("function-tool-definition");
       }
       if (delta.refusal !== undefined && delta.refusal !== null) {
-        return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
+        return unsupportedCapability("refusal-content");
       }
 
       if (delta.role === "assistant" && !this.partStartEmitted) {
@@ -289,11 +263,11 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
       } else if (choice.finish_reason === "length") {
         this.finishReason = "length";
       } else if (choice.finish_reason === "tool_calls") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-tool-calls") };
+        return unsupportedCapability("finish-tool-calls");
       } else if (choice.finish_reason === "content_filter") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-content-filter") };
+        return unsupportedCapability("finish-content-filter");
       } else {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-other-unknown") };
+        return unsupportedCapability("finish-other-unknown");
       }
 
       if (this.partStartEmitted && !this.partEndEmitted && this.currentPartId !== undefined) {
@@ -308,21 +282,18 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
       }
     }
 
-    return { ok: true, value: events };
+    return ok(events);
   }
 
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
     if (!this.sawDone) {
-      return {
-        ok: false,
-        error: {
-          category: "stream_interrupted",
-          message: "Chat stream ended unexpectedly before receiving [DONE] sentinel",
-          retryable: false,
-        },
-      };
+      return failure({
+        category: "stream_interrupted",
+        message: "Chat stream ended unexpectedly before receiving [DONE] sentinel",
+        retryable: false,
+      });
     }
-    return { ok: true, value: [] };
+    return ok([]);
   }
 }
 
@@ -376,7 +347,7 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
           },
         ],
       };
-      return { ok: true, value: [{ data: JSON.stringify(chunk) }] };
+      return ok([{ data: JSON.stringify(chunk) }]);
     }
 
     if (event.type === "text_delta") {
@@ -393,11 +364,11 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
           },
         ],
       };
-      return { ok: true, value: [{ data: JSON.stringify(chunk) }] };
+      return ok([{ data: JSON.stringify(chunk) }]);
     }
 
     if (event.type === "part_start" || event.type === "part_end") {
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     if (event.type === "response_end") {
@@ -444,20 +415,17 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
       // Final [DONE] sentinel
       frames.push({ data: "[DONE]" });
 
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "error") {
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
-    return {
-      ok: false,
-      error: unsupportedCapabilityFailure("unknown-stream-event"),
-    };
+    return unsupportedCapability("unknown-stream-event");
   }
 
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
-    return { ok: true, value: [] };
+    return ok([]);
   }
 }

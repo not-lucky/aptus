@@ -2,15 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import { responsesToolFields } from "../shared/tool-fields.ts";
 import {
   buildResponsesInput,
-  chatResponsesRequestFields,
-  reanchorResponsesBreakpoints,
+  partitionOutcomeParts,
   responsesFinishStatus,
   responsesGenerationFields,
-  responsesOutcomeWireFields,
-  responsesUsageBody,
-} from "../shared.ts";
+} from "../shared/transcript.ts";
+import { responsesUsageBody } from "../shared/usage.ts";
+import { chatResponsesRequestFields, responsesOutcomeWireFields } from "../shared/wire-options.ts";
 
 /**
  * Egress encoder for OpenAI Responses requests and responses.
@@ -34,17 +34,18 @@ export class ResponsesEgressEncoder implements EgressEncoder {
   }
 
   encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
-    const build = buildResponsesInput(request.items);
-
-    // Re-anchor prompt-cache breakpoints onto the reconstructed input parts.
-    reanchorResponsesBreakpoints(build, requestWireOptions?.promptCacheBreakpoints);
+    const markedItems = new Set(
+      (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
+    );
+    const input = buildResponsesInput(request.items, markedItems);
 
     return {
       model: targetModel,
-      input: build.entries,
+      input,
       stream: false,
       ...responsesGenerationFields(request.generation),
       ...chatResponsesRequestFields(requestWireOptions),
+      ...responsesToolFields(request, requestWireOptions),
     };
   }
 
@@ -56,13 +57,6 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     readonly headers: HeaderMap;
     readonly body: JsonObject;
   } {
-    let text = "";
-    for (const part of outcome.parts) {
-      if (part.type === "text") {
-        text += part.text;
-      }
-    }
-
     const isLength = outcome.finish.reason === "length";
     const status = responsesFinishStatus(outcome.finish.reason);
 
@@ -71,20 +65,43 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     // ride in the documented details objects and are never re-added.
     const usage = outcome.usage !== undefined ? responsesUsageBody(outcome.usage) : undefined;
 
-    const msgId = `msg_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-    const outputItem: JsonObject = {
-      type: "message",
-      id: msgId,
-      status: "completed",
-      role: "assistant",
-      content: [
-        {
-          type: "output_text",
-          text,
-          annotations: [],
-        },
-      ],
-    };
+    // Output items preserve part order and a tool-only outcome emits no empty
+    // message item; an outcome with no parts still carries one.
+    const msgId = (): string => `msg_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const output: JsonObject[] = partitionOutcomeParts(outcome.parts).map(
+      (segment): JsonObject =>
+        segment.type === "text"
+          ? {
+              type: "message",
+              id: msgId(),
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: segment.text, annotations: [] }],
+            }
+          : segment.call.type === "function"
+            ? {
+                type: "function_call",
+                call_id: segment.call.callId,
+                name: segment.call.name,
+                arguments: segment.call.argumentsText,
+                status: "completed",
+              }
+            : {
+                type: "custom_tool_call",
+                call_id: segment.call.callId,
+                name: segment.call.name,
+                input: segment.call.inputText,
+              },
+    );
+    if (output.length === 0) {
+      output.push({
+        type: "message",
+        id: msgId(),
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "", annotations: [] }],
+      });
+    }
 
     const body: JsonObject = {
       id: `resp_${outcome.responseId}`,
@@ -93,7 +110,7 @@ export class ResponsesEgressEncoder implements EgressEncoder {
       status,
       ...(isLength ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
       model: outcome.model,
-      output: [outputItem],
+      output,
       ...(usage !== undefined ? { usage } : {}),
       // The moderation result rides in Responses' singular-verdict form and the
       // tier echo passes through; both projections are shared with the

@@ -16,7 +16,7 @@ interface KeyState {
 /**
  * Creates a per-provider {@link KeyPool} managing key selection strategies and adaptive health.
  *
- * Requirements (ADR 0002):
+ * Requirements:
  * - Key selection supports `fill-first` and `round-robin` across enabled keys.
  * - `acquire` is non-blocking and returns `acquired`, `wait` (when all enabled keys are cooling down), or `unavailable`.
  * - `observe` ignores stale lease generations where the key was re-leased since the observation began.

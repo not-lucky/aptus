@@ -1,6 +1,6 @@
 import type { HeaderMap, JsonObject, PreparedProviderRequest, Protocol, Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { IrOutcome, IrRequest, IrStreamEvent } from "./ir.ts";
+import type { IrOutcome, IrRequest, IrStreamEvent, IrTool } from "./ir.ts";
 import type { SseFrame } from "./sse.ts";
 
 /**
@@ -52,7 +52,8 @@ export interface PromptCacheBreakpoint {
  * Wire-only request options traveling beside the IR.
  *
  * Matrix-admitted semantic fields (storage, prompt-cache key/mode/ttl/breakpoints,
- * metadata/legacy user, safety identifier, moderation param, service tier) are
+ * metadata/legacy user, safety identifier, moderation param, service tier,
+ * allowed-tool subset control, per-tool allowed callers) are
  * protocol-shaped but deliberately NOT represented in `IrRequest` — they ride in
  * this closed, typed sidecar so the IR stays protocol-neutral. Source ingress
  * captures them verbatim; direction feasibility is enforced by preflight and
@@ -82,6 +83,20 @@ export interface RequestWireOptions {
   readonly moderation?: JsonObject | null;
   /** `service-tier` request param; into/out of M only "auto" maps (preflight enforces). */
   readonly serviceTier?: string | null;
+  /**
+   * `allowed-tool-subset`: C↔R wire-only subset control. Elements are parsed
+   * as `IrTool` definitions at ingress and re-emitted in the target wire shape
+   * at egress (nested C vs flat R); never admitted into M.
+   */
+  readonly allowedToolSubset?: { readonly mode: "auto" | "required"; readonly tools: readonly IrTool[] };
+  /**
+   * `allowed-callers`: names of tools whose source `allowed_callers` array
+   * contained only `"direct"`. Decode rejects every other documented caller
+   * with the `allowed-callers` row, so this normalized name list is sufficient
+   * for the only R↔M intersection; Chat has no caller surface and is gated by
+   * preflight.
+   */
+  readonly toolAllowedCallers?: ReadonlyArray<string>;
 }
 
 /**

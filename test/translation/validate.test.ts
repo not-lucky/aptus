@@ -25,6 +25,47 @@ test.concurrent("translation validate: admits valid IrRequest", () => {
   assert.equal(result.ok, true);
 });
 
+test.concurrent("translation validate: requires allowed-tool subset entries to be declared", () => {
+  const declaredTool = {
+    type: "function" as const,
+    name: "get_weather",
+    inputSchema: { type: "object" },
+  };
+  const request: IrRequest = {
+    model: "logical-key",
+    delivery: "complete",
+    tools: [declaredTool],
+    items: [{ type: "message", role: "user", content: [{ type: "text", text: "Hello!" }] }],
+  };
+
+  const admitted = validateIrRequest(request, {
+    allowedToolSubset: { mode: "auto", tools: [declaredTool] },
+  });
+  assert.equal(admitted.ok, true);
+
+  const undeclared = validateIrRequest(request, {
+    allowedToolSubset: {
+      mode: "auto",
+      tools: [{ ...declaredTool, name: "missing_tool" }],
+    },
+  });
+  assert.equal(undeclared.ok, false);
+  if (!undeclared.ok) {
+    assert.equal(undeclared.error.category, "invalid_request");
+    assert.match(undeclared.error.message, /undeclared tool 'missing_tool'/);
+  }
+
+  const missingTopLevelTools = validateIrRequest(
+    { ...request, tools: undefined },
+    { allowedToolSubset: { mode: "auto", tools: [declaredTool] } },
+  );
+  assert.equal(missingTopLevelTools.ok, false);
+  if (!missingTopLevelTools.ok) {
+    assert.equal(missingTopLevelTools.error.category, "invalid_request");
+    assert.match(missingTopLevelTools.error.message, /undeclared tool 'get_weather'/);
+  }
+});
+
 test.concurrent("translation validate: rejects empty model or whitespace model", () => {
   const req: IrRequest = {
     model: "   ",
@@ -126,6 +167,68 @@ test.concurrent("translation validate: admits valid IrOutcome with empty parts a
   };
   const result = validateIrOutcome(out);
   assert.equal(result.ok, true);
+});
+
+test.concurrent("translation validate: enforces function argument parse invariant", () => {
+  const requestWithCall = (call: unknown): IrRequest => ({
+    model: "logical-key",
+    delivery: "complete",
+    items: [
+      { type: "message", role: "user", content: [{ type: "text", text: "Call the tool" }] },
+      { type: "tool_call", call: call as never },
+    ],
+  });
+
+  const valid = validateIrRequest(
+    requestWithCall({
+      type: "function",
+      callId: "call_1",
+      name: "get_weather",
+      argumentsText: '{"city":"SF","units":"metric"}',
+      arguments: { units: "metric", city: "SF" },
+    }),
+  );
+  assert.equal(valid.ok, true, "parsed object may use a different property order");
+
+  const invalidTextWithoutParsedObject = validateIrRequest(
+    requestWithCall({
+      type: "function",
+      callId: "call_1",
+      name: "get_weather",
+      argumentsText: "not-json",
+    }),
+  );
+  assert.equal(invalidTextWithoutParsedObject.ok, true, "raw invalid JSON remains representable");
+
+  const invalidTextWithParsedObject = validateIrRequest(
+    requestWithCall({
+      type: "function",
+      callId: "call_1",
+      name: "get_weather",
+      argumentsText: "not-json",
+      arguments: {},
+    }),
+  );
+  assert.equal(invalidTextWithParsedObject.ok, false);
+  if (!invalidTextWithParsedObject.ok) {
+    assert.equal(invalidTextWithParsedObject.error.category, "invalid_request");
+    assert.match(invalidTextWithParsedObject.error.message, /must parse/);
+  }
+
+  const mismatchedObject = validateIrRequest(
+    requestWithCall({
+      type: "function",
+      callId: "call_1",
+      name: "get_weather",
+      argumentsText: '{"city":"SF"}',
+      arguments: { city: "New York" },
+    }),
+  );
+  assert.equal(mismatchedObject.ok, false);
+  if (!mismatchedObject.ok) {
+    assert.equal(mismatchedObject.error.category, "invalid_request");
+    assert.match(mismatchedObject.error.message, /deep-equal/);
+  }
 });
 
 // =====================================================================

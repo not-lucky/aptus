@@ -7,7 +7,6 @@ import type {
   PromptCacheBreakpoint,
   RequestDecodeResult,
 } from "../../contracts.ts";
-import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
 import type {
   IrAssistantPart,
   IrFinishReason,
@@ -17,20 +16,27 @@ import type {
   IrOutcome,
   IrOutputPart,
   IrRequest,
+  IrTool,
+  IrToolCall,
+  IrToolChoice,
   NonEmpty,
 } from "../../ir.ts";
+import { invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import {
   asNonEmptyStopSequences,
-  captureBreakpoint,
-  captureOutcomeWireFacts,
-  parseChatResponsesWireOptions,
-  parseChatUsage,
+  CHAT_TOOL_NAME_REGEX,
+  parseCustomCallInput,
+  parseGrammarFields,
   parsePositiveSafeInteger,
   parseReasoningEffort,
   parseStopSequenceEntries,
   parseUnitIntervalControl,
   parseVerbosity,
-} from "../shared.ts";
+} from "../shared/controls.ts";
+import { parseFunctionArgumentsOnce } from "../shared/hosted-tools.ts";
+import { parseToolArray, parseToolChoice, type ToolWireSpec } from "../shared/tool-parsing.ts";
+import { parseChatUsage } from "../shared/usage.ts";
+import { captureBreakpoint, captureOutcomeWireFacts, parseChatResponsesWireOptions } from "../shared/wire-options.ts";
 
 const RECOGNIZED_CHAT_REQUEST_FIELDS = new Set([
   "model",
@@ -63,12 +69,108 @@ const RECOGNIZED_CHAT_REQUEST_FIELDS = new Set([
   "function_call",
   "tools",
   "tool_choice",
+  "web_search_options",
   "response_format",
   "audio",
   "modalities",
   "prompt_cache_key",
   "prompt_cache_options",
 ]);
+
+type IrCustomToolFormat = Extract<IrTool, { type: "custom" }>["format"];
+
+/**
+ * Parses the nested Chat custom-tool `format` field: absent means text,
+ * `{type:"text"}` is the documented literal, and grammar formats nest their
+ * definition under `grammar` (research C:140).
+ */
+function parseChatCustomFormat(value: unknown, context: string): Result<IrCustomToolFormat, NormalizedFailure> {
+  if (value === undefined) return ok({ type: "text" });
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return invalidRequest(`${context}: format must be an object`);
+  }
+  const format = value as Record<string, unknown>;
+  if (format.type === "text") {
+    return ok({ type: "text" });
+  }
+  if (format.type !== "grammar") {
+    return invalidRequest(`${context}: format type must be 'text' or 'grammar'`);
+  }
+  const grammar = format.grammar;
+  if (typeof grammar !== "object" || grammar === null || Array.isArray(grammar)) {
+    return invalidRequest(`${context}: grammar object is required`);
+  }
+  const grammarObj = grammar as Record<string, unknown>;
+  const grammarResult = parseGrammarFields(grammarObj.syntax, grammarObj.definition, context);
+  if (!grammarResult.ok) return grammarResult;
+  return ok({ type: "grammar" as const, ...grammarResult.value });
+}
+
+/** Shared spec for the nested Chat client-tool definition and choice shapes. */
+const CHAT_TOOL_SPEC: ToolWireSpec = {
+  shape: "nested",
+  schemaField: "parameters",
+  requireObjectSchemaType: false,
+  strictRequired: false,
+  missingSchema: "unsupported",
+  allowCallers: false,
+  documentedCallers: new Set(),
+  validateFunctionName: (value, context) =>
+    typeof value === "string" && CHAT_TOOL_NAME_REGEX.test(value)
+      ? ok(value)
+      : invalidRequest(`${context} name must match [a-zA-Z0-9_-]{1,64}`),
+  parseCustomFormat: parseChatCustomFormat,
+};
+
+/**
+ * Parses one Chat tool-call entry (`{id, type:"function"|"custom", ...}`),
+ * shared by request assistant messages and response messages. Call IDs are
+ * required and never fabricated.
+ */
+function parseChatToolCallEntry(entry: unknown, context: string): Result<IrToolCall, NormalizedFailure> {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return invalidRequest(`${context} must be an object`);
+  }
+  const raw = entry as Record<string, unknown>;
+  if (typeof raw.id !== "string" || raw.id.trim() === "") {
+    return invalidRequest(`${context}: id must be a non-empty string`);
+  }
+  if (raw.type === "function") {
+    const fn = raw.function;
+    if (typeof fn !== "object" || fn === null || Array.isArray(fn)) {
+      return invalidRequest(`${context}: function object is required`);
+    }
+    const fnObj = fn as Record<string, unknown>;
+    if (typeof fnObj.name !== "string" || fnObj.name.trim() === "") {
+      return invalidRequest(`${context}: function name must be a non-empty string`);
+    }
+    if (typeof fnObj.arguments !== "string") {
+      return invalidRequest(`${context}: function arguments must be a string`);
+    }
+    const parsedArguments = parseFunctionArgumentsOnce(fnObj.arguments);
+    return ok({
+      type: "function",
+      callId: raw.id,
+      name: fnObj.name,
+      argumentsText: fnObj.arguments,
+      ...(parsedArguments !== undefined ? { arguments: parsedArguments } : {}),
+    });
+  }
+  if (raw.type === "custom") {
+    const custom = raw.custom;
+    if (typeof custom !== "object" || custom === null || Array.isArray(custom)) {
+      return invalidRequest(`${context}: custom object is required`);
+    }
+    const customObj = custom as Record<string, unknown>;
+    if (typeof customObj.name !== "string" || customObj.name.trim() === "") {
+      return invalidRequest(`${context}: custom name must be a non-empty string`);
+    }
+    const inputResult = parseCustomCallInput(customObj.input, `${context}.custom`);
+    if (!inputResult.ok) return inputResult;
+    return ok({ type: "custom", callId: raw.id, name: customObj.name, inputText: inputResult.value });
+  }
+  return invalidRequest(`${context}: type must be 'function' or 'custom'`);
+}
 
 /**
  * Parses a Chat request body shared verbatim by the complete ingress decoder
@@ -80,17 +182,11 @@ export function parseChatRequestBody(
   delivery: "complete" | "stream",
 ): Result<RequestDecodeResult, NormalizedFailure> {
   if (typeof body.model !== "string" || body.model.trim() === "") {
-    return {
-      ok: false,
-      error: invalidRequestFailure("Chat request missing required string property 'model'"),
-    };
+    return invalidRequest("Chat request missing required string property 'model'");
   }
 
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("Chat request missing required non-empty array property 'messages'"),
-    };
+    return invalidRequest("Chat request missing required non-empty array property 'messages'");
   }
 
   // Decoder-level capability rejections for recognized non-admitted wire facts.
@@ -99,58 +195,52 @@ export function parseChatRequestBody(
   // below instead of rejected — the decoder has no direction, so it must not
   // decide T1 vs T2 vs T3.
   if (body.n !== undefined && body.n !== 1) {
-    return { ok: false, error: unsupportedCapabilityFailure("multiple-candidates") };
+    return unsupportedCapability("multiple-candidates");
   }
   if (body.seed !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("seed-determinism") };
+    return unsupportedCapability("seed-determinism");
   }
   if (body.logit_bias !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("token-logit-bias") };
+    return unsupportedCapability("token-logit-bias");
   }
   if (body.logprobs !== undefined || body.top_logprobs !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("token-logprobs") };
+    return unsupportedCapability("token-logprobs");
   }
   if (body.frequency_penalty !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("frequency-penalty") };
+    return unsupportedCapability("frequency-penalty");
   }
   if (body.presence_penalty !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("presence-penalty") };
+    return unsupportedCapability("presence-penalty");
   }
   if (body.prediction !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("chat-predicted-outputs") };
+    return unsupportedCapability("chat-predicted-outputs");
   }
   // Complete-path requests reject the stream usage carrier outright
   // (`stream-final-usage` row); the streaming request decoder parses
   // `stream_options.include_usage` instead.
   if (delivery === "complete" && body.stream_options !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("stream-final-usage") };
+    return unsupportedCapability("stream-final-usage");
   }
   if (body.functions !== undefined || body.function_call !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("chat-legacy-functions") };
+    return unsupportedCapability("chat-legacy-functions");
   }
   if (body.max_tokens !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("chat-legacy-max-tokens") };
+    return unsupportedCapability("chat-legacy-max-tokens");
   }
-  if (body.tools !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
-  }
-  if (body.tool_choice !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("tool-choice-none-auto-required") };
-  }
-  if (body.parallel_tool_calls !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("parallel-tool-calls") };
+  if (body.web_search_options !== undefined) {
+    return unsupportedCapability("hosted-web-search");
   }
   if (body.response_format !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("structured-json-schema") };
+    return unsupportedCapability("structured-json-schema");
   }
   if (body.audio !== undefined || body.modalities !== undefined) {
-    return { ok: false, error: unsupportedCapabilityFailure("audio-input") };
+    return unsupportedCapability("audio-input");
   }
 
   // Check for unknown request fields outside recognized schema
   for (const key of Object.keys(body)) {
     if (!RECOGNIZED_CHAT_REQUEST_FIELDS.has(key)) {
-      return { ok: false, error: unsupportedCapabilityFailure("unknown-request-field") };
+      return unsupportedCapability("unknown-request-field");
     }
   }
 
@@ -160,21 +250,41 @@ export function parseChatRequestBody(
   if (!sidecarResult.ok) return sidecarResult;
   let wireOptions = sidecarResult.value;
 
+  // ---- Client tool surfaces (definitions, choice, parallelism) ----
+  const toolsResult = parseToolArray(body.tools, "tools", CHAT_TOOL_SPEC);
+  if (!toolsResult.ok) return toolsResult;
+  const tools = toolsResult.value.tools;
+
+  let toolChoice: IrToolChoice | undefined;
+  if (body.tool_choice !== undefined) {
+    const choiceResult = parseToolChoice(body.tool_choice, "tool_choice", CHAT_TOOL_SPEC);
+    if (!choiceResult.ok) return choiceResult;
+    toolChoice = choiceResult.value.choice;
+    if (choiceResult.value.subset !== undefined) {
+      wireOptions = { ...wireOptions, allowedToolSubset: choiceResult.value.subset };
+    }
+  }
+
+  let parallelToolCalls: boolean | undefined;
+  if (body.parallel_tool_calls !== undefined) {
+    if (typeof body.parallel_tool_calls !== "boolean") {
+      return invalidRequest("parallel_tool_calls must be a boolean when present");
+    }
+    parallelToolCalls = body.parallel_tool_calls;
+  }
+
   // Decode messages
   const items: IrItem[] = [];
   for (let i = 0; i < body.messages.length; i++) {
     const msg = body.messages[i];
     if (typeof msg !== "object" || msg === null) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`Chat message [${i}] must be an object`),
-      };
+      return invalidRequest(`Chat message [${i}] must be an object`);
     }
     const rawMsg = msg as Record<string, unknown>;
     const role = rawMsg.role;
 
     if (rawMsg.name !== undefined && rawMsg.name !== null && String(rawMsg.name).trim() !== "") {
-      return { ok: false, error: unsupportedCapabilityFailure("message-name") };
+      return unsupportedCapability("message-name");
     }
 
     // Item index this message's IR item will occupy; breakpoint anchors on
@@ -192,22 +302,19 @@ export function parseChatRequestBody(
             text += part.text;
             if (part.prompt_cache_breakpoint !== undefined) {
               const markerResult = captureBreakpoint(
-                breakpoints,
                 `message [${i}] part [${pIdx}]`,
                 part.prompt_cache_breakpoint,
                 itemIndex,
               );
               if (!markerResult.ok) return markerResult;
+              breakpoints.push(markerResult.value);
             }
           } else {
-            return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
+            return unsupportedCapability("unknown-content-item");
           }
         }
       } else {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Instruction message [${i}] missing string or array content`),
-        };
+        return invalidRequest(`Instruction message [${i}] missing string or array content`);
       }
       items.push({
         type: "instruction",
@@ -229,33 +336,33 @@ export function parseChatRequestBody(
             parts.push({ type: "text", text: rawPart.text });
             if (rawPart.prompt_cache_breakpoint !== undefined) {
               const markerResult = captureBreakpoint(
-                breakpoints,
                 `message [${i}] part [${pIdx}]`,
                 rawPart.prompt_cache_breakpoint,
                 itemIndex,
                 pIdx,
               );
               if (!markerResult.ok) return markerResult;
+              breakpoints.push(markerResult.value);
             }
           } else if (rawPart?.type === "image_url") {
-            return { ok: false, error: unsupportedCapabilityFailure("image-url") };
+            return unsupportedCapability("image-url");
           } else if (rawPart?.type === "input_audio") {
-            return { ok: false, error: unsupportedCapabilityFailure("audio-input") };
+            return unsupportedCapability("audio-input");
+          } else if (rawPart?.type === "file") {
+            const file = rawPart.file as Record<string, unknown> | undefined;
+            if (file !== undefined && typeof file === "object" && file !== null && file.file_id !== undefined) {
+              return unsupportedCapability("provider-uploaded-file");
+            }
+            return unsupportedCapability("document-inline-bytes");
           } else {
-            return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
+            return unsupportedCapability("unknown-content-item");
           }
         }
       } else {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`User message [${i}] missing string or array content`),
-        };
+        return invalidRequest(`User message [${i}] missing string or array content`);
       }
       if (parts.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`User message [${i}] has empty content`),
-        };
+        return invalidRequest(`User message [${i}] has empty content`);
       }
       items.push({
         type: "message",
@@ -266,11 +373,11 @@ export function parseChatRequestBody(
     }
 
     if (role === "assistant") {
-      if (rawMsg.tool_calls !== undefined) {
-        return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
+      if (rawMsg.function_call !== undefined && rawMsg.function_call !== null) {
+        return unsupportedCapability("chat-legacy-functions");
       }
       if (rawMsg.audio !== undefined) {
-        return { ok: false, error: unsupportedCapabilityFailure("audio-output") };
+        return unsupportedCapability("audio-output");
       }
 
       const parts: IrAssistantPart[] = [];
@@ -283,53 +390,99 @@ export function parseChatRequestBody(
             parts.push({ type: "text", text: rawPart.text });
             if (rawPart.prompt_cache_breakpoint !== undefined) {
               const markerResult = captureBreakpoint(
-                breakpoints,
                 `message [${i}] part [${pIdx}]`,
                 rawPart.prompt_cache_breakpoint,
                 itemIndex,
                 pIdx,
               );
               if (!markerResult.ok) return markerResult;
+              breakpoints.push(markerResult.value);
             }
           } else if (rawPart?.type === "refusal") {
-            return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
+            return unsupportedCapability("refusal-content");
           } else {
-            return { ok: false, error: unsupportedCapabilityFailure("unknown-content-item") };
+            return unsupportedCapability("unknown-content-item");
           }
         }
       } else if (rawMsg.refusal !== undefined && rawMsg.refusal !== null) {
-        return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
-      } else {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Assistant message [${i}] missing string or array content`),
-        };
+        return unsupportedCapability("refusal-content");
+      } else if (rawMsg.content !== undefined && rawMsg.content !== null) {
+        return invalidRequest(`Assistant message [${i}] missing string or array content`);
       }
-      if (parts.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`Assistant message [${i}] has empty content`),
-        };
+
+      const toolCalls: IrToolCall[] = [];
+      if (rawMsg.tool_calls !== undefined) {
+        if (!Array.isArray(rawMsg.tool_calls)) {
+          return invalidRequest(`Assistant message [${i}] tool_calls must be an array`);
+        }
+        for (let tIdx = 0; tIdx < rawMsg.tool_calls.length; tIdx++) {
+          const callResult = parseChatToolCallEntry(rawMsg.tool_calls[tIdx], `message [${i}] tool_calls[${tIdx}]`);
+          if (!callResult.ok) return callResult;
+          toolCalls.push(callResult.value);
+        }
       }
-      items.push({
-        type: "message",
-        role: "assistant",
-        content: parts as unknown as NonEmpty<IrAssistantPart>,
-      });
+
+      if (parts.length === 0 && toolCalls.length === 0) {
+        return invalidRequest(
+          rawMsg.content === undefined || rawMsg.content === null
+            ? `Assistant message [${i}] missing string or array content`
+            : `Assistant message [${i}] has empty content`,
+        );
+      }
+      if (parts.length > 0) {
+        items.push({
+          type: "message",
+          role: "assistant",
+          content: parts as unknown as NonEmpty<IrAssistantPart>,
+        });
+      }
+      for (const call of toolCalls) {
+        items.push({ type: "tool_call", call });
+      }
       continue;
     }
 
     if (role === "function") {
-      return { ok: false, error: unsupportedCapabilityFailure("chat-legacy-function-role") };
+      return unsupportedCapability("chat-legacy-function-role");
     }
     if (role === "tool") {
-      return { ok: false, error: unsupportedCapabilityFailure("function-tool-definition") };
+      if (typeof rawMsg.tool_call_id !== "string" || rawMsg.tool_call_id.trim() === "") {
+        return invalidRequest(`Tool message [${i}] missing required non-empty tool_call_id`);
+      }
+      const parts: IrInputPart[] = [];
+      if (typeof rawMsg.content === "string") {
+        parts.push({ type: "text", text: rawMsg.content });
+      } else if (Array.isArray(rawMsg.content)) {
+        // Chat tool content is text-only: multi-element arrays are multipart
+        // results originating from Chat and fail closed at decode time.
+        if (rawMsg.content.length >= 2) {
+          return unsupportedCapability("tool-result-multipart");
+        }
+        if (rawMsg.content.length === 1) {
+          const rawPart = rawMsg.content[0] as Record<string, unknown>;
+          if (rawPart?.type !== "text" || typeof rawPart.text !== "string") {
+            return invalidRequest(`Tool message [${i}] array content must be a single text part`);
+          }
+          parts.push({ type: "text", text: rawPart.text });
+          if (rawPart.prompt_cache_breakpoint !== undefined) {
+            const markerResult = captureBreakpoint(`message [${i}]`, rawPart.prompt_cache_breakpoint, itemIndex);
+            if (!markerResult.ok) return markerResult;
+            breakpoints.push(markerResult.value);
+          }
+        }
+      } else {
+        return invalidRequest(`Tool message [${i}] missing string or array content`);
+      }
+      items.push({
+        type: "tool_result",
+        callId: rawMsg.tool_call_id,
+        isError: false,
+        content: parts,
+      });
+      continue;
     }
 
-    return {
-      ok: false,
-      error: invalidRequestFailure(`Unknown role '${String(role)}' in Chat message [${i}]`),
-    };
+    return invalidRequest(`Unknown role '${String(role)}' in Chat message [${i}]`);
   }
 
   if (breakpoints.length > 0) {
@@ -351,20 +504,20 @@ export function parseChatRequestBody(
   let stopSequences: NonEmpty<string> | undefined;
   if (typeof body.stop === "string") {
     if (body.stop.length === 0) {
-      return { ok: false, error: invalidRequestFailure("stop must be a non-empty string or non-empty array") };
+      return invalidRequest("stop must be a non-empty string or non-empty array");
     }
     stopSequences = [body.stop];
   } else if (Array.isArray(body.stop)) {
     // The Chat schema admits 1-4 entries; larger sets are invalid Chat wire.
     // (The >4 stop-sequence-request rejection applies to M-origin sets only.)
     if (body.stop.length === 0 || body.stop.length > 4) {
-      return { ok: false, error: invalidRequestFailure("stop must contain between 1 and 4 entries") };
+      return invalidRequest("stop must contain between 1 and 4 entries");
     }
     const entriesResult = parseStopSequenceEntries("stop", body.stop);
     if (!entriesResult.ok) return entriesResult;
     stopSequences = asNonEmptyStopSequences(entriesResult.value);
   } else if (body.stop !== undefined && body.stop !== null) {
-    return { ok: false, error: invalidRequestFailure("stop must be a string or an array of strings") };
+    return invalidRequest("stop must be a string or an array of strings");
   }
 
   const generation: IrGenerationControls | undefined =
@@ -389,9 +542,12 @@ export function parseChatRequestBody(
     delivery,
     items,
     ...(generation !== undefined ? { generation } : {}),
+    ...(tools !== undefined ? { tools } : {}),
+    ...(toolChoice !== undefined ? { toolChoice } : {}),
+    ...(parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
   };
 
-  return { ok: true, value: { irRequest, requestWireOptions: wireOptions } };
+  return ok({ irRequest, requestWireOptions: wireOptions });
 }
 
 /**
@@ -416,49 +572,47 @@ export class ChatIngressDecoder implements IngressDecoder {
     body: JsonObject,
   ): Result<OutcomeDecodeResult, NormalizedFailure> {
     if (typeof body !== "object" || body === null) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Chat response body must be an object"),
-      };
+      return invalidRequest("Chat response body must be an object");
     }
 
     if (!Array.isArray(body.choices) || body.choices.length === 0) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Chat response missing choices array"),
-      };
+      return invalidRequest("Chat response missing choices array");
     }
 
     const choice = body.choices[0] as Record<string, unknown>;
-    const message = (choice?.message ?? {}) as Record<string, unknown>;
-    const partId = randomUUID();
+    const message = choice?.message as Record<string, unknown> | undefined;
+    if (typeof message !== "object" || message === null || Array.isArray(message)) {
+      return invalidRequest("Chat response choice is missing the required 'message' object");
+    }
     const parts: IrOutputPart[] = [];
+
+    if (
+      (message.function_call !== undefined && message.function_call !== null) ||
+      choice?.finish_reason === "function_call"
+    ) {
+      return unsupportedCapability("chat-legacy-functions");
+    }
 
     if (message.refusal !== undefined && message.refusal !== null) {
       parts.push({
         type: "refusal",
-        partId,
+        partId: randomUUID(),
         text: String(message.refusal),
       });
-    } else if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-      const tc = message.tool_calls[0] as Record<string, unknown>;
-      const fn = (tc?.function ?? {}) as Record<string, unknown>;
-      parts.push({
-        type: "tool_call",
-        partId,
-        call: {
-          type: "function",
-          callId: String(tc?.id ?? randomUUID()),
-          name: String(fn?.name ?? ""),
-          argumentsText: String(fn?.arguments ?? "{}"),
-        },
-      });
     } else {
-      parts.push({
-        type: "text",
-        partId,
-        text: typeof message.content === "string" ? message.content : "",
-      });
+      if (typeof message.content === "string") {
+        parts.push({ type: "text", partId: randomUUID(), text: message.content });
+      }
+      if (Array.isArray(message.tool_calls)) {
+        for (let i = 0; i < message.tool_calls.length; i++) {
+          const callResult = parseChatToolCallEntry(message.tool_calls[i], `Chat response tool_calls[${i}]`);
+          if (!callResult.ok) return callResult;
+          parts.push({ type: "tool_call", partId: randomUUID(), call: callResult.value });
+        }
+      }
+      if (parts.length === 0) {
+        parts.push({ type: "text", partId: randomUUID(), text: "" });
+      }
     }
 
     let finishReason: IrFinishReason = "stop";
@@ -476,7 +630,7 @@ export class ChatIngressDecoder implements IngressDecoder {
     }
 
     // Usage counters plus the cache/reasoning subdivisions (`usage-cache-read`,
-    // `usage-cache-write`, `usage-reasoning`), parsed once in shared.ts so the
+    // `usage-cache-write`, `usage-reasoning`), parsed once in shared/usage.ts so the
     // complete and stream paths cannot drift. Subdivisions are observations and
     // are never re-added to totals; absence of the whole usage object stays
     // absence (never fabricated as zeros).
@@ -497,6 +651,6 @@ export class ChatIngressDecoder implements IngressDecoder {
       ...(usage !== undefined ? { usage } : {}),
     };
 
-    return { ok: true, value: { irOutcome: outcome, outcomeWireOptions: factsResult.value } };
+    return ok({ irOutcome: outcome, outcomeWireOptions: factsResult.value });
   }
 }

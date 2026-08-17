@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue, NativeMutations } from "../../domain/contracts.ts";
+import { isPlainObject } from "../../domain/json.ts";
 
 /**
  * A mutable JSON object (the working copy the mutation pipeline writes into).
@@ -147,13 +148,6 @@ function forEachLeaf(root: JsonObject, visit: (segments: readonly string[], valu
     }
   };
   walk(root, []);
-}
-
-/**
- * `true` when a value is a plain JSON object (not an array or `null`).
- */
-function isPlainObject(value: JsonValue | undefined): value is JsonObject {
-  return value !== null && value !== undefined && typeof value === "object" && !Array.isArray(value);
 }
 
 /**

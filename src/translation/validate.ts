@@ -1,18 +1,26 @@
 import type { Result } from "../domain/contracts.ts";
+import { isPlainObject } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import { invalidRequestFailure } from "./failures.ts";
-import type {
-  IrAssistantPart,
-  IrBinarySource,
-  IrDocumentSource,
-  IrInputPart,
-  IrItem,
-  IrOutcome,
-  IrOutputPart,
-  IrRequest,
-  IrUsage,
+import type { RequestWireOptions } from "./contracts.ts";
+import {
+  GRAMMAR_SYNTAX_VALUES,
+  type IrAssistantPart,
+  type IrBinarySource,
+  type IrDocumentSource,
+  type IrInputPart,
+  type IrItem,
+  type IrOutcome,
+  type IrOutputPart,
+  type IrRequest,
+  type IrTool,
+  type IrToolCall,
+  type IrToolChoice,
+  type IrUsage,
+  REASONING_EFFORT_VALUES,
+  VERBOSITY_VALUES,
 } from "./ir.ts";
-import { REASONING_EFFORT_VALUES, VERBOSITY_VALUES } from "./ir.ts";
+
+import { invalidRequest, ok } from "./result.ts";
 
 const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "content_filter", "context_limit", "other"]);
 
@@ -21,6 +29,7 @@ const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "cont
 const VERBOSITY_LITERALS = new Set<string>(VERBOSITY_VALUES);
 
 const REASONING_EFFORT_LITERALS = new Set<string>(REASONING_EFFORT_VALUES);
+const GRAMMAR_SYNTAX_LITERALS = new Set<string>(GRAMMAR_SYNTAX_VALUES);
 
 const BASE64_REGEX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -28,15 +37,57 @@ function isNonNegativeSafeInteger(n: unknown): n is number {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 }
 
+/**
+ * Validates a function tool call's authoritative argument text and optional
+ * parsed object. Invalid JSON remains representable for OpenAI targets, but an
+ * `arguments` field is legal only when the complete text parses to the same
+ * non-null, non-array JSON object.
+ */
+function validateFunctionCallArguments(
+  call: Extract<IrToolCall, { type: "function" }>,
+  context: string,
+): Result<void, NormalizedFailure> {
+  if (typeof call.argumentsText !== "string") {
+    return invalidRequest(`${context}: argumentsText must be a string`);
+  }
+  if (call.arguments === undefined) return ok(undefined);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(call.argumentsText) as unknown;
+  } catch {
+    return invalidRequest(`${context}: arguments must parse from argumentsText as a JSON object`);
+  }
+  if (!isPlainObject(parsed)) {
+    return invalidRequest(`${context}: argumentsText must parse to a JSON object when arguments is present`);
+  }
+  if (!jsonValuesEqual(call.arguments, parsed)) {
+    return invalidRequest(`${context}: arguments must deep-equal the parsed argumentsText object`);
+  }
+  return ok(undefined);
+}
+
+/** Compares JSON values without making object property order significant. */
+function jsonValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== typeof b) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((value, index) => jsonValuesEqual(value, b[index]));
+  }
+  if (typeof a !== "object" || !isPlainObject(a) || !isPlainObject(b)) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => Object.hasOwn(b, key) && jsonValuesEqual(a[key], b[key]));
+}
+
 /** Validates one sampling control as a finite number within the IR range [0, 1]. */
 function validateUnitInterval(value: unknown, fieldName: string): Result<void, NormalizedFailure> {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
-    return {
-      ok: false,
-      error: invalidRequestFailure(`IrRequest.generation.${fieldName} must be a finite number within [0, 1]`),
-    };
+    return invalidRequest(`IrRequest.generation.${fieldName} must be a finite number within [0, 1]`);
   }
-  return { ok: true, value: undefined };
+  return ok(undefined);
 }
 
 /**
@@ -46,7 +97,7 @@ function validateUnitInterval(value: unknown, fieldName: string): Result<void, N
  * unions carry only their admitted literals.
  */
 function validateGenerationControls(generation: IrRequest["generation"]): Result<void, NormalizedFailure> {
-  if (generation === undefined) return { ok: true, value: undefined };
+  if (generation === undefined) return ok(undefined);
   if (generation.temperature !== undefined) {
     const temperatureResult = validateUnitInterval(generation.temperature, "temperature");
     if (!temperatureResult.ok) return temperatureResult;
@@ -61,100 +112,65 @@ function validateGenerationControls(generation: IrRequest["generation"]): Result
       !Number.isSafeInteger(generation.maxOutputTokens) ||
       generation.maxOutputTokens <= 0)
   ) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrRequest.generation.maxOutputTokens must be a positive safe integer"),
-    };
+    return invalidRequest("IrRequest.generation.maxOutputTokens must be a positive safe integer");
   }
   if (generation.stopSequences !== undefined) {
     if (!Array.isArray(generation.stopSequences) || generation.stopSequences.length === 0) {
-      return {
-        ok: false,
-        error: invalidRequestFailure("IrRequest.generation.stopSequences must be a non-empty array when present"),
-      };
+      return invalidRequest("IrRequest.generation.stopSequences must be a non-empty array when present");
     }
     for (let i = 0; i < generation.stopSequences.length; i++) {
       const sequence = generation.stopSequences[i];
       if (typeof sequence !== "string" || sequence.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`IrRequest.generation.stopSequences[${i}] must be a non-empty string`),
-        };
+        return invalidRequest(`IrRequest.generation.stopSequences[${i}] must be a non-empty string`);
       }
     }
   }
   if (generation.verbosity !== undefined && !VERBOSITY_LITERALS.has(generation.verbosity)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure(
-        `IrRequest.generation.verbosity must be one of: ${[...VERBOSITY_LITERALS].join(", ")}`,
-      ),
-    };
+    return invalidRequest(`IrRequest.generation.verbosity must be one of: ${[...VERBOSITY_LITERALS].join(", ")}`);
   }
   if (generation.reasoning?.effort !== undefined && !REASONING_EFFORT_LITERALS.has(generation.reasoning.effort)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure(
-        `IrRequest.generation.reasoning.effort must be one of: ${[...REASONING_EFFORT_LITERALS].join(", ")}`,
-      ),
-    };
+    return invalidRequest(
+      `IrRequest.generation.reasoning.effort must be one of: ${[...REASONING_EFFORT_LITERALS].join(", ")}`,
+    );
   }
-  return { ok: true, value: undefined };
+  return ok(undefined);
 }
 
 function validateBinarySource(source: IrBinarySource, context: string): Result<void, NormalizedFailure> {
   if (source.type === "url") {
     if (typeof source.url !== "string" || !source.url.startsWith("https://")) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`${context}: URL source must be an absolute HTTPS URL`),
-      };
+      return invalidRequest(`${context}: URL source must be an absolute HTTPS URL`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
   if (source.type === "bytes") {
     if (typeof source.mediaType !== "string" || source.mediaType.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`${context}: mediaType must be a non-empty string`),
-      };
+      return invalidRequest(`${context}: mediaType must be a non-empty string`);
     }
     if (
       typeof source.base64 !== "string" ||
       source.base64.trim() === "" ||
       !BASE64_REGEX.test(source.base64.replaceAll(/\s/g, ""))
     ) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`${context}: base64 payload must be valid base64`),
-      };
+      return invalidRequest(`${context}: base64 payload must be valid base64`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
   if (source.type === "gateway_file") {
     if (typeof source.fileId !== "string" || source.fileId.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`${context}: fileId must be a non-empty string`),
-      };
+      return invalidRequest(`${context}: fileId must be a non-empty string`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
-  return {
-    ok: false,
-    error: invalidRequestFailure(`${context}: unknown binary source type`),
-  };
+  return invalidRequest(`${context}: unknown binary source type`);
 }
 
 function validateDocumentSource(source: IrDocumentSource, context: string): Result<void, NormalizedFailure> {
   if (source.type === "text") {
     if (typeof source.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`${context}: text document source must contain string text`),
-      };
+      return invalidRequest(`${context}: text document source must contain string text`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
   return validateBinarySource(source, context);
 }
@@ -162,86 +178,56 @@ function validateDocumentSource(source: IrDocumentSource, context: string): Resu
 function validateInputPart(part: IrInputPart, index: number): Result<void, NormalizedFailure> {
   if (part.type === "text") {
     if (typeof part.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`input part [${index}]: text must be a string`),
-      };
+      return invalidRequest(`input part [${index}]: text must be a string`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
   if (part.type === "image") {
     return validateBinarySource(part.source, `input part [${index}] (image)`);
   }
   if (part.type === "document") {
     if (typeof part.documentId !== "string" || part.documentId.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`input part [${index}] (document): documentId must be non-empty`),
-      };
+      return invalidRequest(`input part [${index}] (document): documentId must be non-empty`);
     }
     return validateDocumentSource(part.source, `input part [${index}] (document)`);
   }
-  return {
-    ok: false,
-    error: invalidRequestFailure(`input part [${index}]: unknown input part type`),
-  };
+  return invalidRequest(`input part [${index}]: unknown input part type`);
 }
 
 function validateAssistantPart(part: IrAssistantPart, index: number): Result<void, NormalizedFailure> {
   if (part.type === "text") {
     if (typeof part.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`assistant part [${index}]: text must be a string`),
-      };
+      return invalidRequest(`assistant part [${index}]: text must be a string`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
   if (part.type === "refusal") {
     if (part.text !== undefined && typeof part.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`assistant part [${index}] (refusal): text must be a string if present`),
-      };
+      return invalidRequest(`assistant part [${index}] (refusal): text must be a string if present`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
-  return {
-    ok: false,
-    error: invalidRequestFailure(`assistant part [${index}]: unknown assistant part type`),
-  };
+  return invalidRequest(`assistant part [${index}]: unknown assistant part type`);
 }
 
 function validateItem(item: IrItem, index: number): Result<void, NormalizedFailure> {
   if (item.type === "instruction") {
     if (item.authority !== "system" && item.authority !== "developer") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`item [${index}] (instruction): authority must be system or developer`),
-      };
+      return invalidRequest(`item [${index}] (instruction): authority must be system or developer`);
     }
     if (item.separation !== "advisory" && item.separation !== "required") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`item [${index}] (instruction): separation must be advisory or required`),
-      };
+      return invalidRequest(`item [${index}] (instruction): separation must be advisory or required`);
     }
     if (typeof item.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`item [${index}] (instruction): text must be a string`),
-      };
+      return invalidRequest(`item [${index}] (instruction): text must be a string`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 
   if (item.type === "message") {
     if (item.role === "user") {
       if (!Array.isArray(item.content) || item.content.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`item [${index}] (user message): content must be a non-empty array`),
-        };
+        return invalidRequest(`item [${index}] (user message): content must be a non-empty array`);
       }
       for (let pIdx = 0; pIdx < item.content.length; pIdx++) {
         const part = item.content[pIdx];
@@ -250,15 +236,12 @@ function validateItem(item: IrItem, index: number): Result<void, NormalizedFailu
           if (!partResult.ok) return partResult;
         }
       }
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
     if (item.role === "assistant") {
       if (!Array.isArray(item.content) || item.content.length === 0) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`item [${index}] (assistant message): content must be a non-empty array`),
-        };
+        return invalidRequest(`item [${index}] (assistant message): content must be a non-empty array`);
       }
       for (let pIdx = 0; pIdx < item.content.length; pIdx++) {
         const part = item.content[pIdx];
@@ -267,39 +250,139 @@ function validateItem(item: IrItem, index: number): Result<void, NormalizedFailu
           if (!partResult.ok) return partResult;
         }
       }
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
 
-    return {
-      ok: false,
-      error: invalidRequestFailure(`item [${index}] (message): invalid role`),
-    };
+    return invalidRequest(`item [${index}] (message): invalid role`);
   }
 
   if (item.type === "tool_call") {
-    if (!item.call || typeof item.call.callId !== "string" || typeof item.call.name !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`item [${index}] (tool_call): malformed tool call`),
-      };
+    const call = item.call;
+    if (
+      !call ||
+      typeof call.callId !== "string" ||
+      call.callId.trim() === "" ||
+      typeof call.name !== "string" ||
+      call.name.trim() === ""
+    ) {
+      return invalidRequest(`item [${index}] (tool_call): callId and name must be non-empty strings`);
     }
-    return { ok: true, value: undefined };
+    if (call.type === "custom") {
+      if (typeof call.inputText !== "string") {
+        return invalidRequest(`item [${index}] (tool_call): custom inputText must be a string`);
+      }
+      return ok(undefined);
+    }
+    return validateFunctionCallArguments(call, `item [${index}] (tool_call)`);
   }
 
   if (item.type === "tool_result") {
-    if (typeof item.callId !== "string" || typeof item.isError !== "boolean" || !Array.isArray(item.content)) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`item [${index}] (tool_result): malformed tool result`),
-      };
+    if (
+      typeof item.callId !== "string" ||
+      item.callId.trim() === "" ||
+      typeof item.isError !== "boolean" ||
+      !Array.isArray(item.content)
+    ) {
+      return invalidRequest(
+        `item [${index}] (tool_result): callId must be a non-empty string, isError a boolean, and content an array`,
+      );
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 
-  return {
-    ok: false,
-    error: invalidRequestFailure(`item [${index}]: unknown item type`),
-  };
+  return invalidRequest(`item [${index}]: unknown item type`);
+}
+
+/**
+ * Validates tool definitions: names must be non-empty and unique, function
+ * tools must carry a JSON object schema, and custom tool formats must be text
+ * or a grammar with a recognized syntax and non-empty definition.
+ */
+function validateTools(tools: readonly IrTool[]): Result<void, NormalizedFailure> {
+  const seenNames = new Set<string>();
+  for (let i = 0; i < tools.length; i++) {
+    const tool = tools[i];
+    if (tool === undefined) continue;
+    if (typeof tool.name !== "string" || tool.name.trim() === "") {
+      return invalidRequest(`tools[${i}]: name must be a non-empty string`);
+    }
+    if (seenNames.has(tool.name)) {
+      return invalidRequest(`tools contains duplicate tool name '${tool.name}'`);
+    }
+    seenNames.add(tool.name);
+    if (tool.type === "function") {
+      if (!isPlainObject(tool.inputSchema)) {
+        return invalidRequest(`tools[${i}] (${tool.name}): inputSchema must be a JSON object`);
+      }
+      continue;
+    }
+    const format = tool.format;
+    if (format.type === "text") continue;
+    const context = `tools[${i}] (${tool.name})`;
+    if (format.syntax === undefined) {
+      return invalidRequest(`${context}: grammar syntax is required`);
+    }
+    if (typeof format.syntax !== "string" || !GRAMMAR_SYNTAX_LITERALS.has(format.syntax)) {
+      return invalidRequest(`syntax must be one of: ${GRAMMAR_SYNTAX_VALUES.join("|")}`);
+    }
+    if (typeof format.definition !== "string" || format.definition === "") {
+      return invalidRequest(`${context}: grammar definition must be a non-empty string`);
+    }
+  }
+  return ok(undefined);
+}
+
+/**
+ * Validates tool choice against the tool list: `required` and `named` require
+ * at least one tool definition, and `named` must name a declared tool (tool
+ * names are unique, so "declared" and "exactly one" are the same condition).
+ */
+function validateToolChoice(
+  toolChoice: IrToolChoice,
+  tools: readonly IrTool[] | undefined,
+): Result<void, NormalizedFailure> {
+  if (toolChoice.type === "required" || toolChoice.type === "named") {
+    if (tools === undefined || tools.length === 0) {
+      return invalidRequest(`toolChoice '${toolChoice.type}' requires at least one tool definition`);
+    }
+  }
+  if (toolChoice.type === "named") {
+    if (!tools?.some((tool) => tool.name === toolChoice.name)) {
+      return invalidRequest(`toolChoice names unknown tool '${toolChoice.name}'`);
+    }
+  }
+  return ok(undefined);
+}
+
+/**
+ * Validates tool transcript correlation in one ordered pass: every tool result
+ * must reference a preceding call exactly once, and call IDs are unique across
+ * function and custom calls alike.
+ */
+function validateToolTranscript(items: readonly IrItem[]): Result<void, NormalizedFailure> {
+  const declaredCallIds = new Set<string>();
+  const resultedCallIds = new Set<string>();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item === undefined) continue;
+    if (item.type === "tool_call") {
+      if (declaredCallIds.has(item.call.callId)) {
+        return invalidRequest(`item [${i}] (tool_call): duplicate callId '${item.call.callId}'`);
+      }
+      declaredCallIds.add(item.call.callId);
+      continue;
+    }
+    if (item.type === "tool_result") {
+      if (!declaredCallIds.has(item.callId)) {
+        return invalidRequest(`item [${i}] (tool_result): references undeclared callId '${item.callId}'`);
+      }
+      if (resultedCallIds.has(item.callId)) {
+        return invalidRequest(`item [${i}] (tool_result): duplicate result for callId '${item.callId}'`);
+      }
+      resultedCallIds.add(item.callId);
+    }
+  }
+  return ok(undefined);
 }
 
 /**
@@ -309,31 +392,26 @@ function validateItem(item: IrItem, index: number): Result<void, NormalizedFailu
  * - Items must be non-empty.
  * - At least one user or assistant message must be present (instruction-only is rejected).
  * - Source order and content parts must satisfy semantic constraints.
+ * - Tool definitions, tool choice, and tool call/result correlation must be well-formed.
  * - Delivery mode must be either "complete" or "stream".
  */
-export function validateIrRequest(req: IrRequest): Result<void, NormalizedFailure> {
+export function validateIrRequest(
+  req: IrRequest,
+  requestWireOptions?: RequestWireOptions,
+): Result<void, NormalizedFailure> {
   if (typeof req.model !== "string" || req.model.trim() === "") {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrRequest.model must be a non-empty string"),
-    };
+    return invalidRequest("IrRequest.model must be a non-empty string");
   }
 
   if (req.delivery !== "complete" && req.delivery !== "stream") {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrRequest.delivery must be 'complete' or 'stream'"),
-    };
+    return invalidRequest("IrRequest.delivery must be 'complete' or 'stream'");
   }
 
   const generationResult = validateGenerationControls(req.generation);
   if (!generationResult.ok) return generationResult;
 
   if (!Array.isArray(req.items) || req.items.length === 0) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrRequest.items must be a non-empty array"),
-    };
+    return invalidRequest("IrRequest.items must be a non-empty array");
   }
 
   let hasMessage = false;
@@ -348,113 +426,116 @@ export function validateIrRequest(req: IrRequest): Result<void, NormalizedFailur
   }
 
   if (!hasMessage) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrRequest must contain at least one user or assistant message turn"),
-    };
+    return invalidRequest("IrRequest must contain at least one user or assistant message turn");
   }
 
-  return { ok: true, value: undefined };
+  if (req.tools !== undefined) {
+    const toolsResult = validateTools(req.tools);
+    if (!toolsResult.ok) return toolsResult;
+  }
+
+  // The sidecar subset is projected independently at egress, so every entry
+  // must refer to a tool declared on the canonical request surface.
+  const subsetTools = requestWireOptions?.allowedToolSubset?.tools;
+  if (subsetTools !== undefined) {
+    const subsetResult = validateTools(subsetTools);
+    if (!subsetResult.ok) return subsetResult;
+
+    const declaredToolNames = new Set<string>();
+    for (const tool of req.tools ?? []) {
+      if (tool !== undefined) declaredToolNames.add(tool.name);
+    }
+    for (let i = 0; i < subsetTools.length; i++) {
+      const tool = subsetTools[i];
+      if (tool !== undefined && !declaredToolNames.has(tool.name)) {
+        return invalidRequest(`allowedToolSubset.tools[${i}] references undeclared tool '${tool.name}'`);
+      }
+    }
+  }
+
+  if (req.toolChoice !== undefined) {
+    const choiceResult = validateToolChoice(req.toolChoice, req.tools);
+    if (!choiceResult.ok) return choiceResult;
+  }
+
+  const transcriptResult = validateToolTranscript(req.items);
+  if (!transcriptResult.ok) return transcriptResult;
+
+  return ok(undefined);
 }
 
 function validateOutputPart(part: IrOutputPart, index: number): Result<void, NormalizedFailure> {
   if (typeof part.partId !== "string" || part.partId.trim() === "") {
-    return {
-      ok: false,
-      error: invalidRequestFailure(`output part [${index}]: partId must be a non-empty string`),
-    };
+    return invalidRequest(`output part [${index}]: partId must be a non-empty string`);
   }
 
   if (part.type === "text") {
     if (typeof part.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`output part [${index}] (text): text must be a string`),
-      };
+      return invalidRequest(`output part [${index}] (text): text must be a string`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 
   if (part.type === "refusal") {
     if (part.text !== undefined && typeof part.text !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`output part [${index}] (refusal): text must be a string if present`),
-      };
+      return invalidRequest(`output part [${index}] (refusal): text must be a string if present`);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 
   if (part.type === "tool_call") {
-    if (!part.call || typeof part.call.callId !== "string" || typeof part.call.name !== "string") {
-      return {
-        ok: false,
-        error: invalidRequestFailure(`output part [${index}] (tool_call): malformed tool call`),
-      };
+    const call = part.call;
+    if (
+      !call ||
+      typeof call.callId !== "string" ||
+      call.callId.trim() === "" ||
+      typeof call.name !== "string" ||
+      call.name.trim() === ""
+    ) {
+      return invalidRequest(`output part [${index}] (tool_call): callId and name must be non-empty strings`);
     }
-    return { ok: true, value: undefined };
+    if (call.type === "custom") {
+      if (typeof call.inputText !== "string") {
+        return invalidRequest(`output part [${index}] (tool_call): custom inputText must be a string`);
+      }
+      return ok(undefined);
+    }
+    return validateFunctionCallArguments(call, `output part [${index}] (tool_call)`);
   }
 
-  return {
-    ok: false,
-    error: invalidRequestFailure(`output part [${index}]: unknown output part type`),
-  };
+  return invalidRequest(`output part [${index}]: unknown output part type`);
 }
 
 export function validateUsage(usage: IrUsage): Result<void, NormalizedFailure> {
   if (!isNonNegativeSafeInteger(usage.input)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.input must be a non-negative safe integer"),
-    };
+    return invalidRequest("IrUsage.input must be a non-negative safe integer");
   }
   if (!isNonNegativeSafeInteger(usage.output)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.output must be a non-negative safe integer"),
-    };
+    return invalidRequest("IrUsage.output must be a non-negative safe integer");
   }
   if (usage.total !== undefined && !isNonNegativeSafeInteger(usage.total)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.total must be a non-negative safe integer if present"),
-    };
+    return invalidRequest("IrUsage.total must be a non-negative safe integer if present");
   }
   if (usage.cacheReadInput !== undefined && !isNonNegativeSafeInteger(usage.cacheReadInput)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.cacheReadInput must be a non-negative safe integer if present"),
-    };
+    return invalidRequest("IrUsage.cacheReadInput must be a non-negative safe integer if present");
   }
   if (usage.cacheWriteInput !== undefined && !isNonNegativeSafeInteger(usage.cacheWriteInput)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.cacheWriteInput must be a non-negative safe integer if present"),
-    };
+    return invalidRequest("IrUsage.cacheWriteInput must be a non-negative safe integer if present");
   }
   if (usage.reasoningOutput !== undefined && !isNonNegativeSafeInteger(usage.reasoningOutput)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.reasoningOutput must be a non-negative safe integer if present"),
-    };
+    return invalidRequest("IrUsage.reasoningOutput must be a non-negative safe integer if present");
   }
 
   const cachedInputSum = (usage.cacheReadInput ?? 0) + (usage.cacheWriteInput ?? 0);
   if (usage.input < cachedInputSum) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.input must be the canonical total and cannot be less than cached input"),
-    };
+    return invalidRequest("IrUsage.input must be the canonical total and cannot be less than cached input");
   }
 
   if (usage.total !== undefined && usage.total < usage.input + usage.output) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrUsage.total cannot be less than input + output tokens"),
-    };
+    return invalidRequest("IrUsage.total cannot be less than input + output tokens");
   }
 
-  return { ok: true, value: undefined };
+  return ok(undefined);
 }
 
 /**
@@ -468,47 +549,39 @@ export function validateUsage(usage: IrUsage): Result<void, NormalizedFailure> {
  */
 export function validateIrOutcome(out: IrOutcome): Result<void, NormalizedFailure> {
   if (typeof out.responseId !== "string" || out.responseId.trim() === "") {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrOutcome.responseId must be a non-empty string"),
-    };
+    return invalidRequest("IrOutcome.responseId must be a non-empty string");
   }
 
   if (typeof out.model !== "string" || out.model.trim() === "") {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrOutcome.model must be a non-empty string"),
-    };
+    return invalidRequest("IrOutcome.model must be a non-empty string");
   }
 
   if (!Array.isArray(out.parts)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure("IrOutcome.parts must be an array"),
-    };
+    return invalidRequest("IrOutcome.parts must be an array");
   }
 
   const seenPartIds = new Set<string>();
+  const seenCallIds = new Set<string>();
   for (let i = 0; i < out.parts.length; i++) {
     const part = out.parts[i];
     if (part !== undefined) {
       const partResult = validateOutputPart(part, i);
       if (!partResult.ok) return partResult;
       if (seenPartIds.has(part.partId)) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`IrOutcome.parts contains duplicate partId '${part.partId}' at index [${i}]`),
-        };
+        return invalidRequest(`IrOutcome.parts contains duplicate partId '${part.partId}' at index [${i}]`);
       }
       seenPartIds.add(part.partId);
+      if (part.type === "tool_call" && seenCallIds.has(part.call.callId)) {
+        return invalidRequest(`IrOutcome.parts contains duplicate tool callId '${part.call.callId}' at index [${i}]`);
+      }
+      if (part.type === "tool_call") {
+        seenCallIds.add(part.call.callId);
+      }
     }
   }
 
   if (!out.finish || !FINISH_REASONS.has(out.finish.reason)) {
-    return {
-      ok: false,
-      error: invalidRequestFailure(`IrOutcome.finish.reason must be one of: ${[...FINISH_REASONS].join(", ")}`),
-    };
+    return invalidRequest(`IrOutcome.finish.reason must be one of: ${[...FINISH_REASONS].join(", ")}`);
   }
 
   if (out.usage !== undefined) {
@@ -516,5 +589,5 @@ export function validateIrOutcome(out: IrOutcome): Result<void, NormalizedFailur
     if (!usageResult.ok) return usageResult;
   }
 
-  return { ok: true, value: undefined };
+  return ok(undefined);
 }

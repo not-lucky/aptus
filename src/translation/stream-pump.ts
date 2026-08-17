@@ -3,9 +3,9 @@ import type { NormalizedFailure } from "../domain/operations.ts";
 import type { ClientStreamEncoder, OutcomeWireOptions, ProviderStreamDecoder } from "./contracts.ts";
 import type { IrStreamEvent, IrUsage } from "./ir.ts";
 import { normalizeOutcomeWireOptions, outcomeWireOptionsFailure } from "./preflight.ts";
+import { failure, ok } from "./result.ts";
 import type { SseDecoder, SseEncoder, SseFrame } from "./sse.ts";
 import type { IrStreamStateMachine } from "./stream-state.ts";
-
 /**
  * Owns the cross-protocol streaming pipeline: strict SSE framing, provider
  * stream decoding, IR state-machine validation, and client stream encoding.
@@ -58,14 +58,14 @@ export class TranslatedStreamPump {
     const chunks: Uint8Array[] = [];
     for (const res of this.sseDecoder.push(bytes)) {
       if (res.kind === "failure") {
-        return { ok: false, error: res.failure };
+        return failure(res.failure);
       }
       if (res.kind === "frame") {
         const frameResult = this.processFrame(res.frame, chunks);
         if (!frameResult.ok) return frameResult;
       }
     }
-    return { ok: true, value: chunks };
+    return ok(chunks);
   }
 
   /**
@@ -78,7 +78,7 @@ export class TranslatedStreamPump {
 
     for (const res of this.sseDecoder.finish()) {
       if (res.kind === "failure") {
-        return { ok: false, error: res.failure };
+        return failure(res.failure);
       }
       if (res.kind === "frame") {
         const frameResult = this.processFrame(res.frame, chunks);
@@ -88,7 +88,7 @@ export class TranslatedStreamPump {
 
     const providerFinish = this.providerDecoder.finish();
     if (!providerFinish.ok) {
-      return { ok: false, error: providerFinish.error };
+      return failure(providerFinish.error);
     }
     for (const evt of providerFinish.value) {
       const eventResult = this.processEvent(evt, chunks);
@@ -97,31 +97,31 @@ export class TranslatedStreamPump {
 
     const clientFinish = this.clientEncoder.finish();
     if (!clientFinish.ok) {
-      return { ok: false, error: clientFinish.error };
+      return failure(clientFinish.error);
     }
     for (const frame of clientFinish.value) {
       chunks.push(this.sseEncoder.encode(frame));
     }
 
-    return { ok: true, value: chunks };
+    return ok(chunks);
   }
 
   private processFrame(frame: SseFrame, chunks: Uint8Array[]): Result<void, NormalizedFailure> {
     const providerResult = this.providerDecoder.push(frame);
     if (!providerResult.ok) {
-      return { ok: false, error: providerResult.error };
+      return failure(providerResult.error);
     }
     for (const evt of providerResult.value) {
       const eventResult = this.processEvent(evt, chunks);
       if (!eventResult.ok) return eventResult;
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 
   private processEvent(evt: IrStreamEvent, chunks: Uint8Array[]): Result<void, NormalizedFailure> {
     const smResult = this.stateMachine.feed(evt);
     if (!smResult.ok) {
-      return { ok: false, error: smResult.error };
+      return failure(smResult.error);
     }
     this.onEvent(evt);
     // Terminal usage invariants (input ≥ cached subdivisions, total ≥
@@ -142,12 +142,12 @@ export class TranslatedStreamPump {
     }
     const clientResult = this.clientEncoder.encode(evt);
     if (!clientResult.ok) {
-      return { ok: false, error: clientResult.error };
+      return failure(clientResult.error);
     }
     for (const frame of clientResult.value) {
       chunks.push(this.sseEncoder.encode(frame));
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 
   /**
@@ -157,10 +157,10 @@ export class TranslatedStreamPump {
    */
   private applyOutcomeWireOptions(wireOptions: OutcomeWireOptions): Result<void, NormalizedFailure> {
     if (wireOptions.moderation === undefined && wireOptions.serviceTier === undefined) {
-      return { ok: true, value: undefined };
+      return ok(undefined);
     }
-    const failure = outcomeWireOptionsFailure(this.clientEncoder.protocol, wireOptions);
-    if (failure !== undefined) return { ok: false, error: failure };
+    const rejection = outcomeWireOptionsFailure(this.clientEncoder.protocol, wireOptions);
+    if (rejection !== undefined) return failure(rejection);
     const normalized = normalizeOutcomeWireOptions(
       wireOptions,
       this.clientEncoder.protocol,
@@ -169,6 +169,6 @@ export class TranslatedStreamPump {
     if (normalized.moderation !== undefined || normalized.serviceTier !== undefined) {
       this.clientEncoder.setOutcomeWireOptions(normalized);
     }
-    return { ok: true, value: undefined };
+    return ok(undefined);
   }
 }

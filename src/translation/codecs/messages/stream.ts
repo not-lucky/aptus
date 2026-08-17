@@ -11,19 +11,19 @@ import type {
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
-import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
+
 import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
+import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
+import { buildMessagesRequestBody } from "../shared/messages-request.ts";
+import { messagesStopReason } from "../shared/transcript.ts";
 import {
   accumulateMessagesUsage,
-  buildMessagesRequestBody,
   collapseMessagesUsage,
   type MessagesUsageAccumulator,
-  messagesStopReason,
   messagesUsageBody,
-} from "../shared.ts";
+} from "../shared/usage.ts";
 import { parseMessagesRequestBody } from "./ingress.ts";
-
 /**
  * Decodes a streaming Anthropic Messages request.
  *
@@ -35,14 +35,11 @@ export class MessagesStreamRequestDecoder implements StreamRequestDecoder {
   decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
     const parsed = parseMessagesRequestBody(body, "stream");
     if (!parsed.ok) return parsed;
-    return {
-      ok: true,
-      value: {
-        irRequest: parsed.value.irRequest,
-        sourceWireOptions: {},
-        requestWireOptions: parsed.value.requestWireOptions,
-      },
-    };
+    return ok({
+      irRequest: parsed.value.irRequest,
+      sourceWireOptions: {},
+      requestWireOptions: parsed.value.requestWireOptions,
+    });
   }
 }
 
@@ -93,33 +90,27 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     // is a misbehaving provider stream and fails closed instead of re-emitting
     // a second terminal event.
     if (this.sawMessageStop) {
-      return { ok: false, error: invalidRequestFailure("Messages stream received an event after message_stop") };
+      return invalidRequest("Messages stream received an event after message_stop");
     }
 
     if (frame.event === undefined || frame.event.trim() === "") {
-      return {
-        ok: false,
-        error: invalidRequestFailure("Messages stream frame missing named 'event'"),
-      };
+      return invalidRequest("Messages stream frame missing named 'event'");
     }
 
     let chunk: Record<string, unknown>;
     try {
       chunk = JSON.parse(frame.data) as Record<string, unknown>;
     } catch (err) {
-      return {
-        ok: false,
-        error: invalidRequestFailure(
-          `Messages stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      };
+      return invalidRequest(
+        `Messages stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     const eventName = frame.event;
 
     if (eventName === "ping") {
       // Wire-only activity / keepalive
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     if (eventName === "message_start") {
@@ -135,16 +126,13 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         }
       }
 
-      return {
-        ok: true,
-        value: [
-          {
-            type: "response_start",
-            responseId: this.session.responseId,
-            model: this.session.model,
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "response_start",
+          responseId: this.session.responseId,
+          model: this.session.model,
+        },
+      ]);
     }
 
     if (eventName === "content_block_start") {
@@ -153,93 +141,70 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 
       // Provider-owned reasoning payloads fail closed at discovery.
       if (block?.type === "thinking") {
-        return { ok: false, error: unsupportedCapabilityFailure("readable-reasoning") };
+        return unsupportedCapability("readable-reasoning");
       }
       if (block?.type === "redacted_thinking") {
-        return { ok: false, error: unsupportedCapabilityFailure("redacted-reasoning") };
+        return unsupportedCapability("redacted-reasoning");
       }
       if (block?.type !== "text") {
-        return {
-          ok: false,
-          error: unsupportedCapabilityFailure(
-            block?.type === "tool_use" ? "function-tool-definition" : "unknown-content-item",
-          ),
-        };
+        return unsupportedCapability(block?.type === "tool_use" ? "function-tool-definition" : "unknown-content-item");
       }
       if (block.signature !== undefined) {
-        return { ok: false, error: unsupportedCapabilityFailure("reasoning-signature") };
+        return unsupportedCapability("reasoning-signature");
       }
 
       const partId = this.session.createPartId();
       this.partIndexMap.set(index, partId);
 
-      return {
-        ok: true,
-        value: [
-          {
-            type: "part_start",
-            responseId: this.session.responseId,
-            partId,
-            part: { type: "text" },
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "part_start",
+          responseId: this.session.responseId,
+          partId,
+          part: { type: "text" },
+        },
+      ]);
     }
 
     if (eventName === "content_block_delta") {
       const index = typeof chunk.index === "number" ? chunk.index : 0;
       const partId = this.partIndexMap.get(index);
       if (partId === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`content_block_delta received for unknown index '${index}'`),
-        };
+        return invalidRequest(`content_block_delta received for unknown index '${index}'`);
       }
 
       const delta = chunk.delta as Record<string, unknown> | undefined;
       if (delta?.type !== "text_delta") {
-        return {
-          ok: false,
-          error: unsupportedCapabilityFailure("unknown-stream-event"),
-        };
+        return unsupportedCapability("unknown-stream-event");
       }
 
       const text = typeof delta.text === "string" ? delta.text : "";
-      return {
-        ok: true,
-        value: [
-          {
-            type: "text_delta",
-            responseId: this.session.responseId,
-            partId,
-            text,
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "text_delta",
+          responseId: this.session.responseId,
+          partId,
+          text,
+        },
+      ]);
     }
 
     if (eventName === "content_block_stop") {
       const index = typeof chunk.index === "number" ? chunk.index : 0;
       const partId = this.partIndexMap.get(index);
       if (partId === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure(`content_block_stop received for unknown index '${index}'`),
-        };
+        return invalidRequest(`content_block_stop received for unknown index '${index}'`);
       }
 
       this.partIndexMap.delete(index);
-      return {
-        ok: true,
-        value: [
-          {
-            type: "part_end",
-            responseId: this.session.responseId,
-            partId,
-            partType: "text",
-          },
-        ],
-      };
+      return ok([
+        {
+          type: "part_end",
+          responseId: this.session.responseId,
+          partId,
+          partType: "text",
+        },
+      ]);
     }
 
     if (eventName === "message_delta") {
@@ -253,15 +218,15 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       } else if (stopReason === "stop_sequence") {
         this.recordedFinish = "stop";
       } else if (stopReason === "tool_use") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-tool-calls") };
+        return unsupportedCapability("finish-tool-calls");
       } else if (stopReason === "refusal") {
-        return { ok: false, error: unsupportedCapabilityFailure("refusal-content") };
+        return unsupportedCapability("refusal-content");
       } else if (stopReason === "model_context_window_exceeded") {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-context-limit") };
+        return unsupportedCapability("finish-context-limit");
       } else if (stopReason === "pause_turn") {
-        return { ok: false, error: unsupportedCapabilityFailure("anthropic-pause-turn") };
+        return unsupportedCapability("anthropic-pause-turn");
       } else if (stopReason !== null && stopReason !== undefined) {
-        return { ok: false, error: unsupportedCapabilityFailure("finish-other-unknown") };
+        return unsupportedCapability("finish-other-unknown");
       } else {
         this.recordedFinish = "stop";
       }
@@ -273,13 +238,10 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       const rawStopSequence = delta.stop_sequence;
       if (rawStopSequence !== undefined && rawStopSequence !== null) {
         if (typeof rawStopSequence !== "string") {
-          return { ok: false, error: invalidRequestFailure("delta.stop_sequence must be a string when present") };
+          return invalidRequest("delta.stop_sequence must be a string when present");
         }
         if (stopReason !== "stop_sequence") {
-          return {
-            ok: false,
-            error: invalidRequestFailure("delta.stop_sequence is only valid with stop_reason 'stop_sequence'"),
-          };
+          return invalidRequest("delta.stop_sequence is only valid with stop_reason 'stop_sequence'");
         }
         this.recordedStopSequence = rawStopSequence;
       }
@@ -297,7 +259,7 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         }
       }
 
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
     if (eventName === "message_stop") {
@@ -306,65 +268,47 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       // both billing totals must have been reported. Collapsing a partial record
       // would fabricate zero totals, violating absence-vs-zero non-fabrication.
       if (this.usageState.sawUsage && this.usageState.inputTokens === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure("usage.input_tokens must be a finite number when usage is present"),
-        };
+        return invalidRequest("usage.input_tokens must be a finite number when usage is present");
       }
       if (this.usageState.sawUsage && this.usageState.outputTokens === undefined) {
-        return {
-          ok: false,
-          error: invalidRequestFailure("usage.output_tokens must be a finite number when usage is present"),
-        };
+        return invalidRequest("usage.output_tokens must be a finite number when usage is present");
       }
       const usage = collapseMessagesUsage(this.usageState);
-      return {
-        ok: true,
-        value: [
-          {
-            type: "response_end",
-            responseId: this.session.responseId,
-            finish: {
-              reason: this.recordedFinish ?? "stop",
-              ...(this.recordedStopSequence !== undefined ? { stopSequence: this.recordedStopSequence } : {}),
-            },
-            ...(usage !== undefined ? { usage } : {}),
+      return ok([
+        {
+          type: "response_end",
+          responseId: this.session.responseId,
+          finish: {
+            reason: this.recordedFinish ?? "stop",
+            ...(this.recordedStopSequence !== undefined ? { stopSequence: this.recordedStopSequence } : {}),
           },
-        ],
-      };
+          ...(usage !== undefined ? { usage } : {}),
+        },
+      ]);
     }
 
     if (eventName === "error") {
       const err = (chunk.error ?? {}) as Record<string, unknown>;
-      return {
-        ok: false,
-        error: {
-          category: "provider",
-          message: typeof err.message === "string" ? err.message : "Messages provider stream error",
-          code: typeof err.type === "string" ? err.type : undefined,
-          retryable: false,
-        },
-      };
+      return failure({
+        category: "provider",
+        message: typeof err.message === "string" ? err.message : "Messages provider stream error",
+        code: typeof err.type === "string" ? err.type : undefined,
+        retryable: false,
+      });
     }
 
-    return {
-      ok: false,
-      error: unsupportedCapabilityFailure("unknown-stream-event"),
-    };
+    return unsupportedCapability("unknown-stream-event");
   }
 
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
     if (!this.sawMessageStop) {
-      return {
-        ok: false,
-        error: {
-          category: "stream_interrupted",
-          message: "Messages stream ended unexpectedly before message_stop",
-          retryable: false,
-        },
-      };
+      return failure({
+        category: "stream_interrupted",
+        message: "Messages stream ended unexpectedly before message_stop",
+        retryable: false,
+      });
     }
-    return { ok: true, value: [] };
+    return ok([]);
   }
 }
 
@@ -416,7 +360,7 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
           },
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "part_start") {
@@ -430,7 +374,7 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
           content_block: { type: "text", text: "" },
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "text_delta") {
@@ -443,7 +387,7 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
           delta: { type: "text_delta", text: event.text },
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "part_end") {
@@ -456,7 +400,7 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
           index,
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "response_end") {
@@ -472,7 +416,9 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
         event: "message_delta",
         data: JSON.stringify({
           type: "message_delta",
-          delta: { stop_reason: stopReason, stop_sequence: matchedStop ?? null },
+          // The M wire pairs a non-null stop_sequence with its own stop
+          // reason and nothing else.
+          delta: { stop_reason: stopReason, stop_sequence: stopReason === "stop_sequence" ? matchedStop : null },
           ...(usage !== undefined ? { usage } : {}),
         }),
       });
@@ -482,20 +428,17 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
           type: "message_stop",
         }),
       });
-      return { ok: true, value: frames };
+      return ok(frames);
     }
 
     if (event.type === "error") {
-      return { ok: true, value: [] };
+      return ok([]);
     }
 
-    return {
-      ok: false,
-      error: unsupportedCapabilityFailure("unknown-stream-event"),
-    };
+    return unsupportedCapability("unknown-stream-event");
   }
 
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
-    return { ok: true, value: [] };
+    return ok([]);
   }
 }

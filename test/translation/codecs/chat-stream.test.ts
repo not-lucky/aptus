@@ -37,6 +37,59 @@ test.concurrent("chat stream request: decodes and encodes stream options", () =>
   }
 });
 
+test.concurrent("chat stream request: projects tool fields onto provider stream body", () => {
+  const decoder = new ChatStreamRequestDecoder();
+  const res = decoder.decodeRequest({
+    model: "gpt-main",
+    messages: [{ role: "user", content: "hello" }],
+    stream: true,
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get weather",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+            additionalProperties: false,
+          },
+        },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: "get_weather" } },
+    parallel_tool_calls: false,
+  });
+
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    const encoded = new ChatStreamRequestEncoder().encodeRequest(
+      res.value.irRequest,
+      "upstream-gpt",
+      res.value.sourceWireOptions,
+      res.value.requestWireOptions,
+    );
+    assert.deepEqual(encoded.tools, [
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get weather",
+          parameters: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+            additionalProperties: false,
+          },
+        },
+      },
+    ]);
+    assert.deepEqual(encoded.tool_choice, { type: "function", function: { name: "get_weather" } });
+    assert.equal(encoded.parallel_tool_calls, false);
+  }
+});
+
 test.concurrent("chat stream request: stream_options null is treated as absent (include_usage off)", () => {
   // An explicit null wrapper is absence on the request side: decode succeeds
   // and usage inclusion stays off instead of failing closed.

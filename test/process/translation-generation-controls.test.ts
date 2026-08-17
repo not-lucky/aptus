@@ -375,7 +375,7 @@ test.concurrent("process: continuation/state handles and container reuse reject 
     }
 
     // The Messages-native container-reuse param rejects out of M with its own
-    // row's ID (distinct from the Task-13 provider-container resource).
+    // row's ID (distinct from the provider-container resource).
     const containerRes = await postJson(
       cli.clientPort,
       "/messages",

@@ -3,7 +3,7 @@ import type { IrFailureCategory } from "../domain/operations.ts";
 import type { RandomSource } from "./timing.ts";
 
 /**
- * Explicit HTTP statuses eligible for same-candidate retry (ADR 0004).
+ * Explicit HTTP statuses eligible for same-candidate retry.
  *
  * Status 529 is included as retryable on all protocols (Anthropic Overloaded).
  */
@@ -33,7 +33,7 @@ export interface RetryDecisionInput {
 /**
  * Pure decision evaluating whether a failed attempt may retry on the same candidate.
  *
- * Rules (ADR 0004):
+ * Rules:
  * - Must be an explicit pre-body HTTP status in `{429, 500, 503, 529}`.
  * - No client bytes written yet (`beforeClientBytes: true`).
  * - At most 2 retries after the first attempt (`candidateAttemptCount <= 2`).
@@ -75,7 +75,7 @@ export interface FallbackDecisionInput {
 /**
  * Pure decision evaluating whether execution may fall back to the next candidate in route order.
  *
- * Rules (ADR 0004):
+ * Rules:
  * - No client bytes written yet (`beforeClientBytes: true`).
  * - Subsequent candidate exists (`hasNextCandidate: true`).
  * - Normalized failure category is present in `fallbackOn`.

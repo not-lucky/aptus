@@ -1,7 +1,9 @@
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
-import { buildMessagesRequestBody, messagesStopReason, messagesUsageBody } from "../shared.ts";
+import { buildMessagesRequestBody } from "../shared/messages-request.ts";
+import { messagesStopReason, partitionOutcomeParts } from "../shared/transcript.ts";
+import { messagesUsageBody } from "../shared/usage.ts";
 
 /**
  * Egress encoder for Anthropic Messages requests and responses.
@@ -31,15 +33,31 @@ export class MessagesEgressEncoder implements EgressEncoder {
     readonly headers: HeaderMap;
     readonly body: JsonObject;
   } {
-    let text = "";
-    for (const part of outcome.parts) {
-      if (part.type === "text") {
-        text += part.text;
-      }
+    // Content blocks preserve part order; an outcome with no parts still
+    // carries one empty text block.
+    const content: JsonObject[] = partitionOutcomeParts(outcome.parts).map(
+      (segment): JsonObject =>
+        segment.type === "text"
+          ? { type: "text", text: segment.text }
+          : {
+              type: "tool_use",
+              id: segment.call.callId,
+              name: segment.call.name,
+              // Preflight admits only function calls with parsed arguments into
+              // an M client; the parse fallback keeps the encoder total.
+              input:
+                segment.call.type === "function"
+                  ? (segment.call.arguments ?? JSON.parse(segment.call.argumentsText))
+                  : JSON.parse(segment.call.inputText),
+            },
+    );
+    if (content.length === 0) {
+      content.push({ type: "text", text: "" });
     }
 
-    // A matched stop sequence is echoed with its own stop reason so the M
-    // framing stays valid; other reasons keep their natural spelling.
+    // A matched stop sequence is echoed only with its own stop reason so the
+    // M framing stays valid; the M wire pairs a non-null stop_sequence with
+    // stop_reason "stop_sequence" and nothing else.
     const stopReason = messagesStopReason(outcome.finish);
 
     // Never fabricate usage: absence is distinct from zero, so the field is
@@ -55,14 +73,9 @@ export class MessagesEgressEncoder implements EgressEncoder {
       type: "message",
       role: "assistant",
       model: outcome.model,
-      content: [
-        {
-          type: "text",
-          text,
-        },
-      ],
+      content,
       stop_reason: stopReason,
-      stop_sequence: outcome.finish.stopSequence ?? null,
+      stop_sequence: stopReason === "stop_sequence" ? (outcome.finish.stopSequence ?? null) : null,
       ...(usage !== undefined ? { usage } : {}),
     };
 

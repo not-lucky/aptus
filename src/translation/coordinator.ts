@@ -16,7 +16,7 @@ import type {
   TranslationCodecs,
   TranslationCoordinator,
 } from "./contracts.ts";
-import { unsupportedCapabilityFailure } from "./failures.ts";
+
 import type { IrOutcome, IrRequest } from "./ir.ts";
 import {
   normalizeOutcomeWireOptions,
@@ -25,6 +25,7 @@ import {
   preflightStreamRequest,
 } from "./preflight.ts";
 import { prepareTranslatedProviderRequest } from "./prepare.ts";
+import { ok, unsupportedCapability } from "./result.ts";
 import { validateIrOutcome, validateIrRequest } from "./validate.ts";
 
 /**
@@ -38,15 +39,12 @@ function resolveMessagesMaxTokens(
 ): Result<number, NormalizedFailure> {
   const maxTokens = irRequest.generation?.maxOutputTokens ?? targetDefaultMaxTokens;
   if (typeof maxTokens !== "number" || !Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
-    return {
-      ok: false,
-      error: unsupportedCapabilityFailure(
-        "output-token-limit",
-        "No positive safe integer max_tokens could be resolved from the request or the target model defaults",
-      ),
-    };
+    return unsupportedCapability(
+      "output-token-limit",
+      "No positive safe integer max_tokens could be resolved from the request or the target model defaults",
+    );
   }
-  return { ok: true, value: maxTokens };
+  return ok(maxTokens);
 }
 
 /**
@@ -80,7 +78,7 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       };
 
       // 2. Validate IR request invariants (IR-only: never inspects the sidecar)
-      const validateResult = validateIrRequest(irRequest);
+      const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
       if (!validateResult.ok) {
         return validateResult;
       }
@@ -102,13 +100,10 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
         (encodedBody as Record<string, unknown>).max_tokens = maxTokens.value;
       }
 
-      return {
-        ok: true,
-        value: {
-          body: encodedBody,
-          irRequest,
-        },
-      };
+      return ok({
+        body: encodedBody,
+        irRequest,
+      });
     },
 
     translateStreamRequest(
@@ -131,7 +126,7 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       };
 
       // 2. Validate IR request invariants
-      const validateResult = validateIrRequest(irRequest);
+      const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
       if (!validateResult.ok) {
         return validateResult;
       }
@@ -157,14 +152,11 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
         (encodedBody as Record<string, unknown>).max_tokens = maxTokens.value;
       }
 
-      return {
-        ok: true,
-        value: {
-          body: encodedBody,
-          irRequest,
-          sourceWireOptions: decodeResult.value.sourceWireOptions,
-        },
-      };
+      return ok({
+        body: encodedBody,
+        irRequest,
+        sourceWireOptions: decodeResult.value.sourceWireOptions,
+      });
     },
 
     createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle {
@@ -231,15 +223,12 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       );
       const clientEncoded = encoder.encodeOutcome(irOutcome, normalizedWireOptions);
 
-      return {
-        ok: true,
-        value: {
-          status: clientEncoded.status,
-          headers: clientEncoded.headers,
-          body: clientEncoded.body,
-          irOutcome,
-        },
-      };
+      return ok({
+        status: clientEncoded.status,
+        headers: clientEncoded.headers,
+        body: clientEncoded.body,
+        irOutcome,
+      });
     },
 
     prepareTranslatedProviderRequest(input: PrepareTranslatedRequestInput) {

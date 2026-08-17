@@ -33,6 +33,57 @@ test.concurrent("responses stream request: decodes and encodes stream requests",
   }
 });
 
+test.concurrent("responses stream request: projects tool fields onto provider stream body", () => {
+  const decoder = new ResponsesStreamRequestDecoder();
+  const res = decoder.decodeRequest({
+    model: "responses-main",
+    input: "hello",
+    stream: true,
+    tools: [
+      {
+        type: "function",
+        name: "get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+    ],
+    tool_choice: { type: "function", name: "get_weather" },
+    parallel_tool_calls: false,
+  });
+
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    const encoded = new ResponsesStreamRequestEncoder().encodeRequest(
+      res.value.irRequest,
+      "upstream-resp",
+      {},
+      res.value.requestWireOptions,
+    );
+    assert.deepEqual(encoded.tools, [
+      {
+        type: "function",
+        name: "get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+    ]);
+    assert.deepEqual(encoded.tool_choice, { type: "function", name: "get_weather" });
+    assert.equal(encoded.parallel_tool_calls, false);
+  }
+});
+
 test.concurrent("responses stream request: text null fails invalid_request on the shared request parser", () => {
   // The stream request decoder shares the complete-path request parser, so the
   // documented-non-nullable `text` wrapper rejects explicit null identically.

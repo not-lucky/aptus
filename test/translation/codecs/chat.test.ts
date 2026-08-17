@@ -47,16 +47,16 @@ test.concurrent("translation codec chat: rejects unknown request field", () => {
   }
 });
 
-test.concurrent("translation codec chat: rejects parallel_tool_calls fail-closed", () => {
+test.concurrent("translation codec chat: admits parallel_tool_calls into the IR", () => {
   const decoder = new ChatIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "gpt-4o",
     messages: [{ role: "user", content: "Hello!" }],
     parallel_tool_calls: false,
   });
-  assert.equal(decodeRes.ok, false);
-  if (!decodeRes.ok) {
-    assert.equal(decodeRes.error.capability, "parallel-tool-calls");
+  assert.equal(decodeRes.ok, true);
+  if (decodeRes.ok) {
+    assert.equal(decodeRes.value.irRequest.parallelToolCalls, false);
   }
 });
 

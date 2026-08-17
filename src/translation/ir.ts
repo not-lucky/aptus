@@ -7,6 +7,10 @@ export interface JsonObject {
 
 export type NonEmpty<T> = readonly [T, ...T[]];
 
+/** Admitted custom-tool grammar syntax literals (IR range). */
+export const GRAMMAR_SYNTAX_VALUES = ["lark", "regex"] as const;
+export type GrammarSyntax = (typeof GRAMMAR_SYNTAX_VALUES)[number];
+
 export type IrBinarySource =
   | { readonly type: "url"; readonly url: string }
   | { readonly type: "bytes"; readonly mediaType: string; readonly base64: string }
@@ -104,7 +108,7 @@ export type IrTool =
         | { readonly type: "text" }
         | {
             readonly type: "grammar";
-            readonly syntax: "lark" | "regex";
+            readonly syntax: GrammarSyntax;
             readonly definition: string;
           };
     };

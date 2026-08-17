@@ -230,7 +230,7 @@ test.concurrent("process: protocol-mismatch-only route returns 400 with zero ori
         JSON.stringify({
           ...MINIMAL_CHAT_REQUEST,
           model: "reliable-chat",
-          tools: [{ type: "function", function: { name: "get_weather" } }],
+          web_search_options: { search_context_size: "low" },
         }),
       );
       assert.equal(res.status, 400);
