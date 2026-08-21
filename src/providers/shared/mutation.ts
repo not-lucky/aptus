@@ -1,5 +1,13 @@
 import type { JsonObject, JsonValue, NativeMutations } from "../../domain/contracts.ts";
-import { isPlainObject } from "../../domain/json.ts";
+import {
+  cloneJson,
+  forEachLeaf,
+  getPath,
+  jsonEqual as isJsonEqual,
+  isPlainObject,
+  setPathCreate as setPath,
+  jsonPointer as toPointer,
+} from "../../domain/json.ts";
 
 /**
  * A mutable JSON object (the working copy the mutation pipeline writes into).
@@ -110,60 +118,6 @@ function mergeExtraBody(
 }
 
 /**
- * Deep equality check for JSON values.
- */
-function isJsonEqual(a: JsonValue | undefined, b: JsonValue | undefined): boolean {
-  if (a === b) return true;
-  if (a === undefined || b === undefined) return false;
-  if (a === null || b === null) return a === b;
-  if (typeof a !== typeof b) return false;
-  if (Array.isArray(a)) {
-    if (!Array.isArray(b) || a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (!isJsonEqual(a[i], b[i])) return false;
-    }
-    return true;
-  }
-  if (isPlainObject(a) && isPlainObject(b)) {
-    const keysA = Object.keys(a);
-    const keysB = Object.keys(b);
-    if (keysA.length !== keysB.length) return false;
-    for (const key of keysA) {
-      if (!isJsonEqual(a[key], b[key])) return false;
-    }
-    return true;
-  }
-  return false;
-}
-
-/**
- * Visits every non-object leaf of a JSON tree depth-first in key order.
- */
-function forEachLeaf(root: JsonObject, visit: (segments: readonly string[], value: JsonValue) => void): void {
-  const walk = (node: JsonValue, segments: string[]): void => {
-    if (isPlainObject(node)) {
-      for (const [key, child] of Object.entries(node)) walk(child, [...segments, key]);
-    } else {
-      visit(segments, node);
-    }
-  };
-  walk(root, []);
-}
-
-/**
- * Deep-clones a JSON value into fresh plain objects and arrays.
- */
-function cloneJson(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(cloneJson);
-  if (isPlainObject(value)) {
-    const out: MutableJsonObject = {};
-    for (const [key, child] of Object.entries(value)) out[key] = cloneJson(child);
-    return out;
-  }
-  return value;
-}
-
-/**
  * `true` when every intermediate segment is absent or a plain object.
  */
 function pathIsWritable(target: JsonObject, segments: readonly string[]): boolean {
@@ -175,40 +129,4 @@ function pathIsWritable(target: JsonObject, segments: readonly string[]): boolea
     current = next;
   }
   return true;
-}
-
-/**
- * Reads a value at a path of object keys; returns `undefined` when absent.
- */
-function getPath(target: JsonObject, segments: readonly string[]): JsonValue | undefined {
-  let current: JsonValue | undefined = target;
-  for (const segment of segments) {
-    if (!isPlainObject(current)) return undefined;
-    current = current[segment];
-  }
-  return current;
-}
-
-/**
- * Writes a value at a path of object keys, creating intermediate objects.
- */
-function setPath(target: MutableJsonObject, segments: readonly string[], value: JsonValue): void {
-  let current = target;
-  const last = segments.length - 1;
-  for (let index = 0; index < last; index++) {
-    const segment = segments[index] as string;
-    const next = current[segment];
-    if (!isPlainObject(next)) {
-      current[segment] = {};
-    }
-    current = current[segment] as MutableJsonObject;
-  }
-  current[segments[last] as string] = value;
-}
-
-/**
- * Encodes path segments into an RFC 6901 JSON Pointer.
- */
-function toPointer(segments: readonly string[]): string {
-  return `/${segments.map((segment) => segment.replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}`;
 }

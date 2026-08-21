@@ -1,4 +1,5 @@
-import type { HeaderMap, Protocol } from "../domain/contracts.ts";
+import type { Protocol } from "../domain/contracts.ts";
+import { filterInboundHeaders } from "../domain/headers.ts";
 import type { EncodedFailure, ErrorEncoder, IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
 import type { AptusRequestId } from "../domain/request-id.ts";
 import { statusFromCategory } from "../routing/failures.ts";
@@ -160,29 +161,4 @@ function anthropicErrorType(category: IrFailureCategory | "internal"): string {
   }
 }
 
-/**
- * Strips hop-by-hop HTTP headers and cookies before relaying upstream provider responses back to the client.
- *
- * @param headers - Raw response headers from upstream provider.
- * @returns Sanitized header map with lower-cased keys.
- */
-export function filterResponseHeaders(headers: HeaderMap): HeaderMap {
-  const filtered: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers)) {
-    const normalized = name.toLowerCase();
-    if (HOP_BY_HOP_RESPONSE_HEADERS[normalized] !== true && normalized !== "set-cookie") filtered[normalized] = value;
-  }
-  return filtered;
-}
-
-/** RFC 7230 hop-by-hop headers stripped from forwarded responses. */
-const HOP_BY_HOP_RESPONSE_HEADERS: Record<string, true> = {
-  connection: true,
-  "keep-alive": true,
-  "proxy-authenticate": true,
-  "proxy-authorization": true,
-  te: true,
-  trailer: true,
-  "transfer-encoding": true,
-  upgrade: true,
-};
+export const filterResponseHeaders = filterInboundHeaders;

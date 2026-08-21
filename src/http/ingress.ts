@@ -1,4 +1,5 @@
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { BlockList, isIP } from "node:net";
 import { TextDecoder } from "node:util";
 import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.ts";
 import type { IrFailureCategory } from "../domain/operations.ts";
@@ -152,42 +153,25 @@ function isJsonObject(value: JsonValue): value is JsonObject {
 }
 
 function isTrustedProxy(peerAddress: string | undefined, trustedProxyCidrs: readonly string[]): boolean {
-  const peer = parseIpv4(peerAddress);
-  if (peer === undefined) return false;
-  return trustedProxyCidrs.some((cidr) => containsIpv4(peer, cidr));
+  if (peerAddress === undefined || isIP(peerAddress) !== 4) return false;
+  return trustedProxyCidrs.some((cidr) => isIpv4InCidr(peerAddress, cidr));
 }
 
-/**
- * Tests whether an IPv4 numeric address falls within a given CIDR network range.
- */
-function containsIpv4(peer: number, cidr: string): boolean {
+function isIpv4InCidr(ip: string, cidr: string): boolean {
   const [address, prefixText, ...extra] = cidr.split("/");
   if (address === undefined || prefixText === undefined || extra.length > 0 || !/^\d{1,2}$/.test(prefixText))
     return false;
   const prefix = Number(prefixText);
-  const network = parseIpv4(address);
-  if (network === undefined || prefix < 0 || prefix > 32) return false;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  if (isIP(address) !== 4) return false;
   if (prefix === 0) return true;
-  // Compute netmask using unsigned 32-bit bitwise shift.
-  const mask = (0xffffffff << (32 - prefix)) >>> 0;
-  return (peer & mask) === (network & mask);
-}
-
-/**
- * Converts an IPv4 dotted-decimal string into an unsigned 32-bit integer.
- */
-function parseIpv4(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const octets = value.split(".");
-  if (octets.length !== 4) return undefined;
-  let output = 0;
-  for (const octet of octets) {
-    if (!/^\d{1,3}$/.test(octet)) return undefined;
-    const number = Number(octet);
-    if (number > 255) return undefined;
-    output = (output << 8) | number;
+  try {
+    const list = new BlockList();
+    list.addSubnet(address, prefix, "ipv4");
+    return list.check(ip, "ipv4");
+  } catch {
+    return false;
   }
-  return output >>> 0;
 }
 
 const FORBIDDEN_CLIENT_HEADERS: Record<string, true> = {

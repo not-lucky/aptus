@@ -37,6 +37,236 @@ test.concurrent("chat stream request: decodes and encodes stream options", () =>
   }
 });
 
+test.concurrent("chat stream decoder: duplicate tool_call id across different indices fails closed", () => {
+  const decoder = new ChatProviderStreamDecoder(session);
+  const chunk1 = decoder.push({
+    data: JSON.stringify({
+      id: "c1",
+      object: "chat.completion.chunk",
+      created: 100,
+      model: "upstream",
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_dup", type: "function", function: { name: "fn1", arguments: "{}" } }] } }],
+    }),
+  });
+  assert.equal(chunk1.ok, true);
+
+  const chunk2 = decoder.push({
+    data: JSON.stringify({
+      id: "c2",
+      object: "chat.completion.chunk",
+      created: 101,
+      model: "upstream",
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: "call_dup", type: "function", function: { name: "fn2", arguments: "{}" } }] } }],
+    }),
+  });
+  assert.equal(chunk2.ok, false);
+  if (!chunk2.ok) {
+    assert.equal(chunk2.error.category, "invalid_request");
+  }
+});
+
+test.concurrent("chat stream decoder: unrecognized extra keys on tool_calls or function fail closed", () => {
+  const decoder = new ChatProviderStreamDecoder(session);
+  const extraKeyChunk = decoder.push({
+    data: JSON.stringify({
+      id: "c1",
+      object: "chat.completion.chunk",
+      created: 100,
+      model: "upstream",
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "fn1", arguments: "{}" }, extra_field: true }] } }],
+    }),
+  });
+  assert.equal(extraKeyChunk.ok, false);
+  if (!extraKeyChunk.ok) {
+    assert.equal(extraKeyChunk.error.category, "invalid_request");
+  }
+});
+
+test.concurrent("chat stream decoder: malformed choices and tool_calls fail closed without uncaught exceptions", () => {
+  const decoder = new ChatProviderStreamDecoder(session);
+
+  // choices with null element
+  const resNullChoice = decoder.push({
+    data: JSON.stringify({
+      object: "chat.completion.chunk",
+      choices: [null],
+    }),
+  });
+  assert.equal(resNullChoice.ok, false);
+  if (!resNullChoice.ok) {
+    assert.equal(resNullChoice.error.category, "invalid_request");
+  }
+
+  // tool_calls with null element
+  const resNullToolCall = decoder.push({
+    data: JSON.stringify({
+      object: "chat.completion.chunk",
+      choices: [{ index: 0, delta: { tool_calls: [null] } }],
+    }),
+  });
+  assert.equal(resNullToolCall.ok, false);
+  if (!resNullToolCall.ok) {
+    assert.equal(resNullToolCall.error.category, "invalid_request");
+  }
+
+  // tool_call with null function object on new index
+  const resNullFn = decoder.push({
+    data: JSON.stringify({
+      object: "chat.completion.chunk",
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", function: null }] } }],
+    }),
+  });
+  assert.equal(resNullFn.ok, false);
+  if (!resNullFn.ok) {
+    assert.equal(resNullFn.error.category, "invalid_request");
+  }
+
+  // tool_call with non-string arguments
+  const resNonStringArgs = decoder.push({
+    data: JSON.stringify({
+      object: "chat.completion.chunk",
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "fn", arguments: 123 } }] } }],
+    }),
+  });
+  assert.equal(resNonStringArgs.ok, false);
+  if (!resNonStringArgs.ok) {
+    assert.equal(resNonStringArgs.error.category, "invalid_request");
+  }
+
+  // non-object chunk
+  const resNonObject = decoder.push({
+    data: JSON.stringify("not an object"),
+  });
+  assert.equal(resNonObject.ok, false);
+  if (!resNonObject.ok) {
+    assert.equal(resNonObject.error.category, "invalid_request");
+  }
+
+  // non-object in-band error
+  const resNonObjectErr = decoder.push({
+    data: JSON.stringify({
+      object: "chat.completion.chunk",
+      choices: [],
+      error: "string error instead of object",
+    }),
+  });
+  assert.equal(resNonObjectErr.ok, false);
+  if (!resNonObjectErr.ok) {
+    assert.equal(resNonObjectErr.error.category, "invalid_request");
+  }
+});
+
+test.concurrent("chat stream decoder: decodes multi-tool interleaved deltas and finish_reason tool_calls", () => {
+  const decoder = new ChatProviderStreamDecoder(session);
+  const frames = [
+    { choices: [{ index: 0, delta: { role: "assistant" } }] },
+    {
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, id: "call_a", type: "function", function: { name: "get_weather", arguments: '{"loc":' } },
+              { index: 1, id: "call_b", type: "function", function: { name: "get_time", arguments: '{"tz":' } },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, function: { arguments: '"SF"}' } },
+              { index: 1, function: { arguments: '"PST"}' } },
+            ],
+          },
+        },
+      ],
+    },
+    { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+  ];
+
+  const allEvents: IrStreamEvent[] = [];
+  for (const f of frames) {
+    const res = decoder.push({
+      data: JSON.stringify({
+        id: "c1",
+        object: "chat.completion.chunk",
+        created: 100,
+        model: "upstream",
+        ...f,
+      }),
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) allEvents.push(...res.value);
+  }
+
+  const doneRes = decoder.push({ data: "[DONE]" });
+  assert.equal(doneRes.ok, true);
+  if (doneRes.ok) allEvents.push(...doneRes.value);
+
+  assert.equal(allEvents.filter((e) => e.type === "part_start" && e.part.type === "function_call").length, 2);
+  const deltaEvents = allEvents.filter((e) => e.type === "tool_arguments_delta");
+  assert.equal(deltaEvents.length, 4);
+  const endEvents = allEvents.filter((e) => e.type === "part_end" && e.partType === "function_call");
+  assert.equal(endEvents.length, 2);
+  if (endEvents[0]?.type === "part_end" && endEvents[0].partType === "function_call") {
+    assert.deepEqual(endEvents[0].arguments, { loc: "SF" });
+  }
+  if (endEvents[1]?.type === "part_end" && endEvents[1].partType === "function_call") {
+    assert.deepEqual(endEvents[1].arguments, { tz: "PST" });
+  }
+  const respEnd = allEvents.find((e) => e.type === "response_end");
+  assert.ok(respEnd);
+  if (respEnd?.type === "response_end") {
+    assert.equal(respEnd.finish.reason, "tool_calls");
+  }
+});
+
+test.concurrent("chat stream decoder: rejects custom tool calls with custom-tool-streaming", () => {
+  const decoder = new ChatProviderStreamDecoder(session);
+  const res = decoder.push({
+    data: JSON.stringify({
+      id: "c1",
+      object: "chat.completion.chunk",
+      created: 100,
+      model: "upstream",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 0, id: "c1", type: "custom", function: { name: "custom_fn", arguments: "{}" } }],
+          },
+        },
+      ],
+    }),
+  });
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.error.capability, "custom-tool-streaming");
+  }
+});
+
+test.concurrent("chat stream decoder: enforces maxArgumentBytes on tool arguments buffer", () => {
+  const decoder = new ChatProviderStreamDecoder(session, 10);
+  const res = decoder.push({
+    data: JSON.stringify({
+      id: "c1",
+      object: "chat.completion.chunk",
+      created: 100,
+      model: "upstream",
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "fn", arguments: "12345678901" } }] } }],
+    }),
+  });
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.error.category, "payload_too_large");
+  }
+});
+
 test.concurrent("chat stream request: projects tool fields onto provider stream body", () => {
   const decoder = new ChatStreamRequestDecoder();
   const res = decoder.decodeRequest({

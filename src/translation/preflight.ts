@@ -454,12 +454,12 @@ export function preflightRequest(
  * given the specific translation direction.
  *
  * Streaming requests may carry client tool definitions and controls so the
- * target request encoder can project them. Tool-call transcript items and
- * custom tools still fail closed with their streaming rows; provider-side
- * streamed tool output is rejected by the provider decoders/state machine.
- * Other unsupported direction-specific transcript structures or wire-only
- * sidecar fields traveling in a T3 direction fail closed with their exact
- * matrix capability ID before any provider dispatch occurs.
+ * target request encoder can project them. Admitted function tool call
+ * streaming translates piecewise across all six directions; custom tools fail
+ * closed with their streaming rows (`custom-tool-streaming`). Other unsupported
+ * direction-specific transcript structures or wire-only sidecar fields traveling
+ * in a T3 direction fail closed with their exact matrix capability ID before any
+ * provider dispatch occurs.
  *
  * @param req - Validated semantic IR request.
  * @param direction - Directed protocol conversion path.
@@ -481,6 +481,7 @@ export function preflightStreamRequest(
   // shared target preflight before the stream request encoder projects them.
   const hasCustomToolSurface =
     req.tools?.some((tool) => tool.type === "custom") ||
+    requestWireOptions?.allowedToolSubset?.tools?.some((tool) => tool.type === "custom") ||
     req.items.some((item) => item.type === "tool_call" && item.call.type === "custom");
   if (hasCustomToolSurface) {
     return unsupportedCapability("custom-tool-streaming");

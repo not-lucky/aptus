@@ -4,6 +4,7 @@
  * cross-row extensions.
  */
 import assert from "node:assert/strict";
+import type { Protocol } from "../../src/domain/contracts.ts";
 import { test } from "vitest";
 import { ChatIngressDecoder } from "../../src/translation/codecs/chat/ingress.ts";
 import { MessagesIngressDecoder } from "../../src/translation/codecs/messages/ingress.ts";
@@ -18,6 +19,8 @@ import {
 import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
 import { preflightRequest, preflightOutcome, preflightStreamRequest } from "../../src/translation/preflight.ts";
 import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
+import { TranslatedStreamPump } from "../../src/translation/stream-pump.ts";
+import { createSseDecoder, createSseEncoder } from "../../src/translation/sse.ts";
 import { validateIrRequest } from "../../src/translation/validate.ts";
 import { ALL_DIRECTIONS, translateRequest } from "./owned-rows-helpers.ts";
 
@@ -27,6 +30,34 @@ import { ALL_DIRECTIONS, translateRequest } from "./owned-rows-helpers.ts";
 
 function coordinator() {
   return createDefaultTranslationCoordinator();
+}
+
+const UTF8_ENCODER = new TextEncoder();
+
+function createToolStreamPump(client: Protocol, provider: Protocol, responseId: string) {
+  const bundle = coordinator().createStreamSession({
+    sourceProtocol: client,
+    targetProtocol: provider,
+    logicalModel: "logical-key",
+    responseId,
+  });
+  const emitted: Uint8Array[] = [];
+  const pump = new TranslatedStreamPump(
+    createSseDecoder(),
+    createSseEncoder(),
+    bundle.providerDecoder,
+    createIrStreamStateMachine({
+      expectedResponseId: bundle.session.responseId,
+      expectedModel: bundle.session.model,
+    }),
+    bundle.clientEncoder,
+    () => {},
+  );
+  return { pump, emitted };
+}
+
+function joinStreamEmitted(emitted: ReadonlyArray<Uint8Array>): string {
+  return Buffer.concat(emitted.map((chunk) => Buffer.from(chunk))).toString("utf8");
 }
 
 function assertOk(
@@ -172,7 +203,6 @@ test.concurrent("row function-tool-definition: six-direction round trip plus dec
       }
     }
   }
-
   // C tool without parameters rejects function-tool-definition at decode
   const cNoParams = {
     model: "wire-model",
@@ -899,6 +929,63 @@ test.concurrent("row invalid-function-json: verbatim vs M rejection", () => {
   }
 });
 
+test.concurrent("row invalid-function-json: streaming raw relay into C/R and fail-closed into M", () => {
+  // Valid M input_json_delta fixture for T1 evidence
+  const mValidFrames = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-3-5","stop_reason":null,"stop_sequence":null}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_m","name":"get_weather","input":{}}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"city\\":\\"SF\\"}"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ];
+  const { pump: pumpMtoC, emitted: emittedMtoC } = createToolStreamPump("openai-chat", "anthropic-messages", "resp_m_valid");
+  for (const f of mValidFrames) {
+    const res = pumpMtoC.pushBytes(UTF8_ENCODER.encode(f));
+    assert.equal(res.ok, true);
+    if (res.ok) emittedMtoC.push(...res.value);
+  }
+  const finishMtoC = pumpMtoC.finish();
+  assert.equal(finishMtoC.ok, true);
+  if (finishMtoC.ok) emittedMtoC.push(...finishMtoC.value);
+  assert.ok(joinStreamEmitted(emittedMtoC).includes("city") && joinStreamEmitted(emittedMtoC).includes("SF"));
+
+  // Invalid JSON fragments into C -> relayed verbatim
+  const cInvalidFrames = [
+    'data: {"id":"chatcmpl-bad","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+    'data: {"id":"chatcmpl-bad","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{invalid-json"}}]},"finish_reason":null}]}\n\n',
+    'data: {"id":"chatcmpl-bad","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+    'data: [DONE]\n\n',
+  ];
+
+  // Into Responses (C->R): invalid JSON text is relayed
+  const { pump: pumpCtoR, emitted: emittedCtoR } = createToolStreamPump("openai-responses", "openai-chat", "resp_bad_r");
+  for (const f of cInvalidFrames) {
+    const res = pumpCtoR.pushBytes(UTF8_ENCODER.encode(f));
+    if (res.ok) emittedCtoR.push(...res.value);
+  }
+  const finCtoR = pumpCtoR.finish();
+  if (finCtoR.ok) emittedCtoR.push(...finCtoR.value);
+  assert.ok(joinStreamEmitted(emittedCtoR).includes("{invalid-json"));
+
+  // Into Messages (C->M): invalid JSON at part_end fails closed with invalid_request and zero tool_use blocks
+  const { pump: pumpCtoM, emitted: emittedCtoM } = createToolStreamPump("anthropic-messages", "openai-chat", "resp_bad_m");
+  let failed = false;
+  for (const f of cInvalidFrames) {
+    const res = pumpCtoM.pushBytes(UTF8_ENCODER.encode(f));
+    if (!res.ok) {
+      failed = true;
+      assert.equal(res.error.category, "invalid_request");
+      break;
+    }
+    emittedCtoM.push(...res.value);
+  }
+  assert.equal(failed, true, "invalid JSON into M stream must fail");
+  const textEmitted = joinStreamEmitted(emittedCtoM);
+  assert.equal(textEmitted.includes("tool_use"), false, "no tool_use frame emitted on invalid JSON");
+  assert.equal(textEmitted.includes("message_stop"), false, "no success terminator emitted on invalid JSON");
+});
+
 test.concurrent("row tool-result-text: single text six directions", () => {
   for (const [src, dst] of ALL_DIRECTIONS) {
     let body: Record<string, unknown>;
@@ -1257,6 +1344,20 @@ test.concurrent("row custom-tool-streaming: request and output gates", () => {
     assertUnsupported(res as never, "custom-tool-streaming", `stream custom call ${dir}`);
   }
 
+  // Also with custom tool solely in allowedToolSubset sidecar
+  const standardIr = {
+    model: "logical-key",
+    delivery: "stream" as const,
+    tools: [{ type: "function" as const, name: "get_weather", inputSchema: { ...FUNC_SCHEMA } }],
+    items: [{ type: "message" as const, role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }],
+  };
+  const customSubset = { allowedToolSubset: { mode: "auto" as const, tools: [{ type: "custom" as const, name: "my_tool", format: { type: "text" as const } }] } };
+  for (const [src, dst] of ALL_DIRECTIONS) {
+    const dir = `${src}->${dst}` as never;
+    const res = preflightStreamRequest(standardIr as never, dir, customSubset as never);
+    assertUnsupported(res as never, "custom-tool-streaming", `stream custom subset ${dir}`);
+  }
+
   // Output side: part_start with custom_call descriptor
   const sm = createIrStreamStateMachine();
   const r1 = sm.feed({ type: "response_start", responseId: "r1", model: "m", wireOptions: {} } as never);
@@ -1273,19 +1374,111 @@ test.concurrent("row custom-tool-streaming: request and output gates", () => {
 // Provisional stream function tools
 // =====================================================================
 
-test.concurrent("row function-arguments-streaming: function tool request surfaces are admitted", () => {
-  const fnIr = {
-    model: "logical-key",
-    delivery: "stream" as const,
-    tools: [{ type: "function" as const, name: "get_weather", inputSchema: { ...FUNC_SCHEMA } }],
-    toolChoice: { type: "named" as const, name: "get_weather" },
-    parallelToolCalls: false,
-    items: [{ type: "message" as const, role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }],
-  };
-  for (const [src, dst] of ALL_DIRECTIONS) {
-    const dir = `${src}->${dst}` as never;
-    const res = preflightStreamRequest(fnIr as never, dir, undefined);
-    assertOk(res, `function stream request ${dir}`);
+test.concurrent("row function-arguments-streaming & tool-stream-delta: piecewise tool argument streaming across all six directions", () => {
+  const chatStreamFrames = [
+    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_w","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":"}}]},"finish_reason":null}]}\n\n',
+    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"SF\\"}"}}]},"finish_reason":null}]}\n\n',
+    'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+    'data: [DONE]\n\n',
+  ];
+
+  const responsesStreamFrames = [
+    'event: response.created\ndata: {"type":"response.created","sequence_number":1,"response":{"id":"resp_stream","status":"in_progress"}}\n\n',
+    'event: response.output_item.added\ndata: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"function_call","id":"fc_w","call_id":"call_w","name":"get_weather","arguments":""}}\n\n',
+    'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_w","delta":"{\\"city\\":"}\n\n',
+    'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_w","delta":"\\"SF\\"}"}\n\n',
+    'event: response.output_item.done\ndata: {"type":"response.output_item.done","sequence_number":5,"item":{"type":"function_call","id":"fc_w","call_id":"call_w","name":"get_weather","arguments":"{\\"city\\":\\"SF\\"}"}}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_stream","status":"completed","output":[{"type":"function_call","id":"fc_w","call_id":"call_w","name":"get_weather","arguments":"{\\"city\\":\\"SF\\"}"}]}}\n\n',
+  ];
+
+  const messagesStreamFrames = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","content":[],"model":"claude-3-5","stop_reason":null,"stop_sequence":null}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_w","name":"get_weather","input":{}}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"city\\":"}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\\"SF\\"}"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ];
+
+  for (const [client, provider] of ALL_DIRECTIONS) {
+    const { pump, emitted } = createToolStreamPump(client, provider, `resp_${client}_${provider}`);
+    let frames: string[];
+    if (provider === "openai-chat") frames = chatStreamFrames;
+    else if (provider === "openai-responses") frames = responsesStreamFrames;
+    else frames = messagesStreamFrames;
+
+    for (const f of frames) {
+      const res = pump.pushBytes(UTF8_ENCODER.encode(f));
+      assert.equal(res.ok, true, `pushBytes failed for ${client}<-${provider}`);
+      if (res.ok) emitted.push(...res.value);
+    }
+    const finishRes = pump.finish();
+    assert.equal(finishRes.ok, true, `finish failed for ${client}<-${provider}`);
+    if (finishRes.ok) emitted.push(...finishRes.value);
+
+    const output = joinStreamEmitted(emitted);
+    if (client === "openai-chat") {
+      assert.ok(output.includes("tool_calls"), `chat client should contain tool_calls for ${client}<-${provider}`);
+      assert.ok(output.includes("get_weather"), `chat client should contain get_weather for ${client}<-${provider}`);
+      assert.ok(output.includes("[DONE]"), `chat client should contain [DONE] for ${client}<-${provider}`);
+    } else if (client === "openai-responses") {
+      assert.ok(output.includes("function_call"), `responses client should contain function_call for ${client}<-${provider}`);
+      assert.ok(output.includes("function_call_arguments.delta"), `responses client should contain delta for ${client}<-${provider}`);
+      assert.ok(output.includes("response.completed"), `responses client should contain response.completed for ${client}<-${provider}`);
+    } else {
+      assert.ok(output.includes("tool_use"), `messages client should contain tool_use for ${client}<-${provider}`);
+      assert.ok(output.includes("input_json_delta"), `messages client should contain input_json_delta for ${client}<-${provider}`);
+      assert.ok(output.includes("message_stop"), `messages client should contain message_stop for ${client}<-${provider}`);
+    }
+  }
+});
+
+test.concurrent("row finish-tool-calls: stream-side finish reason mapping across all six directions", () => {
+  for (const [client, provider] of ALL_DIRECTIONS) {
+    const { pump, emitted } = createToolStreamPump(client, provider, `resp_finish_${client}_${provider}`);
+    let frames: string[];
+    if (provider === "openai-chat") {
+      frames = [
+        'data: {"id":"chatcmpl-f","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_f","type":"function","function":{"name":"fn","arguments":"{}"}}]},"finish_reason":null}]}\n\n',
+        'data: {"id":"chatcmpl-f","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        'data: [DONE]\n\n',
+      ];
+    } else if (provider === "openai-responses") {
+      frames = [
+        'event: response.created\ndata: {"type":"response.created","sequence_number":1,"response":{"id":"resp_f","status":"in_progress"}}\n\n',
+        'event: response.output_item.added\ndata: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"function_call","id":"fc_f","call_id":"call_f","name":"fn","arguments":"{}"}}\n\n',
+        'event: response.output_item.done\ndata: {"type":"response.output_item.done","sequence_number":3,"item":{"type":"function_call","id":"fc_f","call_id":"call_f","name":"fn","arguments":"{}"}}\n\n',
+        'event: response.completed\ndata: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_f","status":"completed","output":[{"type":"function_call","id":"fc_f","call_id":"call_f","name":"fn","arguments":"{}"}]}}\n\n',
+      ];
+    } else {
+      frames = [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_f","type":"message","role":"assistant","content":[],"model":"claude-3-5","stop_reason":null,"stop_sequence":null}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_f","name":"fn","input":{}}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ];
+    }
+
+    for (const f of frames) {
+      const res = pump.pushBytes(UTF8_ENCODER.encode(f));
+      assert.equal(res.ok, true);
+      if (res.ok) emitted.push(...res.value);
+    }
+    const fin = pump.finish();
+    assert.equal(fin.ok, true);
+    if (fin.ok) emitted.push(...fin.value);
+    const out = joinStreamEmitted(emitted);
+    if (client === "openai-chat") {
+      assert.ok(out.includes('"finish_reason":"tool_calls"'), `finish_reason tool_calls expected for ${client}<-${provider}`);
+    } else if (client === "openai-responses") {
+      assert.ok(out.includes("response.completed"), `response.completed expected for ${client}<-${provider}`);
+    } else {
+      assert.ok(out.includes('"stop_reason":"tool_use"'), `stop_reason tool_use expected for ${client}<-${provider}`);
+    }
   }
 });
 

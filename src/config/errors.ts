@@ -96,21 +96,4 @@ export function formatStartupError(error: StartupError): string {
   return `${error.code} ${error.pointer} ${error.message}`;
 }
 
-/**
- * Encodes an array of path segments into an RFC 6901 JSON pointer string.
- *
- * @param path - Array of string keys or numeric array indexes.
- * @returns Formatted JSON pointer prefixed with `/` (or `""` if empty).
- *
- * @remarks
- * In accordance with RFC 6901:
- * - Tildes (`~`) are escaped as `~0`
- * - Forward slashes (`/`) are escaped as `~1`
- */
-export function jsonPointer(path: readonly (string | number)[]): string {
-  if (path.length === 0) {
-    return "";
-  }
-  // Escape ~ first, then / to avoid double-escaping ~1.
-  return `/${path.map((segment) => String(segment).replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}`;
-}
+export { jsonPointer } from "../domain/json.ts";

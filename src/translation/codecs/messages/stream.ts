@@ -1,4 +1,5 @@
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
+import { isPlainObject } from "../../../domain/json.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type {
   ClientStreamEncoder,
@@ -15,7 +16,9 @@ import type {
 import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
+import { parseFunctionArgumentsOnce } from "../shared/hosted-tools.ts";
 import { buildMessagesRequestBody } from "../shared/messages-request.ts";
+import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
 import { messagesStopReason } from "../shared/transcript.ts";
 import {
   accumulateMessagesUsage,
@@ -23,6 +26,7 @@ import {
   type MessagesUsageAccumulator,
   messagesUsageBody,
 } from "../shared/usage.ts";
+import { messagesHostedBlockFailure, messagesServerToolUseFailure, messagesToolUseCallerFailure } from "./content.ts";
 import { parseMessagesRequestBody } from "./ingress.ts";
 /**
  * Decodes a streaming Anthropic Messages request.
@@ -41,6 +45,13 @@ export class MessagesStreamRequestDecoder implements StreamRequestDecoder {
       requestWireOptions: parsed.value.requestWireOptions,
     });
   }
+}
+
+function parseContentBlockIndex(chunk: Record<string, unknown>): Result<number, NormalizedFailure> {
+  if (typeof chunk.index !== "number" || !Number.isSafeInteger(chunk.index) || chunk.index < 0) {
+    return invalidRequest("Messages stream event index must be a non-negative integer");
+  }
+  return ok(chunk.index);
 }
 
 /**
@@ -70,15 +81,22 @@ export class MessagesStreamRequestEncoder implements StreamRequestEncoder {
 export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "anthropic-messages" as const;
   private readonly session: StreamSession;
+  private readonly budget: StreamToolArgumentsBudget;
   private readonly partIndexMap = new Map<number, string>();
+  private readonly openToolBlocks = new Map<
+    number,
+    { partId: string; callId: string; name: string; arguments: string }
+  >();
+  private readonly seenIndices = new Set<number>();
   private readonly usageState: MessagesUsageAccumulator = { sawUsage: false };
   private recordedFinish: IrFinishReason | undefined;
   private recordedStopSequence: string | undefined;
   private sawMessageStop = false;
   private outcomeWireOptions: OutcomeWireOptions = {};
 
-  constructor(session: StreamSession) {
+  constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.session = session;
+    this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
   }
 
   getOutcomeWireOptions(): OutcomeWireOptions {
@@ -97,14 +115,18 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       return invalidRequest("Messages stream frame missing named 'event'");
     }
 
-    let chunk: Record<string, unknown>;
+    let rawChunk: unknown;
     try {
-      chunk = JSON.parse(frame.data) as Record<string, unknown>;
+      rawChunk = JSON.parse(frame.data);
     } catch (err) {
       return invalidRequest(
         `Messages stream chunk is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    if (!isPlainObject(rawChunk)) {
+      return invalidRequest("Messages stream chunk must be a JSON object");
+    }
+    const chunk = rawChunk as Record<string, unknown>;
 
     const eventName = frame.event;
 
@@ -114,7 +136,11 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "message_start") {
-      const msg = (chunk.message ?? {}) as Record<string, unknown>;
+      const rawMsg = chunk.message;
+      if (rawMsg !== undefined && !isPlainObject(rawMsg)) {
+        return invalidRequest("message_start requires message object");
+      }
+      const msg = (rawMsg ?? {}) as Record<string, unknown>;
       // Explicit null is treated as a missing usage record (absence), never
       // a crash and never a fabricated zero.
       const rawUsage = msg.usage as Record<string, unknown> | null | undefined;
@@ -136,18 +162,55 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "content_block_start") {
-      const index = typeof chunk.index === "number" ? chunk.index : 0;
-      const block = chunk.content_block as Record<string, unknown> | undefined;
+      const indexRes = parseContentBlockIndex(chunk);
+      if (!indexRes.ok) return indexRes;
+      const index = indexRes.value;
+      if (this.seenIndices.has(index)) {
+        return invalidRequest(`Messages stream content_block index '${index}' reused`);
+      }
+      this.seenIndices.add(index);
+      const rawBlock = chunk.content_block;
+      if (!isPlainObject(rawBlock)) {
+        return invalidRequest("content_block_start requires content_block object");
+      }
+      const block = rawBlock as Record<string, unknown>;
 
-      // Provider-owned reasoning payloads fail closed at discovery.
+      // Provider-owned reasoning blocks fail closed at discovery.
       if (block?.type === "thinking") {
         return unsupportedCapability("readable-reasoning");
       }
       if (block?.type === "redacted_thinking") {
         return unsupportedCapability("redacted-reasoning");
       }
+      if (block?.type === "tool_use") {
+        const callerFailure = messagesToolUseCallerFailure(block.caller);
+        if (callerFailure !== undefined) return failure(callerFailure);
+        if (typeof block.id !== "string" || block.id.trim() === "") {
+          return invalidRequest("tool_use id must be a non-empty string");
+        }
+        if (typeof block.name !== "string" || block.name.trim() === "") {
+          return invalidRequest("tool_use name must be a non-empty string");
+        }
+        if (block.input !== undefined && !isPlainObject(block.input)) {
+          return invalidRequest("tool_use input must be an object");
+        }
+        const partId = this.session.createPartId();
+        this.openToolBlocks.set(index, { partId, callId: block.id, name: block.name, arguments: "" });
+        this.partIndexMap.set(index, partId);
+        return ok([
+          {
+            type: "part_start",
+            responseId: this.session.responseId,
+            partId,
+            part: { type: "function_call", callId: block.id, name: block.name },
+          },
+        ]);
+      }
+      if (block?.type === "server_tool_use") return failure(messagesServerToolUseFailure(block));
+      const hosted = messagesHostedBlockFailure(block);
+      if (hosted !== undefined) return failure(hosted);
       if (block?.type !== "text") {
-        return unsupportedCapability(block?.type === "tool_use" ? "function-tool-definition" : "unknown-content-item");
+        return unsupportedCapability("unknown-content-item");
       }
       if (block.signature !== undefined) {
         return unsupportedCapability("reasoning-signature");
@@ -167,13 +230,41 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "content_block_delta") {
-      const index = typeof chunk.index === "number" ? chunk.index : 0;
+      const indexRes = parseContentBlockIndex(chunk);
+      if (!indexRes.ok) return indexRes;
+      const index = indexRes.value;
+      const rawDelta = chunk.delta;
+      if (!isPlainObject(rawDelta)) {
+        return invalidRequest("content_block_delta requires delta object");
+      }
+      const delta = rawDelta as Record<string, unknown>;
+      if (delta?.type === "input_json_delta") {
+        const tool = this.openToolBlocks.get(index);
+        if (tool === undefined) {
+          return invalidRequest("input_json_delta received for unknown or non-tool index");
+        }
+        if (typeof delta.partial_json !== "string") {
+          return invalidRequest("input_json_delta partial_json must be a string");
+        }
+        const claimRes = this.budget.claim(delta.partial_json);
+        if (!claimRes.ok) return claimRes;
+        tool.arguments += delta.partial_json;
+        return ok([
+          {
+            type: "tool_arguments_delta",
+            responseId: this.session.responseId,
+            partId: tool.partId,
+            callId: tool.callId,
+            text: delta.partial_json,
+          },
+        ]);
+      }
+
       const partId = this.partIndexMap.get(index);
       if (partId === undefined) {
         return invalidRequest(`content_block_delta received for unknown index '${index}'`);
       }
 
-      const delta = chunk.delta as Record<string, unknown> | undefined;
       if (delta?.type !== "text_delta") {
         return unsupportedCapability("unknown-stream-event");
       }
@@ -190,7 +281,25 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "content_block_stop") {
-      const index = typeof chunk.index === "number" ? chunk.index : 0;
+      const indexRes = parseContentBlockIndex(chunk);
+      if (!indexRes.ok) return indexRes;
+      const index = indexRes.value;
+      const tool = this.openToolBlocks.get(index);
+      if (tool !== undefined) {
+        const parsed = parseFunctionArgumentsOnce(tool.arguments);
+        this.openToolBlocks.delete(index);
+        this.partIndexMap.delete(index);
+        return ok([
+          {
+            type: "part_end",
+            responseId: this.session.responseId,
+            partId: tool.partId,
+            partType: "function_call",
+            ...(parsed !== undefined ? { arguments: parsed } : {}),
+          },
+        ]);
+      }
+
       const partId = this.partIndexMap.get(index);
       if (partId === undefined) {
         return invalidRequest(`content_block_stop received for unknown index '${index}'`);
@@ -208,7 +317,11 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "message_delta") {
-      const delta = (chunk.delta ?? {}) as Record<string, unknown>;
+      const rawDelta = chunk.delta;
+      if (rawDelta !== undefined && !isPlainObject(rawDelta)) {
+        return invalidRequest("message_delta delta must be an object");
+      }
+      const delta = (rawDelta ?? {}) as Record<string, unknown>;
       const stopReason = delta.stop_reason;
 
       if (stopReason === "end_turn") {
@@ -218,7 +331,7 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       } else if (stopReason === "stop_sequence") {
         this.recordedFinish = "stop";
       } else if (stopReason === "tool_use") {
-        return unsupportedCapability("finish-tool-calls");
+        this.recordedFinish = "tool_calls";
       } else if (stopReason === "refusal") {
         return unsupportedCapability("refusal-content");
       } else if (stopReason === "model_context_window_exceeded") {
@@ -323,11 +436,14 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 export class MessagesClientStreamEncoder implements ClientStreamEncoder {
   readonly protocol = "anthropic-messages" as const;
   private readonly session: StreamSession;
+  private readonly budget: StreamToolArgumentsBudget;
+  private readonly deferredFunctionParts = new Map<string, { callId: string; name: string }>();
   private readonly partIndices = new Map<string, number>();
   private nextPartIndex = 0;
 
-  constructor(session: StreamSession) {
+  constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.session = session;
+    this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
   }
 
   /**
@@ -364,21 +480,38 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "part_start") {
-      const index = this.nextPartIndex++;
-      this.partIndices.set(event.partId, index);
-      frames.push({
-        event: "content_block_start",
-        data: JSON.stringify({
-          type: "content_block_start",
-          index,
-          content_block: { type: "text", text: "" },
-        }),
-      });
-      return ok(frames);
+      if (event.part.type === "function_call") {
+        this.deferredFunctionParts.set(event.partId, {
+          callId: event.part.callId,
+          name: event.part.name,
+        });
+        return ok([]);
+      }
+      if (event.part.type === "text") {
+        const index = this.nextPartIndex++;
+        this.partIndices.set(event.partId, index);
+        frames.push({
+          event: "content_block_start",
+          data: JSON.stringify({
+            type: "content_block_start",
+            index,
+            content_block: { type: "text", text: "" },
+          }),
+        });
+        return ok(frames);
+      }
+      return unsupportedCapability("unknown-stream-event");
+    }
+
+    if (event.type === "tool_arguments_delta") {
+      return ok([]);
     }
 
     if (event.type === "text_delta") {
-      const index = this.partIndices.get(event.partId) ?? 0;
+      const index = this.partIndices.get(event.partId);
+      if (index === undefined) {
+        return invalidRequest(`text_delta received for unknown partId '${event.partId}'`);
+      }
       frames.push({
         event: "content_block_delta",
         data: JSON.stringify({
@@ -391,7 +524,59 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "part_end") {
-      const index = this.partIndices.get(event.partId) ?? 0;
+      if (event.partType === "function_call") {
+        if (event.arguments === undefined) {
+          return invalidRequest("Streamed function call arguments did not parse to a valid JSON object");
+        }
+        const meta = this.deferredFunctionParts.get(event.partId);
+        if (meta === undefined) {
+          return invalidRequest(`part_end received for unknown function partId '${event.partId}'`);
+        }
+        const jsonStr = JSON.stringify(event.arguments);
+        const claimRes = this.budget.claim(jsonStr);
+        if (!claimRes.ok) return claimRes;
+        const index = this.nextPartIndex++;
+        this.partIndices.set(event.partId, index);
+        frames.push({
+          event: "content_block_start",
+          data: JSON.stringify({
+            type: "content_block_start",
+            index,
+            content_block: {
+              type: "tool_use",
+              id: meta.callId,
+              name: meta.name,
+              input: {},
+            },
+          }),
+        });
+        frames.push({
+          event: "content_block_delta",
+          data: JSON.stringify({
+            type: "content_block_delta",
+            index,
+            delta: {
+              type: "input_json_delta",
+              partial_json: jsonStr,
+            },
+          }),
+        });
+        frames.push({
+          event: "content_block_stop",
+          data: JSON.stringify({
+            type: "content_block_stop",
+            index,
+          }),
+        });
+        this.deferredFunctionParts.delete(event.partId);
+        this.partIndices.delete(event.partId);
+        return ok(frames);
+      }
+
+      const index = this.partIndices.get(event.partId);
+      if (index === undefined) {
+        return invalidRequest(`part_end received for unknown text partId '${event.partId}'`);
+      }
       this.partIndices.delete(event.partId);
       frames.push({
         event: "content_block_stop",

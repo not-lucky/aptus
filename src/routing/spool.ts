@@ -139,7 +139,7 @@ export async function spoolResponseBody(stream: ReadableStream<Uint8Array>): Pro
     }
 
     // In-memory body
-    const fullBytes = concatChunks(chunks, totalBytes);
+    const fullBytes = new Uint8Array(Buffer.concat(chunks as unknown as Buffer[], totalBytes));
     return createOwnedMemoryBody(fullBytes);
   } catch (error) {
     if (fileHandle !== undefined) {
@@ -152,17 +152,4 @@ export async function spoolResponseBody(stream: ReadableStream<Uint8Array>): Pro
   } finally {
     reader.releaseLock();
   }
-}
-
-/**
- * Concatenates an array of byte chunks into a single Uint8Array.
- */
-function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
 }

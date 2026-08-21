@@ -34,6 +34,243 @@ test.concurrent("messages stream request: decodes max_tokens and encodes message
   }
 });
 
+test.concurrent("messages stream decoder: streamed hosted blocks fail closed with exact capability IDs", () => {
+  const decoder = new MessagesProviderStreamDecoder(session);
+  decoder.push({
+    event: "message_start",
+    data: JSON.stringify({
+      type: "message_start",
+      message: { id: "msg_1", type: "message", role: "assistant", model: "claude-3-5-sonnet", content: [], usage: { input_tokens: 10, output_tokens: 1 } },
+    }),
+  });
+
+  const webSearchRes = decoder.push({
+    event: "content_block_start",
+    data: JSON.stringify({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "web_search_tool_result", tool_use_id: "srv_1", content: [] },
+    }),
+  });
+  assert.equal(webSearchRes.ok, false);
+  if (!webSearchRes.ok) {
+    assert.equal(webSearchRes.error.capability, "hosted-web-search");
+  }
+
+  const codeExecDecoder = new MessagesProviderStreamDecoder(session);
+  codeExecDecoder.push({
+    event: "message_start",
+    data: JSON.stringify({
+      type: "message_start",
+      message: { id: "msg_2", type: "message", role: "assistant", model: "claude-3-5-sonnet", content: [], usage: { input_tokens: 10, output_tokens: 1 } },
+    }),
+  });
+  const codeExecRes = codeExecDecoder.push({
+    event: "content_block_start",
+    data: JSON.stringify({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "code_execution_tool_result", tool_use_id: "srv_2", content: [] },
+    }),
+  });
+  assert.equal(codeExecRes.ok, false);
+  if (!codeExecRes.ok) {
+    assert.equal(codeExecRes.error.capability, "hosted-code-execution");
+  }
+});
+
+test.concurrent("messages stream encoder: fails on unknown part_start type", () => {
+  const encoder = new MessagesClientStreamEncoder(session);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
+  const res = encoder.encode({ type: "part_start", responseId: "resp_123", partId: "part_x", part: { type: "unknown_custom" as never } });
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.error.capability, "unknown-stream-event");
+  }
+});
+
+test.concurrent("messages stream encoder: fails with payload_too_large when serialized function arguments exceed limit", () => {
+  const encoder = new MessagesClientStreamEncoder(session);
+  encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
+  encoder.encode({ type: "part_start", responseId: "resp_123", partId: "part_fn", part: { type: "function_call", callId: "call_1", name: "big_fn" } });
+  const hugeString = "x".repeat(34 * 1024 * 1024);
+  const endRes = encoder.encode({ type: "part_end", responseId: "resp_123", partId: "part_fn", partType: "function_call", arguments: { data: hugeString } });
+  assert.equal(endRes.ok, false);
+  if (!endRes.ok) assert.equal(endRes.error.category, "payload_too_large");
+});
+
+test.concurrent("messages stream decoder: client tool arguments with encrypted_content key are admitted", () => {
+  const decoder = new MessagesProviderStreamDecoder(session);
+  const frames = [
+    { event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1", model: "claude-3-5" } }) },
+    {
+      event: "content_block_start",
+      data: JSON.stringify({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_m1", name: "decrypt", input: {} },
+      }),
+    },
+    {
+      event: "content_block_delta",
+      data: JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"encrypted_content":"c2VjcmV0"}' },
+      }),
+    },
+    { event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) },
+    { event: "message_delta", data: JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" } }) },
+    { event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
+  ];
+
+  const allEvents: IrStreamEvent[] = [];
+  for (const f of frames) {
+    const res = decoder.push(f);
+    assert.equal(res.ok, true);
+    if (res.ok) allEvents.push(...res.value);
+  }
+  const finishRes = decoder.finish();
+  assert.equal(finishRes.ok, true);
+
+  const endEvt = allEvents.find((e) => e.type === "part_end" && e.partType === "function_call");
+  assert.ok(endEvt);
+  if (endEvt?.type === "part_end" && endEvt.partType === "function_call") {
+    assert.deepEqual(endEvt.arguments, { encrypted_content: "c2VjcmV0" });
+  }
+});
+
+test.concurrent("messages stream decoder: rejects content block index reuse across stream lifecycle", () => {
+  const decoder = new MessagesProviderStreamDecoder(session);
+  decoder.push({ event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1" } }) });
+  decoder.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }) });
+  decoder.push({ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) });
+
+  // Reusing index 0 on a new block start must fail closed
+  const reuseRes = decoder.push({
+    event: "content_block_start",
+    data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+  });
+  assert.equal(reuseRes.ok, false);
+  if (!reuseRes.ok) {
+    assert.equal(reuseRes.error.category, "invalid_request");
+  }
+});
+
+test.concurrent("messages stream decoder: decodes tool_use and input_json_delta", () => {
+  const decoder = new MessagesProviderStreamDecoder(session);
+  const frames = [
+    { event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1", model: "claude-3-5" } }) },
+    { event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_m1", name: "get_weather", input: {} } }) },
+    { event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"city":' } }) },
+    { event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '"SF"}' } }) },
+    { event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) },
+    { event: "message_delta", data: JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" } }) },
+    { event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
+  ];
+
+  const allEvents: IrStreamEvent[] = [];
+  for (const f of frames) {
+    const res = decoder.push(f);
+    assert.equal(res.ok, true);
+    if (res.ok) allEvents.push(...res.value);
+  }
+  const finishRes = decoder.finish();
+  assert.equal(finishRes.ok, true);
+
+  const startEvt = allEvents.find((e) => e.type === "part_start" && e.part.type === "function_call");
+  assert.ok(startEvt);
+  if (startEvt?.type === "part_start" && startEvt.part.type === "function_call") {
+    assert.equal(startEvt.part.callId, "call_m1");
+    assert.equal(startEvt.part.name, "get_weather");
+  }
+
+  const deltaEvts = allEvents.filter((e) => e.type === "tool_arguments_delta");
+  assert.equal(deltaEvts.length, 2);
+
+  const endEvt = allEvents.find((e) => e.type === "part_end" && e.partType === "function_call");
+  assert.ok(endEvt);
+  if (endEvt?.type === "part_end" && endEvt.partType === "function_call") {
+    assert.deepEqual(endEvt.arguments, { city: "SF" });
+  }
+
+  const respEnd = allEvents.find((e) => e.type === "response_end");
+  assert.ok(respEnd);
+  if (respEnd?.type === "response_end") {
+    assert.equal(respEnd.finish.reason, "tool_calls");
+  }
+});
+
+test.concurrent("messages stream decoder: requires non-negative integer index on stream events", () => {
+  const decoder = new MessagesProviderStreamDecoder(session);
+  decoder.push({ event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1" } }) });
+  const invalidIndexRes = decoder.push({
+    event: "content_block_start",
+    data: JSON.stringify({ type: "content_block_start", index: "0" as unknown as number, content_block: { type: "text", text: "" } }),
+  });
+  assert.equal(invalidIndexRes.ok, false);
+  if (!invalidIndexRes.ok) {
+    assert.equal(invalidIndexRes.error.category, "invalid_request");
+  }
+});
+
+test.concurrent("messages stream encoder: defers tool part and emits atomic 3 frames on valid part_end, fails on invalid", () => {
+  const encoder = new MessagesClientStreamEncoder(session);
+  encoder.encode({ type: "response_start", responseId: "r1", model: "claude-3-5" });
+  const startRes = encoder.encode({
+    type: "part_start",
+    responseId: "r1",
+    partId: "p_fn",
+    part: { type: "function_call", callId: "c_1", name: "get_weather" },
+  });
+  assert.equal(startRes.ok, true);
+  assert.equal(startRes.value.length, 0); // deferred
+
+  const deltaRes = encoder.encode({
+    type: "tool_arguments_delta",
+    responseId: "r1",
+    partId: "p_fn",
+    callId: "c_1",
+    text: '{"city":"SF"}',
+  });
+  assert.equal(deltaRes.ok, true);
+  assert.equal(deltaRes.value.length, 0); // deferred
+
+  // Valid part_end
+  const endRes = encoder.encode({
+    type: "part_end",
+    responseId: "r1",
+    partId: "p_fn",
+    partType: "function_call",
+    arguments: { city: "SF" },
+  });
+  assert.equal(endRes.ok, true);
+  assert.equal(endRes.value.length, 3);
+  assert.equal(endRes.value[0]?.event, "content_block_start");
+  assert.equal(endRes.value[1]?.event, "content_block_delta");
+  assert.equal(endRes.value[2]?.event, "content_block_stop");
+
+  // Invalid part_end (no parsed arguments)
+  const encoderBad = new MessagesClientStreamEncoder(session);
+  encoderBad.encode({ type: "response_start", responseId: "r2", model: "claude-3-5" });
+  encoderBad.encode({
+    type: "part_start",
+    responseId: "r2",
+    partId: "p_bad",
+    part: { type: "function_call", callId: "c_2", name: "fn" },
+  });
+  const badEnd = encoderBad.encode({
+    type: "part_end",
+    responseId: "r2",
+    partId: "p_bad",
+    partType: "function_call",
+  });
+  assert.equal(badEnd.ok, false);
+  if (!badEnd.ok) {
+    assert.equal(badEnd.error.category, "invalid_request");
+  }
+});
+
 test.concurrent("messages stream decoder: consumes ping and aggregates cumulative usage", () => {
   const decoder = new MessagesProviderStreamDecoder(session);
 

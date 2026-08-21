@@ -1,5 +1,6 @@
 import { type Document, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
-import { jsonPointer, type StartupError, startupError } from "./errors.ts";
+import { jsonPointer, setPath } from "../domain/json.ts";
+import { type StartupError, startupError } from "./errors.ts";
 
 /**
  * Internal record of a discovered secret environment reference.
@@ -186,16 +187,4 @@ function isSecretPath(path: readonly (string | number)[]): boolean {
       typeof path[3] === "number" &&
       path[4] === "secret")
   );
-}
-
-/**
- * Overlays a value at `segments` inside a plain YAML-derived JavaScript object/array tree.
- */
-function setPath(target: unknown, segments: readonly (string | number)[], value: unknown): void {
-  let current = target as Record<string | number, unknown>;
-  const last = segments.length - 1;
-  for (let i = 0; i < last; i++) {
-    current = current[segments[i] as string | number] as Record<string | number, unknown>;
-  }
-  current[segments[last] as string | number] = value;
 }

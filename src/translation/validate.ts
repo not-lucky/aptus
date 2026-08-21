@@ -1,5 +1,5 @@
 import type { Result } from "../domain/contracts.ts";
-import { isPlainObject } from "../domain/json.ts";
+import { isPlainObject, jsonEqual } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { RequestWireOptions } from "./contracts.ts";
 import {
@@ -61,25 +61,10 @@ function validateFunctionCallArguments(
   if (!isPlainObject(parsed)) {
     return invalidRequest(`${context}: argumentsText must parse to a JSON object when arguments is present`);
   }
-  if (!jsonValuesEqual(call.arguments, parsed)) {
+  if (!jsonEqual(call.arguments, parsed)) {
     return invalidRequest(`${context}: arguments must deep-equal the parsed argumentsText object`);
   }
   return ok(undefined);
-}
-
-/** Compares JSON values without making object property order significant. */
-function jsonValuesEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (a === null || b === null || typeof a !== typeof b) return false;
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((value, index) => jsonValuesEqual(value, b[index]));
-  }
-  if (typeof a !== "object" || !isPlainObject(a) || !isPlainObject(b)) return false;
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  if (aKeys.length !== bKeys.length) return false;
-  return aKeys.every((key) => Object.hasOwn(b, key) && jsonValuesEqual(a[key], b[key]));
 }
 
 /** Validates one sampling control as a finite number within the IR range [0, 1]. */

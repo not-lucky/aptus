@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { Alias, parseAllDocuments, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
 import type { $ZodIssue } from "zod/v4/core";
 import type { Result } from "../domain/contracts.ts";
-import { jsonPointer, type StartupError, sortStartupErrors, startupError } from "./errors.ts";
+import { jsonPointer, segmentsFromPointer, setPath } from "../domain/json.ts";
+import { type StartupError, sortStartupErrors, startupError } from "./errors.ts";
 import { probeTraceRoot } from "./probe.ts";
 import { aptusConfigSchema } from "./schema.ts";
 import { resolveSecrets } from "./secrets.ts";
@@ -331,31 +332,6 @@ function deepestPath(
     });
   }
   return deepest;
-}
-
-/**
- * Parses an RFC 6901 JSON pointer string into unescaped path segments.
- */
-function segmentsFromPointer(pointer: string): readonly string[] {
-  if (pointer === "") {
-    return [];
-  }
-  return pointer
-    .slice(1)
-    .split("/")
-    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"));
-}
-
-/**
- * Sets a value at a specified path in a mutable object/array tree.
- */
-function setPath(target: unknown, segments: readonly (string | number)[], value: unknown): void {
-  let current = target as Record<string | number, unknown>;
-  const last = segments.length - 1;
-  for (let i = 0; i < last; i++) {
-    current = current[segments[i] as string | number] as Record<string | number, unknown>;
-  }
-  current[segments[last] as string | number] = value;
 }
 
 /**

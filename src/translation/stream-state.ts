@@ -1,4 +1,5 @@
 import type { Result } from "../domain/contracts.ts";
+import { isPlainObject } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { IrStreamEvent } from "./ir.ts";
 import { invalidRequest, ok, unsupportedCapability } from "./result.ts";
@@ -17,14 +18,14 @@ export interface IrStreamStateMachineOptions {
  * Validates the normative stream lifecycle and invariants for Private IR stream events.
  *
  * Lifecycle:
- * `response_start -> (part_start -> text_delta* -> part_end)* -> response_end`
+ * `response_start -> (part_start -> (text_delta | tool_arguments_delta)* -> part_end)* -> response_end`
  *
  * Invariants:
  * - Exactly one `response_start` first.
  * - Every `part_start` uses the stream `responseId` and an unused `partId`.
- * - In the plain-text streaming profile, only `{ type: "text" }` parts and `text_delta`s are admitted.
+ * - Admitted parts include text (`{ type: "text" }`) and function tools (`{ type: "function_call", callId, name }`).
  * - All open parts must be closed before `response_end`.
- * - Clean terminal is `response_end(stop|length)`.
+ * - Clean terminal is `response_end(stop|length|tool_calls)`.
  * - `error` is terminal and excludes `response_end`.
  * - No events permitted after terminal state.
  */
@@ -35,7 +36,9 @@ export class IrStreamStateMachine {
   private readonly expectedModel: string | undefined;
 
   private readonly seenPartIds = new Set<string>();
-  private readonly openParts = new Map<string, string>(); // partId -> partType
+  private readonly seenCallIds = new Set<string>();
+  private readonly openParts = new Map<string, { partType: string; callId?: string }>();
+  private closedFunctionPartCount = 0;
 
   constructor(options?: IrStreamStateMachineOptions) {
     this.expectedResponseId = options?.expectedResponseId;
@@ -118,7 +121,19 @@ export class IrStreamStateMachine {
         return unsupportedCapability("refusal-content");
       }
       if (event.part.type === "function_call") {
-        return unsupportedCapability("function-tool-definition");
+        if (typeof event.part.callId !== "string" || event.part.callId.trim() === "") {
+          return invalidRequest("part_start function_call must have a non-empty callId");
+        }
+        if (typeof event.part.name !== "string" || event.part.name.trim() === "") {
+          return invalidRequest("part_start function_call must have a non-empty name");
+        }
+        if (this.seenCallIds.has(event.part.callId)) {
+          return invalidRequest(`Duplicate callId '${event.part.callId}' across stream`);
+        }
+        this.seenPartIds.add(event.partId);
+        this.seenCallIds.add(event.part.callId);
+        this.openParts.set(event.partId, { partType: "function_call", callId: event.part.callId });
+        return ok(undefined);
       }
       if (event.part.type === "custom_call") {
         return unsupportedCapability("custom-tool-streaming");
@@ -129,18 +144,18 @@ export class IrStreamStateMachine {
       }
 
       this.seenPartIds.add(event.partId);
-      this.openParts.set(event.partId, event.part.type);
+      this.openParts.set(event.partId, { partType: "text" });
       return ok(undefined);
     }
 
     if (event.type === "text_delta") {
-      const partType = this.openParts.get(event.partId);
-      if (partType === undefined) {
+      const open = this.openParts.get(event.partId);
+      if (open === undefined) {
         return invalidRequest(`text_delta received for non-open or unknown partId '${event.partId}'`);
       }
 
-      if (partType !== "text") {
-        return invalidRequest(`text_delta received for partId '${event.partId}' of type '${partType}'`);
+      if (open.partType !== "text") {
+        return invalidRequest(`text_delta received for partId '${event.partId}' of type '${open.partType}'`);
       }
 
       if (typeof event.text !== "string") {
@@ -155,7 +170,26 @@ export class IrStreamStateMachine {
     }
 
     if (event.type === "tool_arguments_delta") {
-      return unsupportedCapability("tool-stream-delta");
+      const open = this.openParts.get(event.partId);
+      if (open === undefined) {
+        return invalidRequest(`tool_arguments_delta received for non-open or unknown partId '${event.partId}'`);
+      }
+
+      if (open.partType !== "function_call") {
+        return invalidRequest(`tool_arguments_delta received for non-function partId '${event.partId}'`);
+      }
+
+      if (event.callId !== open.callId) {
+        return invalidRequest(
+          `tool_arguments_delta callId '${event.callId}' does not match open part callId '${open.callId}'`,
+        );
+      }
+
+      if (typeof event.text !== "string") {
+        return invalidRequest("tool_arguments_delta text must be a string");
+      }
+
+      return ok(undefined);
     }
 
     if (event.type === "citation") {
@@ -163,13 +197,20 @@ export class IrStreamStateMachine {
     }
 
     if (event.type === "part_end") {
-      const partType = this.openParts.get(event.partId);
-      if (partType === undefined) {
+      const open = this.openParts.get(event.partId);
+      if (open === undefined) {
         return invalidRequest(`part_end received for non-open partId '${event.partId}'`);
       }
 
-      if (partType !== event.partType) {
-        return invalidRequest(`part_end partType '${event.partType}' does not match open part type '${partType}'`);
+      if (open.partType !== event.partType) {
+        return invalidRequest(`part_end partType '${event.partType}' does not match open part type '${open.partType}'`);
+      }
+
+      if (event.partType === "function_call") {
+        if (event.arguments !== undefined && !isPlainObject(event.arguments)) {
+          return invalidRequest("part_end function_call arguments must be a JSON object when present");
+        }
+        this.closedFunctionPartCount++;
       }
 
       this.openParts.delete(event.partId);
@@ -185,7 +226,11 @@ export class IrStreamStateMachine {
       // Finish reason gating
       const reason = event.finish.reason;
       if (reason === "tool_calls") {
-        return unsupportedCapability("finish-tool-calls");
+        if (this.closedFunctionPartCount === 0) {
+          return invalidRequest(
+            "response_end with tool_calls finish reason requires at least one completed function call part",
+          );
+        }
       }
       if (reason === "refusal") {
         return unsupportedCapability("refusal-content");
@@ -199,7 +244,7 @@ export class IrStreamStateMachine {
       if (reason === "other") {
         return unsupportedCapability("finish-other-unknown");
       }
-      if (reason !== "stop" && reason !== "length") {
+      if (reason !== "stop" && reason !== "length" && reason !== "tool_calls") {
         return invalidRequest(`Unrecognized finish reason '${String(reason)}'`);
       }
 
