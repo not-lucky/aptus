@@ -113,7 +113,9 @@ test.concurrent("retention scheduler executes periodic passes and stops cleanly"
     },
   });
 
-  await waitForCondition(() => !readdirSync(root).includes("2026-08-01T00-00-00.000+0000_11111111-1111-4111-8111-111111111111"));
+  await waitForCondition(
+    () => !readdirSync(root).includes("2026-08-01T00-00-00.000+0000_11111111-1111-4111-8111-111111111111"),
+  );
   scheduler.stop();
 
   assert.equal(degraded, false);

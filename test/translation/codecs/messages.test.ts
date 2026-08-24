@@ -45,17 +45,31 @@ test.concurrent("translation codec messages: rejects mid_conv_system role as mid
   }
 });
 
-test.concurrent("translation codec messages: rejects output_config as structured-json-schema", () => {
+test.concurrent("translation codec messages: decodes output_config or rejects non-json_schema as structured-json-schema", () => {
   const decoder = new MessagesIngressDecoder();
   const decodeRes = decoder.decodeRequest({
     model: "claude-3-7-sonnet",
     max_tokens: 1024,
     messages: [{ role: "user", content: "Hello!" }],
-    output_config: { format: { type: "json_schema" } },
+    output_config: { format: { type: "unsupported_type", schema: {} } },
   });
   assert.equal(decodeRes.ok, false);
   if (!decodeRes.ok) {
     assert.equal(decodeRes.error.capability, "structured-json-schema");
+  }
+
+  const validRes = decoder.decodeRequest({
+    model: "claude-3-7-sonnet",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "Hello!" }],
+    output_config: { format: { type: "json_schema", schema: { type: "object" } } },
+  });
+  assert.equal(validRes.ok, true);
+  if (validRes.ok) {
+    assert.deepEqual(validRes.value.irRequest.output, {
+      type: "json_schema",
+      schema: { type: "object" },
+    });
   }
 });
 
@@ -117,7 +131,13 @@ test.concurrent("translation codec messages: decodes and encodes outcome", () =>
 
     const encoded = encoder.encodeOutcome(outcome);
     assert.equal(encoded.status, 200);
-    const body = encoded.body as { id: string; type: string; content: Array<{ text: string }>; stop_reason: string; usage: { input_tokens: number } };
+    const body = encoded.body as {
+      id: string;
+      type: string;
+      content: Array<{ text: string }>;
+      stop_reason: string;
+      usage: { input_tokens: number };
+    };
     assert.equal(body.id, "msg_12345");
     assert.equal(body.type, "message");
     assert.equal(body.content[0]?.text, "Hello from Claude!");

@@ -90,14 +90,11 @@ test.concurrent("process: both path aliases per protocol aggregate into one endp
       /aptus_http_requests_total\{endpoint_protocol="anthropic-messages",endpoint="messages",outcome_category="complete",stream="false"\} 2/,
     ];
     let text = "";
-    await waitFor(
-      async () => {
-        const response = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
-        text = await response.text();
-        return endpointSeries.every((pattern) => pattern.test(text));
-      },
-      "three endpoint series with complete counts",
-    );
+    await waitFor(async () => {
+      const response = await fetch(`http://127.0.0.1:${cli.operationsPort}/metrics`);
+      text = await response.text();
+      return endpointSeries.every((pattern) => pattern.test(text));
+    }, "three endpoint series with complete counts");
     const series = text.split("\n").filter((line) => line.startsWith("aptus_http_requests_total"));
     assert.equal(series.length, 3, `expected exactly 3 endpoint series:\n${series.join("\n")}`);
     assert.match(text, endpointSeries[0]!);

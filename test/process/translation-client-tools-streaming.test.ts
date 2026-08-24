@@ -296,31 +296,31 @@ test.concurrent("process: M->R two parallel interleaved function calls streaming
   try {
     const twoCallResponsesStream = new TextEncoder().encode(
       [
-        'event: response.created',
+        "event: response.created",
         'data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_two"}}',
-        '',
-        'event: response.output_item.added',
+        "",
+        "event: response.output_item.added",
         'data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"item_0","call_id":"call_loc","name":"get_weather"}}',
-        '',
-        'event: response.output_item.added',
+        "",
+        "event: response.output_item.added",
         'data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"function_call","id":"item_1","call_id":"call_time","name":"get_time"}}',
-        '',
-        'event: response.function_call_arguments.delta',
+        "",
+        "event: response.function_call_arguments.delta",
         'data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"item_0","output_index":0,"delta":"{\\"city\\":\\"Paris\\"}"}',
-        '',
-        'event: response.function_call_arguments.delta',
+        "",
+        "event: response.function_call_arguments.delta",
         'data: {"type":"response.function_call_arguments.delta","sequence_number":5,"item_id":"item_1","output_index":1,"delta":"{\\"tz\\":\\"UTC\\"}"}',
-        '',
-        'event: response.output_item.done',
+        "",
+        "event: response.output_item.done",
         'data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"type":"function_call","id":"item_0","call_id":"call_loc","name":"get_weather"}}',
-        '',
-        'event: response.output_item.done',
+        "",
+        "event: response.output_item.done",
         'data: {"type":"response.output_item.done","sequence_number":7,"output_index":1,"item":{"type":"function_call","id":"item_1","call_id":"call_time","name":"get_time"}}',
-        '',
-        'event: response.completed',
+        "",
+        "event: response.completed",
         'data: {"type":"response.completed","sequence_number":8,"response":{"id":"resp_two","status":"completed","output":[]}}',
-        '',
-        '',
+        "",
+        "",
       ].join("\n"),
     );
 
@@ -363,7 +363,6 @@ test.concurrent("process: M->R two parallel interleaved function calls streaming
     await harness.closeAll();
   }
 });
-
 
 test.concurrent("process: interrupted tool stream closes without success terminator", async () => {
   const harness = await createThreeOriginHarness();
@@ -703,7 +702,11 @@ test.concurrent("process: invalid JSON stream fail-closes into M and discards 01
 
     await waitFor(() => traceFiles(cli.traceRoot).includes("999_terminal.json"), "terminal trace write");
     const files = traceFiles(cli.traceRoot);
-    assert.equal(files.includes("012_client_stream.sse"), false, "012_client_stream.sse must be discarded on mid-stream failure");
+    assert.equal(
+      files.includes("012_client_stream.sse"),
+      false,
+      "012_client_stream.sse must be discarded on mid-stream failure",
+    );
   } finally {
     await cli.stop();
     await harness.closeAll();

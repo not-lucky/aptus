@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import { responsesTextConfig } from "../shared/output-format.ts";
 import { responsesToolFields } from "../shared/tool-fields.ts";
 import {
   buildResponsesInput,
@@ -44,6 +45,7 @@ export class ResponsesEgressEncoder implements EgressEncoder {
       input,
       stream: false,
       ...responsesGenerationFields(request.generation),
+      ...responsesTextConfig(request.generation, request.output, requestWireOptions),
       ...chatResponsesRequestFields(requestWireOptions),
       ...responsesToolFields(request, requestWireOptions),
     };

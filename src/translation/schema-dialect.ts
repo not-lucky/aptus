@@ -102,6 +102,10 @@ export function validateMessagesStrictSchema(schema: JsonObject): Result<void, N
   return ok(undefined);
 }
 
+function escapePointer(segment: string): string {
+  return segment.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
 /**
  * OpenAI strict mode (Chat and Responses) honors a documented JSON Schema
  * subset: an object root without anyOf/oneOf, every object node closed with
@@ -110,55 +114,60 @@ export function validateMessagesStrictSchema(schema: JsonObject): Result<void, N
  * best-effort generation, which strict mode must never do, so preflight
  * rejects them.
  */
-export function validateOpenAiStrictSchema(schema: JsonObject): Result<void, NormalizedFailure> {
+export function validateOpenAiStrictSchema(
+  schema: JsonObject,
+  capability = "function-schema-strictness",
+): Result<void, NormalizedFailure> {
   if (schema.type !== "object") {
-    return unsupportedCapability("function-schema-strictness");
+    return unsupportedCapability(capability, "/: root type must be object");
   }
   if (JSON.stringify(schema).length > OPENAI_STRICT_MAX_CHARS) {
-    return unsupportedCapability("function-schema-strictness");
+    return unsupportedCapability(capability, "/: schema exceeds 120000 characters");
   }
   const counters = { properties: 0, enumValues: 0 };
-  if (!walkOpenAiStrictNode(schema, 1, counters)) {
-    return unsupportedCapability("function-schema-strictness");
+  const violation = walkOpenAiStrictNode(schema, "", 1, counters);
+  if (violation !== undefined) {
+    return unsupportedCapability(capability, violation);
   }
   return ok(undefined);
 }
 
 function walkOpenAiStrictNode(
   node: JsonObject,
+  pointer: string,
   depth: number,
   counters: { properties: number; enumValues: number },
-): boolean {
+): string | undefined {
   if (depth > OPENAI_STRICT_MAX_DEPTH) {
-    return false;
+    return `${pointer === "" ? "/" : pointer}: nesting depth limit exceeded`;
   }
   const enumValues = node.enum;
   if (enumValues !== undefined && !Array.isArray(enumValues)) {
     // Present-but-malformed `enum` cannot be proven honored under a strict
     // guarantee, so it rejects instead of passing unvalidated.
-    return false;
+    return `${pointer}/enum: enum must be an array`;
   }
   if (Array.isArray(enumValues)) {
     counters.enumValues += enumValues.length;
     if (counters.enumValues > OPENAI_STRICT_MAX_ENUM_VALUES) {
-      return false;
+      return `${pointer}/enum: enum values limit exceeded`;
     }
   }
   for (const key of OPENAI_STRICT_FORBIDDEN_KEYWORDS) {
     if (node[key] !== undefined) {
-      return false;
+      return `${pointer}/${escapePointer(key)}: ${key}`;
     }
   }
   const properties = isPlainObject(node.properties) ? node.properties : undefined;
   const isObjectNode = node.type === "object" || properties !== undefined;
   if (isObjectNode) {
     if (node.additionalProperties !== false) {
-      return false;
+      return `${pointer}/additionalProperties: additionalProperties must be false`;
     }
     const names = properties === undefined ? [] : Object.keys(properties);
     counters.properties += names.length;
     if (counters.properties > OPENAI_STRICT_MAX_PROPERTIES) {
-      return false;
+      return `${pointer}/properties: property count limit exceeded`;
     }
     const required = node.required;
     if (
@@ -166,7 +175,7 @@ function walkOpenAiStrictNode(
       required.length !== names.length ||
       !names.every((name) => required.includes(name))
     ) {
-      return false;
+      return `${pointer}/required: required must list all property names`;
     }
   }
   const nextDepth = depth + 1;
@@ -177,19 +186,85 @@ function walkOpenAiStrictNode(
     // strings, numbers) have no strict-subset spelling; any present-but-
     // unusable value rejects rather than passing unvalidated.
     if (key === "additionalProperties" && child === false) continue;
-    if (!isPlainObject(child)) return false;
+    if (!isPlainObject(child)) {
+      return `${pointer}/${escapePointer(key)}: ${key} must be an object`;
+    }
     // `properties` and `$defs` are bags of named child nodes; `items` and a
     // schema-valued `additionalProperties` are single nodes.
     if (key === "properties" || key === "$defs") {
-      for (const value of Object.values(child)) {
-        if (!isPlainObject(value)) return false;
-        if (!walkOpenAiStrictNode(value, nextDepth, counters)) {
-          return false;
+      const childKeys = Object.keys(child).sort();
+      for (const childKey of childKeys) {
+        const value = child[childKey];
+        const childPointer = `${pointer}/${escapePointer(key)}/${escapePointer(childKey)}`;
+        if (!isPlainObject(value)) {
+          return `${childPointer}: schema must be an object`;
+        }
+        const violation = walkOpenAiStrictNode(value, childPointer, nextDepth, counters);
+        if (violation !== undefined) {
+          return violation;
         }
       }
-    } else if (!walkOpenAiStrictNode(child, nextDepth, counters)) {
-      return false;
+    } else {
+      const childPointer = `${pointer}/${escapePointer(key)}`;
+      const violation = walkOpenAiStrictNode(child, childPointer, nextDepth, counters);
+      if (violation !== undefined) {
+        return violation;
+      }
     }
   }
-  return true;
+  return undefined;
+}
+
+const MESSAGES_OUTPUT_ALLOWED_KEYWORDS: ReadonlyArray<string> = ["type", "properties", "required"];
+
+/**
+ * Validates a schema against the Anthropic Messages structured output subset.
+ * M documents no dialect and no strict guarantee, so preflight admits only
+ * object roots whose nodes stay within {type, properties, required} with depth <= 10.
+ */
+export function validateMessagesOutputSchema(
+  schema: JsonObject,
+  capability = "structured-json-schema",
+): Result<void, NormalizedFailure> {
+  if (schema.type !== "object") {
+    return unsupportedCapability(capability, "/: root type must be object");
+  }
+  const violation = walkMessagesOutputNode(schema, "", 1);
+  if (violation !== undefined) {
+    return unsupportedCapability(capability, violation);
+  }
+  return ok(undefined);
+}
+
+function walkMessagesOutputNode(node: JsonObject, pointer: string, depth: number): string | undefined {
+  if (depth > OPENAI_STRICT_MAX_DEPTH) {
+    return `${pointer === "" ? "/" : pointer}: nesting depth limit exceeded`;
+  }
+  const sortedKeys = Object.keys(node).sort();
+  for (const key of sortedKeys) {
+    if (!MESSAGES_OUTPUT_ALLOWED_KEYWORDS.includes(key)) {
+      return `${pointer}/${escapePointer(key)}: ${key}`;
+    }
+  }
+  if (node.required !== undefined && !isArrayOfStrings(node.required)) {
+    return `${pointer}/required: required must be an array of strings`;
+  }
+  if (node.properties !== undefined) {
+    if (!isPlainObject(node.properties)) {
+      return `${pointer}/properties: properties must be an object`;
+    }
+    const propKeys = Object.keys(node.properties).sort();
+    for (const propKey of propKeys) {
+      const val = node.properties[propKey];
+      const childPointer = `${pointer}/properties/${escapePointer(propKey)}`;
+      if (!isPlainObject(val)) {
+        return `${childPointer}: schema must be an object`;
+      }
+      const violation = walkMessagesOutputNode(val, childPointer, depth + 1);
+      if (violation !== undefined) {
+        return violation;
+      }
+    }
+  }
+  return undefined;
 }

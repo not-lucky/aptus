@@ -15,6 +15,7 @@ import type {
   IrInputPart,
   IrItem,
   IrOutcome,
+  IrOutputFormat,
   IrOutputPart,
   IrRequest,
   IrTool,
@@ -24,6 +25,7 @@ import type {
 } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import {
+  CHAT_TOOL_NAME_REGEX,
   firstUnknownKey,
   parseCustomCallInput,
   parseGrammarFields,
@@ -315,6 +317,8 @@ export function parseResponsesRequestBody(
     return unsupportedCapability("truncation-policy");
   }
 
+  let output: IrOutputFormat | undefined;
+  let legacyJsonObject: boolean | undefined;
   const textConfig = body.text as Record<string, unknown> | undefined;
   if (textConfig !== undefined) {
     if (typeof textConfig !== "object" || textConfig === null || Array.isArray(textConfig)) {
@@ -323,7 +327,55 @@ export function parseResponsesRequestBody(
     const extra = firstUnknownKey(textConfig, ["format", "verbosity"]);
     if (extra !== undefined) return invalidRequest(`text.${extra} is not recognized`);
     if (textConfig.format !== undefined) {
-      return unsupportedCapability("structured-json-schema");
+      const format = textConfig.format;
+      if (typeof format !== "object" || format === null || Array.isArray(format)) {
+        return invalidRequest("text.format must be an object");
+      }
+      const fmtObj = format as Record<string, unknown>;
+      const type = fmtObj.type;
+      if (type === "text") {
+        const fmtExtra = firstUnknownKey(fmtObj, ["type"]);
+        if (fmtExtra !== undefined) return invalidRequest(`text.format.${fmtExtra} is not recognized`);
+        output = { type: "text" };
+      } else if (type === "json_object") {
+        const fmtExtra = firstUnknownKey(fmtObj, ["type"]);
+        if (fmtExtra !== undefined) return invalidRequest(`text.format.${fmtExtra} is not recognized`);
+        legacyJsonObject = true;
+      } else if (type === "json_schema") {
+        const fmtExtra = firstUnknownKey(fmtObj, ["type", "name", "schema", "description", "strict"]);
+        if (fmtExtra !== undefined) return invalidRequest(`text.format.${fmtExtra} is not recognized`);
+        const name = fmtObj.name;
+        if (typeof name !== "string" || !CHAT_TOOL_NAME_REGEX.test(name)) {
+          return invalidRequest(`text.format.name must match ${CHAT_TOOL_NAME_REGEX}`);
+        }
+        const schema = fmtObj.schema;
+        if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+          return invalidRequest("text.format.schema must be an object");
+        }
+        let description: string | undefined;
+        if (fmtObj.description !== undefined) {
+          if (typeof fmtObj.description !== "string") {
+            return invalidRequest("text.format.description must be a string");
+          }
+          description = fmtObj.description;
+        }
+        let strict: boolean | undefined;
+        if (fmtObj.strict !== undefined) {
+          if (typeof fmtObj.strict !== "boolean") {
+            return invalidRequest("text.format.strict must be a boolean");
+          }
+          strict = fmtObj.strict;
+        }
+        output = {
+          type: "json_schema",
+          schema: schema as JsonObject,
+          name,
+          ...(description !== undefined ? { description } : {}),
+          ...(strict !== undefined ? { strict } : {}),
+        };
+      } else {
+        return invalidRequest(`text.format.type '${String(type)}' is not recognized`);
+      }
     }
   }
 
@@ -339,6 +391,9 @@ export function parseResponsesRequestBody(
   const sidecarResult = parseChatResponsesWireOptions(body);
   if (!sidecarResult.ok) return sidecarResult;
   let wireOptions = sidecarResult.value;
+  if (legacyJsonObject === true) {
+    wireOptions = { ...wireOptions, legacyJsonObject: true };
+  }
 
   // ---- Client tool surfaces (definitions, choice, parallelism) ----
   const toolsResult = parseToolArray(body.tools, "tools", RESPONSES_TOOL_SPEC);
@@ -633,6 +688,7 @@ export function parseResponsesRequestBody(
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { toolChoice } : {}),
     ...(parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
+    ...(output !== undefined ? { output } : {}),
   };
 
   return ok({ irRequest, requestWireOptions: wireOptions });

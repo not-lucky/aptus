@@ -1,6 +1,7 @@
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
+import { chatOutputFormatFields } from "../shared/output-format.ts";
 import { chatToolFields } from "../shared/tool-fields.ts";
 import {
   buildChatMessages,
@@ -44,6 +45,7 @@ export class ChatEgressEncoder implements EgressEncoder {
       ...chatGenerationFields(request.generation),
       ...chatResponsesRequestFields(requestWireOptions),
       ...chatToolFields(request, requestWireOptions),
+      ...chatOutputFormatFields(request.output, requestWireOptions),
     };
   }
 

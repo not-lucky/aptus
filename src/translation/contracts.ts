@@ -97,6 +97,8 @@ export interface RequestWireOptions {
    * preflight.
    */
   readonly toolAllowedCallers?: ReadonlyArray<string>;
+  /** `legacy-json-object`: legacy JSON-object mode (C↔R only). */
+  readonly legacyJsonObject?: boolean;
 }
 
 /**

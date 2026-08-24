@@ -268,12 +268,58 @@ test.concurrent("responses stream decoder: output_index correlation fallback wor
 test.concurrent("responses stream decoder: decodes function tool calls and item correlation", () => {
   const decoder = new ResponsesProviderStreamDecoder(session);
   const frames = [
-    { event: "response.created", data: JSON.stringify({ type: "response.created", sequence_number: 1, response: { id: "r1" } }) },
-    { event: "response.output_item.added", data: JSON.stringify({ type: "response.output_item.added", sequence_number: 2, item: { type: "function_call", id: "fc1", call_id: "call_1", name: "get_weather", arguments: "" } }) },
-    { event: "response.function_call_arguments.delta", data: JSON.stringify({ type: "response.function_call_arguments.delta", sequence_number: 3, item_id: "fc1", delta: '{"loc":' }) },
-    { event: "response.function_call_arguments.delta", data: JSON.stringify({ type: "response.function_call_arguments.delta", sequence_number: 4, item_id: "fc1", delta: '"Tokyo"}' }) },
-    { event: "response.output_item.done", data: JSON.stringify({ type: "response.output_item.done", sequence_number: 5, item: { type: "function_call", id: "fc1", call_id: "call_1", name: "get_weather" } }) },
-    { event: "response.completed", data: JSON.stringify({ type: "response.completed", sequence_number: 6, response: { id: "r1", status: "completed", output: [{ type: "function_call", id: "fc1", call_id: "call_1", name: "get_weather", arguments: '{"loc":"Tokyo"}' }] } }) },
+    {
+      event: "response.created",
+      data: JSON.stringify({ type: "response.created", sequence_number: 1, response: { id: "r1" } }),
+    },
+    {
+      event: "response.output_item.added",
+      data: JSON.stringify({
+        type: "response.output_item.added",
+        sequence_number: 2,
+        item: { type: "function_call", id: "fc1", call_id: "call_1", name: "get_weather", arguments: "" },
+      }),
+    },
+    {
+      event: "response.function_call_arguments.delta",
+      data: JSON.stringify({
+        type: "response.function_call_arguments.delta",
+        sequence_number: 3,
+        item_id: "fc1",
+        delta: '{"loc":',
+      }),
+    },
+    {
+      event: "response.function_call_arguments.delta",
+      data: JSON.stringify({
+        type: "response.function_call_arguments.delta",
+        sequence_number: 4,
+        item_id: "fc1",
+        delta: '"Tokyo"}',
+      }),
+    },
+    {
+      event: "response.output_item.done",
+      data: JSON.stringify({
+        type: "response.output_item.done",
+        sequence_number: 5,
+        item: { type: "function_call", id: "fc1", call_id: "call_1", name: "get_weather" },
+      }),
+    },
+    {
+      event: "response.completed",
+      data: JSON.stringify({
+        type: "response.completed",
+        sequence_number: 6,
+        response: {
+          id: "r1",
+          status: "completed",
+          output: [
+            { type: "function_call", id: "fc1", call_id: "call_1", name: "get_weather", arguments: '{"loc":"Tokyo"}' },
+          ],
+        },
+      }),
+    },
   ];
 
   const allEvents: IrStreamEvent[] = [];

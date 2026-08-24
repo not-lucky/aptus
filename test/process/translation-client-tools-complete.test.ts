@@ -105,7 +105,9 @@ function startTranslationCli(harness: ThreeOriginHarness, caseName: string): Pro
 }
 
 function traceDirectories(traceRoot: string): string[] {
-  return readdirSync(traceRoot).filter((n) => !n.startsWith(".")).sort();
+  return readdirSync(traceRoot)
+    .filter((n) => !n.startsWith("."))
+    .sort();
 }
 
 function parsedTargetBody(origin: { lastRequest(): { readonly body: Uint8Array } | undefined }): unknown {
@@ -144,8 +146,22 @@ const RESPONSES_TOOLS_OUTCOME = {
   status: "completed",
   model: "gpt-5.4",
   output: [
-    { type: "function_call", id: "fc_a", call_id: "call_a", name: "get_weather", arguments: '{"city":"SF"}', status: "completed" },
-    { type: "function_call", id: "fc_b", call_id: "call_b", name: "get_time", arguments: '{"tz":"PST"}', status: "completed" },
+    {
+      type: "function_call",
+      id: "fc_a",
+      call_id: "call_a",
+      name: "get_weather",
+      arguments: '{"city":"SF"}',
+      status: "completed",
+    },
+    {
+      type: "function_call",
+      id: "fc_b",
+      call_id: "call_b",
+      name: "get_time",
+      arguments: '{"tz":"PST"}',
+      status: "completed",
+    },
   ],
   usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
 };
@@ -172,11 +188,28 @@ const CHAT_CLIENT_REQUEST = {
   model: "route-c-to-r",
   messages: [
     { role: "user", content: "What's the weather?" },
-    { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"city":"SF"}' } }] },
+    {
+      role: "assistant",
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"city":"SF"}' } }],
+    },
     { role: "tool", tool_call_id: "call_1", content: "72F sunny" },
     { role: "user", content: "Thanks!" },
   ],
-  tools: [{ type: "function", function: { name: "get_weather", description: "Get weather", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"], additionalProperties: false } } }],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+          required: ["city"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ],
 };
 
 const RESPONSES_CLIENT_REQUEST = {
@@ -187,7 +220,20 @@ const RESPONSES_CLIENT_REQUEST = {
     { type: "function_call_output", call_id: "call_1", output: "72F sunny" },
     { type: "message", role: "user", content: [{ type: "input_text", text: "Thanks!" }] },
   ],
-  tools: [{ type: "function", name: "get_weather", description: "Get weather", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"], additionalProperties: false }, strict: false }],
+  tools: [
+    {
+      type: "function",
+      name: "get_weather",
+      description: "Get weather",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+        additionalProperties: false,
+      },
+      strict: false,
+    },
+  ],
 };
 
 const MESSAGES_CLIENT_REQUEST = {
@@ -196,9 +242,26 @@ const MESSAGES_CLIENT_REQUEST = {
   messages: [
     { role: "user", content: [{ type: "text", text: "What's the weather?" }] },
     { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "SF" } }] },
-    { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "72F sunny" }, { type: "text", text: "Thanks!" }] },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "call_1", content: "72F sunny" },
+        { type: "text", text: "Thanks!" },
+      ],
+    },
   ],
-  tools: [{ name: "get_weather", description: "Get weather", input_schema: { type: "object", properties: { city: { type: "string" } }, required: ["city"], additionalProperties: false } }],
+  tools: [
+    {
+      name: "get_weather",
+      description: "Get weather",
+      input_schema: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+        additionalProperties: false,
+      },
+    },
+  ],
 };
 
 test.concurrent("process: complete function loop c->r emits exact target request and outcome", async () => {
@@ -207,13 +270,22 @@ test.concurrent("process: complete function loop c->r emits exact target request
   const cli = await startTranslationCli(harness, "c-to-r");
   try {
     harness.responsesOrigin.enqueue({ status: 200, body: RESPONSES_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/chat/completions", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify({ ...CHAT_CLIENT_REQUEST, model: "route-c-to-r" }));
+    const res = await postJson(
+      cli.clientPort,
+      "/chat/completions",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify({ ...CHAT_CLIENT_REQUEST, model: "route-c-to-r" }),
+    );
     assert.equal(res.status, 200);
     const target = parsedTargetBody(harness.responsesOrigin) as Record<string, unknown>;
     assert.equal(target.model, "gpt-5.4");
     assert.ok(Array.isArray(target.input));
     assert.ok(Array.isArray(target.tools));
-    const body = (await res.json()) as { object: string; choices: Array<{ message: { tool_calls?: unknown[] }; finish_reason: string }>; usage: unknown };
+    const body = (await res.json()) as {
+      object: string;
+      choices: Array<{ message: { tool_calls?: unknown[] }; finish_reason: string }>;
+      usage: unknown;
+    };
     assert.equal(body.object, "chat.completion");
     assert.equal(body.choices[0]?.finish_reason, "tool_calls");
     assert.ok(Array.isArray(body.choices[0]?.message.tool_calls) && body.choices[0]?.message.tool_calls?.length === 2);
@@ -229,7 +301,12 @@ test.concurrent("process: complete function loop c->m emits exact target request
   const cli = await startTranslationCli(harness, "c-to-m");
   try {
     harness.messagesOrigin.enqueue({ status: 200, body: MESSAGES_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/chat/completions", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify({ ...CHAT_CLIENT_REQUEST, model: "route-c-to-m" }));
+    const res = await postJson(
+      cli.clientPort,
+      "/chat/completions",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify({ ...CHAT_CLIENT_REQUEST, model: "route-c-to-m" }),
+    );
     assert.equal(res.status, 200);
     const target = parsedTargetBody(harness.messagesOrigin) as Record<string, unknown>;
     assert.equal(target.model, "claude-opus-4-1");
@@ -249,7 +326,17 @@ test.concurrent("process: complete function loop r->c emits exact target request
   const cli = await startTranslationCli(harness, "r-to-c");
   try {
     harness.chatOrigin.enqueue({ status: 200, body: CHAT_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/responses", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, model: "route-r-to-c", input: RESPONSES_CLIENT_REQUEST.input, tools: RESPONSES_CLIENT_REQUEST.tools }));
+    const res = await postJson(
+      cli.clientPort,
+      "/responses",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify({
+        ...MINIMAL_RESPONSES_REQUEST,
+        model: "route-r-to-c",
+        input: RESPONSES_CLIENT_REQUEST.input,
+        tools: RESPONSES_CLIENT_REQUEST.tools,
+      }),
+    );
     assert.equal(res.status, 200);
     const target = parsedTargetBody(harness.chatOrigin) as Record<string, unknown>;
     assert.equal(target.model, "gpt-5.4");
@@ -268,7 +355,17 @@ test.concurrent("process: complete function loop r->m emits exact target request
   const cli = await startTranslationCli(harness, "r-to-m");
   try {
     harness.messagesOrigin.enqueue({ status: 200, body: MESSAGES_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/responses", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify({ ...MINIMAL_RESPONSES_REQUEST, model: "route-r-to-m", input: RESPONSES_CLIENT_REQUEST.input, tools: RESPONSES_CLIENT_REQUEST.tools }));
+    const res = await postJson(
+      cli.clientPort,
+      "/responses",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify({
+        ...MINIMAL_RESPONSES_REQUEST,
+        model: "route-r-to-m",
+        input: RESPONSES_CLIENT_REQUEST.input,
+        tools: RESPONSES_CLIENT_REQUEST.tools,
+      }),
+    );
     assert.equal(res.status, 200);
     const target = parsedTargetBody(harness.messagesOrigin) as Record<string, unknown>;
     assert.equal(target.model, "claude-opus-4-1");
@@ -286,7 +383,12 @@ test.concurrent("process: complete function loop m->c emits exact target request
   const cli = await startTranslationCli(harness, "m-to-c");
   try {
     harness.chatOrigin.enqueue({ status: 200, body: CHAT_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/v1/messages", { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string }, JSON.stringify({ ...MESSAGES_CLIENT_REQUEST, model: "route-m-to-c" }));
+    const res = await postJson(
+      cli.clientPort,
+      "/v1/messages",
+      { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string },
+      JSON.stringify({ ...MESSAGES_CLIENT_REQUEST, model: "route-m-to-c" }),
+    );
     assert.equal(res.status, 200);
     const target = parsedTargetBody(harness.chatOrigin) as Record<string, unknown>;
     assert.equal(target.model, "gpt-5.4");
@@ -305,7 +407,12 @@ test.concurrent("process: complete function loop m->r emits exact target request
   const cli = await startTranslationCli(harness, "m-to-r");
   try {
     harness.responsesOrigin.enqueue({ status: 200, body: RESPONSES_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/v1/messages", { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string }, JSON.stringify({ ...MESSAGES_CLIENT_REQUEST, model: "route-m-to-r" }));
+    const res = await postJson(
+      cli.clientPort,
+      "/v1/messages",
+      { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string },
+      JSON.stringify({ ...MESSAGES_CLIENT_REQUEST, model: "route-m-to-r" }),
+    );
     assert.equal(res.status, 200);
     const target = parsedTargetBody(harness.responsesOrigin) as Record<string, unknown>;
     assert.equal(target.model, "gpt-5.4");
@@ -323,7 +430,12 @@ test.concurrent("process: worked example function-loop records exact trace stage
   const cli = await startTranslationCli(harness, "worked-tools");
   try {
     harness.messagesOrigin.enqueue({ status: 200, body: MESSAGES_TOOLS_BYTES });
-    const res = await postJson(cli.clientPort, "/chat/completions", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify({ ...CHAT_CLIENT_REQUEST, model: "route-c-to-m" }));
+    const res = await postJson(
+      cli.clientPort,
+      "/chat/completions",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify({ ...CHAT_CLIENT_REQUEST, model: "route-c-to-m" }),
+    );
     assert.equal(res.status, 200);
     const traceDir = traceDirectories(cli.traceRoot)[0];
     assert.ok(traceDir, "trace directory should exist");
@@ -373,12 +485,40 @@ test.concurrent("process: invalid function JSON into M rejects before dispatch",
       model: "route-c-to-m",
       messages: [
         { role: "user", content: "hi" },
-        { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"location": "San Francisco", }' } }] },
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "get_weather", arguments: '{"location": "San Francisco", }' },
+            },
+          ],
+        },
         { role: "tool", tool_call_id: "call_1", content: "ok" },
       ],
-      tools: [{ type: "function", function: { name: "get_weather", description: "Get weather", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"], additionalProperties: false } } }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "get_weather",
+            description: "Get weather",
+            parameters: {
+              type: "object",
+              properties: { city: { type: "string" } },
+              required: ["city"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ],
     };
-    const res = await postJson(cli.clientPort, "/chat/completions", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify(badBody));
+    const res = await postJson(
+      cli.clientPort,
+      "/chat/completions",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify(badBody),
+    );
     assert.equal(res.status, 400);
     const body = (await res.json()) as { error: { type: string; message: string } };
     assert.equal(body.error.type, "invalid_request_error");
@@ -393,7 +533,12 @@ test.concurrent("process: invalid function JSON into M rejects before dispatch",
     let found = false;
     for (const file of files) {
       const content = readFileSync(join(cli.traceRoot, dirs[0] as string, file), "utf8");
-      if (content.includes("invalid-function-json") || content.includes("candidate_skip") || content.includes("translation_failure")) found = true;
+      if (
+        content.includes("invalid-function-json") ||
+        content.includes("candidate_skip") ||
+        content.includes("translation_failure")
+      )
+        found = true;
     }
     assert.ok(found, "trace should record the failure or candidate skip");
   } finally {
@@ -426,7 +571,12 @@ test.concurrent("process: invalid provider arguments into M client terminates wi
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     };
     harness.chatOrigin.enqueue({ status: 200, body: encoder.encode(JSON.stringify(badOutcome)) });
-    const res = await postJson(cli.clientPort, "/v1/messages", { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string }, JSON.stringify({ ...MINIMAL_MESSAGES_REQUEST, model: "route-m-to-c" }));
+    const res = await postJson(
+      cli.clientPort,
+      "/v1/messages",
+      { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string },
+      JSON.stringify({ ...MINIMAL_MESSAGES_REQUEST, model: "route-m-to-c" }),
+    );
     assert.equal(res.status, 400);
     const body = (await res.json()) as { error: { type: string; message: string }; type?: string; content?: unknown[] };
     assert.equal(body.error.type, "invalid_request_error");
@@ -451,7 +601,12 @@ test.concurrent("process: hosted tool request rejects with zero dispatch", async
       input: "hi",
       tools: [{ type: "web_search" }],
     };
-    const res = await postJson(cli.clientPort, "/responses", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify(hostedBody));
+    const res = await postJson(
+      cli.clientPort,
+      "/responses",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify(hostedBody),
+    );
     assert.equal(res.status, 400);
     const body = (await res.json()) as { error: { type: string; message: string } };
     assert.equal(body.error.type, "invalid_request_error");
@@ -475,9 +630,23 @@ test.concurrent("process: custom grammar tool translates C->R and rejects into M
     const cGrammar = {
       model: "route-c-to-r",
       messages: [{ role: "user", content: "hi" }],
-      tools: [{ type: "custom", custom: { name: "my_grammar", description: "d", format: { type: "grammar", grammar: { definition: "rule", syntax: "lark" } } } }],
+      tools: [
+        {
+          type: "custom",
+          custom: {
+            name: "my_grammar",
+            description: "d",
+            format: { type: "grammar", grammar: { definition: "rule", syntax: "lark" } },
+          },
+        },
+      ],
     };
-    const cToRRes = await postJson(cli.clientPort, "/chat/completions", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify(cGrammar));
+    const cToRRes = await postJson(
+      cli.clientPort,
+      "/chat/completions",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify(cGrammar),
+    );
     assert.equal(cToRRes.status, 200);
     const target = parsedTargetBody(harness.responsesOrigin) as Record<string, unknown>;
     const tools = target.tools as unknown[];
@@ -487,7 +656,12 @@ test.concurrent("process: custom grammar tool translates C->R and rejects into M
     const fmt = entry.format as Record<string, unknown>;
     assert.equal(fmt.type, "grammar");
     // C->M should reject
-    const cToMRes = await postJson(cli.clientPort, "/chat/completions", { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` }, JSON.stringify({ ...cGrammar, model: "route-c-to-m" }));
+    const cToMRes = await postJson(
+      cli.clientPort,
+      "/chat/completions",
+      { name: "authorization", value: `Bearer ${env.APTUS_CLIENT_PRIMARY}` },
+      JSON.stringify({ ...cGrammar, model: "route-c-to-m" }),
+    );
     assert.equal(cToMRes.status, 400);
     const body = (await cToMRes.json()) as { error: { type: string; message: string } };
     assert.equal(body.error.type, "invalid_request_error");
@@ -514,17 +688,43 @@ test.concurrent("process: multipart tool result into Chat rejects", async () => 
       max_tokens: 1024,
       messages: [
         { role: "user", content: [{ type: "text", text: "hi" }] },
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "SF" } }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "SF" } }],
+        },
         {
           role: "user",
           content: [
-            { type: "tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] },
+            {
+              type: "tool_result",
+              tool_use_id: "call_1",
+              content: [
+                { type: "text", text: "a" },
+                { type: "text", text: "b" },
+              ],
+            },
           ],
         },
       ],
-      tools: [{ name: "get_weather", description: "Get weather", input_schema: { type: "object", properties: { city: { type: "string" } }, required: ["city"], additionalProperties: false } }],
+      tools: [
+        {
+          name: "get_weather",
+          description: "Get weather",
+          input_schema: {
+            type: "object",
+            properties: { city: { type: "string" } },
+            required: ["city"],
+            additionalProperties: false,
+          },
+        },
+      ],
     };
-    const res = await postJson(cli.clientPort, "/v1/messages", { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string }, JSON.stringify(mMulti));
+    const res = await postJson(
+      cli.clientPort,
+      "/v1/messages",
+      { name: "x-api-key", value: env.APTUS_CLIENT_PRIMARY as string },
+      JSON.stringify(mMulti),
+    );
     assert.equal(res.status, 400);
     const body = (await res.json()) as { error: { type: string; message: string } };
     assert.equal(body.error.type, "invalid_request_error");

@@ -3,7 +3,6 @@ import { test } from "vitest";
 import { ChatEgressEncoder } from "../../../src/translation/codecs/chat/egress.ts";
 import { ChatIngressDecoder } from "../../../src/translation/codecs/chat/ingress.ts";
 
-
 test.concurrent("translation codec chat: decodes and encodes request", () => {
   const decoder = new ChatIngressDecoder();
   const encoder = new ChatEgressEncoder();
@@ -111,7 +110,10 @@ test.concurrent("translation codec chat: decodes and encodes outcome", () => {
 
     const encoded = encoder.encodeOutcome(outcome);
     assert.equal(encoded.status, 200);
-    const body = encoded.body as { choices: Array<{ message: { content: string }; finish_reason: string }>; usage: { prompt_tokens: number } };
+    const body = encoded.body as {
+      choices: Array<{ message: { content: string }; finish_reason: string }>;
+      usage: { prompt_tokens: number };
+    };
     assert.equal(body.choices[0]?.message.content, "Hello! How can I assist you?");
     assert.equal(body.choices[0]?.finish_reason, "stop");
     assert.equal(body.usage.prompt_tokens, 10);

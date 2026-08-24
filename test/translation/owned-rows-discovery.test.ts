@@ -157,7 +157,7 @@ test.concurrent("native-only rejections: Messages stream request decoder splits 
     [{ thinking: { type: "enabled", display: "summarized" } }, "anthropic-thinking-display"],
     [{ thinking: { type: "disabled" } }, "anthropic-thinking-display"],
     [{ output_config: { effort: "high" } }, "reasoning-effort-common"],
-    [{ output_config: { format: { type: "json_schema", schema: {} } } }, "structured-json-schema"],
+    [{ output_config: { format: { type: "unsupported_format", schema: {} } } }, "structured-json-schema"],
   ];
   for (const [extra, capability] of cases) {
     const res = decoder.decodeRequest({ ...base, ...extra });
@@ -201,7 +201,7 @@ test.concurrent("native-only rejections: Messages state/thinking/output_config s
     [{ thinking: { type: "disabled" } }, "anthropic-thinking-display"],
     [{ thinking: { type: "adaptive" } }, "anthropic-thinking-display"],
     [{ output_config: { effort: "high" } }, "reasoning-effort-common"],
-    [{ output_config: { format: { type: "json_schema", schema: {} } } }, "structured-json-schema"],
+    [{ output_config: { format: { type: "unsupported_format", schema: {} } } }, "structured-json-schema"],
   ];
   for (const [extra, capability] of cases) {
     const res = decoder.decodeRequest({ ...sourceBodyFor("anthropic-messages"), max_tokens: 1024, ...extra });

@@ -543,9 +543,7 @@ test.concurrent("row matched-stop-sequence (into-M complete, R origin): R-origin
       object: "response",
       status: "completed",
       model: "upstream-target",
-      output: [
-        { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
-      ],
+      output: [{ type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "hi" }] }],
       usage: { input_tokens: 1, output_tokens: 1 },
     },
   );
@@ -574,9 +572,7 @@ test.concurrent("row matched-stop-sequence (R→C source-absence): R-origin natu
       object: "response",
       status: "completed",
       model: "upstream-target",
-      output: [
-        { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "hi" }] },
-      ],
+      output: [{ type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "hi" }] }],
       usage: { input_tokens: 1, output_tokens: 1 },
     },
   );

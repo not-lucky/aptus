@@ -572,7 +572,6 @@ test.concurrent("complete body delivery records cancellation telemetry when clie
   assert.equal(cancelledCalls[0]?.by, "client");
 });
 
-
 test.concurrent("operations metrics honor enablement and bounded endpoint labels", async () => {
   const state = { draining: false, traceReady: true };
   await withApp(
@@ -600,52 +599,49 @@ test.concurrent("operations metrics honor enablement and bounded endpoint labels
 test.concurrent("GET /health aliases to /health/ready and uses health_ready metric endpoint label", async () => {
   const metrics = createMetricsRegistry();
   const state = { draining: false, traceReady: true };
-  await withApp(
-    createOperationsApp({ config, revision: "sha256:test", state, metrics }),
-    async (port) => {
-      // 1. Ready state: /health and /health/ready both return 200 with status: "ok"
-      const resReady = await request(port, "/health/ready", {});
-      const resHealth = await request(port, "/health", {});
-      assert.equal(resReady.status, 200);
-      assert.equal(resHealth.status, 200);
-      assert.deepEqual(JSON.parse(resReady.body), {
-        status: "ok",
-        configRevision: "sha256:test",
-        traceReady: true,
-        enabledProviderCount: 1,
-      });
-      assert.deepEqual(JSON.parse(resHealth.body), {
-        status: "ok",
-        configRevision: "sha256:test",
-        traceReady: true,
-        enabledProviderCount: 1,
-      });
+  await withApp(createOperationsApp({ config, revision: "sha256:test", state, metrics }), async (port) => {
+    // 1. Ready state: /health and /health/ready both return 200 with status: "ok"
+    const resReady = await request(port, "/health/ready", {});
+    const resHealth = await request(port, "/health", {});
+    assert.equal(resReady.status, 200);
+    assert.equal(resHealth.status, 200);
+    assert.deepEqual(JSON.parse(resReady.body), {
+      status: "ok",
+      configRevision: "sha256:test",
+      traceReady: true,
+      enabledProviderCount: 1,
+    });
+    assert.deepEqual(JSON.parse(resHealth.body), {
+      status: "ok",
+      configRevision: "sha256:test",
+      traceReady: true,
+      enabledProviderCount: 1,
+    });
 
-      // 2. Degraded state: /health and /health/ready both return 503 with status: "degraded"
-      state.traceReady = false;
-      const resDegradedReady = await request(port, "/health/ready", {});
-      const resDegradedHealth = await request(port, "/health", {});
-      assert.equal(resDegradedReady.status, 503);
-      assert.equal(resDegradedHealth.status, 503);
-      assert.deepEqual(JSON.parse(resDegradedReady.body), {
-        status: "degraded",
-        configRevision: "sha256:test",
-        traceReady: false,
-        enabledProviderCount: 1,
-      });
-      assert.deepEqual(JSON.parse(resDegradedHealth.body), {
-        status: "degraded",
-        configRevision: "sha256:test",
-        traceReady: false,
-        enabledProviderCount: 1,
-      });
+    // 2. Degraded state: /health and /health/ready both return 503 with status: "degraded"
+    state.traceReady = false;
+    const resDegradedReady = await request(port, "/health/ready", {});
+    const resDegradedHealth = await request(port, "/health", {});
+    assert.equal(resDegradedReady.status, 503);
+    assert.equal(resDegradedHealth.status, 503);
+    assert.deepEqual(JSON.parse(resDegradedReady.body), {
+      status: "degraded",
+      configRevision: "sha256:test",
+      traceReady: false,
+      enabledProviderCount: 1,
+    });
+    assert.deepEqual(JSON.parse(resDegradedHealth.body), {
+      status: "degraded",
+      configRevision: "sha256:test",
+      traceReady: false,
+      enabledProviderCount: 1,
+    });
 
-      // 3. Render metrics: endpoint label is health_ready (never health)
-      const rendered = await metrics.render();
-      assert.match(rendered, /endpoint="health_ready"/);
-      assert.doesNotMatch(rendered, /endpoint="health"[^_\w]/);
-    },
-  );
+    // 3. Render metrics: endpoint label is health_ready (never health)
+    const rendered = await metrics.render();
+    assert.match(rendered, /endpoint="health_ready"/);
+    assert.doesNotMatch(rendered, /endpoint="health"[^_\w]/);
+  });
 });
 
 test.concurrent("GET /metrics returns 404 when metrics.enabled is false", async () => {

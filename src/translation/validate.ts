@@ -1,6 +1,7 @@
 import type { Result } from "../domain/contracts.ts";
 import { isPlainObject, jsonEqual } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
+import { CHAT_TOOL_NAME_REGEX, firstUnknownKey } from "./codecs/shared/controls.ts";
 import type { RequestWireOptions } from "./contracts.ts";
 import {
   GRAMMAR_SYNTAX_VALUES,
@@ -10,6 +11,7 @@ import {
   type IrInputPart,
   type IrItem,
   type IrOutcome,
+  type IrOutputFormat,
   type IrOutputPart,
   type IrRequest,
   type IrTool,
@@ -19,7 +21,6 @@ import {
   REASONING_EFFORT_VALUES,
   VERBOSITY_VALUES,
 } from "./ir.ts";
-
 import { invalidRequest, ok } from "./result.ts";
 
 const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "content_filter", "context_limit", "other"]);
@@ -35,6 +36,41 @@ const BASE64_REGEX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{
 
 function isNonNegativeSafeInteger(n: unknown): n is number {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+}
+
+function validateOutputFormat(
+  output: IrOutputFormat | undefined,
+  requestWireOptions?: RequestWireOptions,
+): Result<void, NormalizedFailure> {
+  if (requestWireOptions?.legacyJsonObject === true && output !== undefined) {
+    return invalidRequest("IrRequest.output must be unset when the legacyJsonObject sidecar is set");
+  }
+  if (output === undefined) return ok(undefined);
+  if (output.type === "text") {
+    const extra = firstUnknownKey(output, ["type"]);
+    if (extra !== undefined) return invalidRequest(`IrOutputFormat (text): ${extra} is not recognized`);
+    return ok(undefined);
+  }
+  if (output.type === "json_schema") {
+    const extra = firstUnknownKey(output, ["type", "schema", "name", "description", "strict"]);
+    if (extra !== undefined) return invalidRequest(`IrOutputFormat (json_schema): ${extra} is not recognized`);
+    if (!isPlainObject(output.schema)) {
+      return invalidRequest("IrOutputFormat (json_schema): schema must be a plain object");
+    }
+    if (output.name !== undefined) {
+      if (typeof output.name !== "string" || !CHAT_TOOL_NAME_REGEX.test(output.name)) {
+        return invalidRequest(`IrOutputFormat (json_schema): name must match ${CHAT_TOOL_NAME_REGEX}`);
+      }
+    }
+    if (output.description !== undefined && typeof output.description !== "string") {
+      return invalidRequest("IrOutputFormat (json_schema): description must be a string");
+    }
+    if (output.strict !== undefined && typeof output.strict !== "boolean") {
+      return invalidRequest("IrOutputFormat (json_schema): strict must be a boolean");
+    }
+    return ok(undefined);
+  }
+  return invalidRequest("IrOutputFormat: type is not recognized");
 }
 
 /**
@@ -442,6 +478,9 @@ export function validateIrRequest(
     const choiceResult = validateToolChoice(req.toolChoice, req.tools);
     if (!choiceResult.ok) return choiceResult;
   }
+
+  const outputResult = validateOutputFormat(req.output, requestWireOptions);
+  if (!outputResult.ok) return outputResult;
 
   const transcriptResult = validateToolTranscript(req.items);
   if (!transcriptResult.ok) return transcriptResult;

@@ -289,7 +289,9 @@ test.concurrent("validate generation controls: rejects non-positive or fractiona
 test.concurrent("validate generation controls: rejects empty arrays and non-empty-string violations in stopSequences", () => {
   for (const stopSequences of [[], [""], ["ok", ""], [42]] as unknown[][]) {
     const result = validateIrRequest(
-      requestWithGeneration({ stopSequences: stopSequences as IrRequest["generation"] extends { stopSequences?: infer S } ? S : never }),
+      requestWithGeneration({
+        stopSequences: stopSequences as IrRequest["generation"] extends { stopSequences?: infer S } ? S : never,
+      }),
     );
     assert.equal(result.ok, false, JSON.stringify(stopSequences));
     if (!result.ok) {
@@ -301,7 +303,9 @@ test.concurrent("validate generation controls: rejects empty arrays and non-empt
 
 test.concurrent("validate generation controls: rejects non-admitted verbosity and reasoning effort literals", () => {
   const badVerbosity = validateIrRequest(
-    requestWithGeneration({ verbosity: "tally" as IrRequest["generation"] extends { verbosity?: infer V } ? V : never }),
+    requestWithGeneration({
+      verbosity: "tally" as IrRequest["generation"] extends { verbosity?: infer V } ? V : never,
+    }),
   );
   assert.equal(badVerbosity.ok, false);
   if (!badVerbosity.ok) {
@@ -311,7 +315,13 @@ test.concurrent("validate generation controls: rejects non-admitted verbosity an
 
   const badEffort = validateIrRequest(
     requestWithGeneration({
-      reasoning: { effort: "absurd" as IrRequest["generation"] extends { reasoning?: infer R } ? (R extends { effort?: infer E } ? E : never) : never },
+      reasoning: {
+        effort: "absurd" as IrRequest["generation"] extends { reasoning?: infer R }
+          ? R extends { effort?: infer E }
+            ? E
+            : never
+          : never,
+      },
     }),
   );
   assert.equal(badEffort.ok, false);
@@ -338,4 +348,3 @@ test.concurrent("translation validate: rejects IrOutcome with duplicate part IDs
     assert.ok(result.error.message.includes("duplicate partId"));
   }
 });
-

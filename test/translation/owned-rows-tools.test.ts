@@ -4,8 +4,8 @@
  * cross-row extensions.
  */
 import assert from "node:assert/strict";
-import type { Protocol } from "../../src/domain/contracts.ts";
 import { test } from "vitest";
+import type { Protocol } from "../../src/domain/contracts.ts";
 import { ChatIngressDecoder } from "../../src/translation/codecs/chat/ingress.ts";
 import { MessagesIngressDecoder } from "../../src/translation/codecs/messages/ingress.ts";
 import { ResponsesIngressDecoder } from "../../src/translation/codecs/responses/ingress.ts";
@@ -17,10 +17,10 @@ import {
   RESPONSES_HOSTED_TOOL_TYPES,
 } from "../../src/translation/codecs/shared/hosted-tools.ts";
 import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
-import { preflightRequest, preflightOutcome, preflightStreamRequest } from "../../src/translation/preflight.ts";
-import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
-import { TranslatedStreamPump } from "../../src/translation/stream-pump.ts";
+import { preflightOutcome, preflightRequest, preflightStreamRequest } from "../../src/translation/preflight.ts";
 import { createSseDecoder, createSseEncoder } from "../../src/translation/sse.ts";
+import { TranslatedStreamPump } from "../../src/translation/stream-pump.ts";
+import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
 import { validateIrRequest } from "../../src/translation/validate.ts";
 import { ALL_DIRECTIONS, translateRequest } from "./owned-rows-helpers.ts";
 
@@ -109,9 +109,7 @@ const M_EXACT_SHAPE = {
   required: ["city"],
 } as unknown as Record<string, unknown>;
 
-function chatToolBody(
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+function chatToolBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     model: "wire-model",
     messages: [{ role: "user", content: "What's the weather?" }],
@@ -129,9 +127,7 @@ function chatToolBody(
   };
 }
 
-function responsesToolBody(
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+function responsesToolBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     model: "wire-model",
     input: "What's the weather?",
@@ -148,9 +144,7 @@ function responsesToolBody(
   };
 }
 
-function messagesToolBody(
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+function messagesToolBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     model: "wire-model",
     max_tokens: 1024,
@@ -359,7 +353,13 @@ test.concurrent("row function-schema-strictness: strict dialect subsets", () => 
     model: "wire-model",
     max_tokens: 1024,
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-    tools: [{ name: "get_weather", input_schema: { type: "object", properties: { city: { type: "string" } }, required: "city" }, strict: true }],
+    tools: [
+      {
+        name: "get_weather",
+        input_schema: { type: "object", properties: { city: { type: "string" } }, required: "city" },
+        strict: true,
+      },
+    ],
   };
   assertUnsupported(
     translateRequest(coordinator(), "anthropic-messages", "openai-chat", mBadRequired as never) as never,
@@ -388,7 +388,11 @@ test.concurrent("row function-schema-strictness: strict dialect subsets", () => 
     tools: [
       {
         type: "function",
-        function: { name: "get_weather", parameters: { ...STRICT_CONFORMING, properties: { x: { type: "string", enum: "red" } } }, strict: true },
+        function: {
+          name: "get_weather",
+          parameters: { ...STRICT_CONFORMING, properties: { x: { type: "string", enum: "red" } } },
+          strict: true,
+        },
       },
     ],
   });
@@ -620,15 +624,11 @@ test.concurrent("row allowed-tool-subset: C<->R admit, M rejects", () => {
   const rSubsetBadName = {
     model: "wire-model",
     input: "hi",
-    tools: [
-      { type: "function", name: "bad name with spaces!", parameters: { ...FUNC_SCHEMA }, strict: false },
-    ],
+    tools: [{ type: "function", name: "bad name with spaces!", parameters: { ...FUNC_SCHEMA }, strict: false }],
     tool_choice: {
       type: "allowed_tools",
       mode: "auto",
-      tools: [
-        { type: "function", name: "bad name with spaces!", parameters: { ...FUNC_SCHEMA }, strict: false },
-      ],
+      tools: [{ type: "function", name: "bad name with spaces!", parameters: { ...FUNC_SCHEMA }, strict: false }],
     },
   };
   assertUnsupported(
@@ -682,7 +682,12 @@ test.concurrent("row parallel-tool-calls: booleans and disable flag", () => {
 
   // Also into M without explicit choice but with tools and parallel false should synthesize auto with disable
   const cFalseNoChoice = chatToolBody({ parallel_tool_calls: false });
-  const cFalseNoChoiceToM = translateRequest(coordinator(), "openai-chat", "anthropic-messages", cFalseNoChoice as never);
+  const cFalseNoChoiceToM = translateRequest(
+    coordinator(),
+    "openai-chat",
+    "anthropic-messages",
+    cFalseNoChoice as never,
+  );
   assertOk(cFalseNoChoiceToM, "parallel false no choice into M");
   if (cFalseNoChoiceToM.ok) {
     const tc = (cFalseNoChoiceToM.value.body as Record<string, unknown>).tool_choice as Record<string, unknown>;
@@ -702,7 +707,9 @@ test.concurrent("row function-call-correlation: IDs and ordering plus invalid_re
           { role: "user", content: "hi" },
           {
             role: "assistant",
-            tool_calls: [{ id: callId, type: "function", function: { name: "get_weather", arguments: '{"city":"SF"}' } }],
+            tool_calls: [
+              { id: callId, type: "function", function: { name: "get_weather", arguments: '{"city":"SF"}' } },
+            ],
           },
           { role: "tool", tool_call_id: callId, content: "ok" },
         ],
@@ -724,7 +731,10 @@ test.concurrent("row function-call-correlation: IDs and ordering plus invalid_re
         max_tokens: 1024,
         messages: [
           { role: "user", content: [{ type: "text", text: "hi" }] },
-          { role: "assistant", content: [{ type: "tool_use", id: callId, name: "get_weather", input: { city: "SF" } }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: callId, name: "get_weather", input: { city: "SF" } }],
+          },
           { role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: "ok" }] },
         ],
         tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA } }],
@@ -880,14 +890,16 @@ test.concurrent("row invalid-function-json: verbatim vs M rejection", () => {
     const input = (cToR.value.body as Record<string, unknown>).input as unknown[];
     const fc = input.find((e) => (e as Record<string, unknown>).type === "function_call") as Record<string, unknown>;
     assert.equal(fc.arguments, invalidArgs);
-    const hasArgs = fc.arguments !== undefined && (() => {
-      try {
-        JSON.parse(fc.arguments as string);
-        return true;
-      } catch {
-        return false;
-      }
-    })();
+    const hasArgs =
+      fc.arguments !== undefined &&
+      (() => {
+        try {
+          JSON.parse(fc.arguments as string);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
     assert.equal(hasArgs, false);
   }
 
@@ -939,7 +951,11 @@ test.concurrent("row invalid-function-json: streaming raw relay into C/R and fai
     'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}\n\n',
     'event: message_stop\ndata: {"type":"message_stop"}\n\n',
   ];
-  const { pump: pumpMtoC, emitted: emittedMtoC } = createToolStreamPump("openai-chat", "anthropic-messages", "resp_m_valid");
+  const { pump: pumpMtoC, emitted: emittedMtoC } = createToolStreamPump(
+    "openai-chat",
+    "anthropic-messages",
+    "resp_m_valid",
+  );
   for (const f of mValidFrames) {
     const res = pumpMtoC.pushBytes(UTF8_ENCODER.encode(f));
     assert.equal(res.ok, true);
@@ -955,11 +971,15 @@ test.concurrent("row invalid-function-json: streaming raw relay into C/R and fai
     'data: {"id":"chatcmpl-bad","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
     'data: {"id":"chatcmpl-bad","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{invalid-json"}}]},"finish_reason":null}]}\n\n',
     'data: {"id":"chatcmpl-bad","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-    'data: [DONE]\n\n',
+    "data: [DONE]\n\n",
   ];
 
   // Into Responses (C->R): invalid JSON text is relayed
-  const { pump: pumpCtoR, emitted: emittedCtoR } = createToolStreamPump("openai-responses", "openai-chat", "resp_bad_r");
+  const { pump: pumpCtoR, emitted: emittedCtoR } = createToolStreamPump(
+    "openai-responses",
+    "openai-chat",
+    "resp_bad_r",
+  );
   for (const f of cInvalidFrames) {
     const res = pumpCtoR.pushBytes(UTF8_ENCODER.encode(f));
     if (res.ok) emittedCtoR.push(...res.value);
@@ -969,7 +989,11 @@ test.concurrent("row invalid-function-json: streaming raw relay into C/R and fai
   assert.ok(joinStreamEmitted(emittedCtoR).includes("{invalid-json"));
 
   // Into Messages (C->M): invalid JSON at part_end fails closed with invalid_request and zero tool_use blocks
-  const { pump: pumpCtoM, emitted: emittedCtoM } = createToolStreamPump("anthropic-messages", "openai-chat", "resp_bad_m");
+  const { pump: pumpCtoM, emitted: emittedCtoM } = createToolStreamPump(
+    "anthropic-messages",
+    "openai-chat",
+    "resp_bad_m",
+  );
   let failed = false;
   for (const f of cInvalidFrames) {
     const res = pumpCtoM.pushBytes(UTF8_ENCODER.encode(f));
@@ -1088,7 +1112,13 @@ test.concurrent("row tool-result-multipart: T3,T3,T3,T1,T3,T1 vector", () => {
       { type: "message" as const, role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
       {
         type: "tool_call" as const,
-        call: { type: "function" as const, callId: "call_1", name: "get_weather", argumentsText: '{"city":"SF"}', arguments: { city: "SF" } },
+        call: {
+          type: "function" as const,
+          callId: "call_1",
+          name: "get_weather",
+          argumentsText: '{"city":"SF"}',
+          arguments: { city: "SF" },
+        },
       },
       {
         type: "tool_result" as const,
@@ -1129,7 +1159,14 @@ test.concurrent("row tool-result-multipart: T3,T3,T3,T1,T3,T1 vector", () => {
     input: [
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
       { type: "function_call", call_id: "call_1", name: "get_weather", arguments: '{"city":"SF"}' },
-      { type: "function_call_output", call_id: "call_1", output: [{ type: "input_text", text: "a" }, { type: "input_text", text: "b" }] },
+      {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: [
+          { type: "input_text", text: "a" },
+          { type: "input_text", text: "b" },
+        ],
+      },
     ],
     tools: [{ type: "function", name: "get_weather", parameters: { ...FUNC_SCHEMA }, strict: false }],
   };
@@ -1144,7 +1181,14 @@ test.concurrent("row tool-result-multipart: T3,T3,T3,T1,T3,T1 vector", () => {
       {
         role: "user",
         content: [
-          { type: "tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] },
+          {
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: [
+              { type: "text", text: "a" },
+              { type: "text", text: "b" },
+            ],
+          },
         ],
       },
     ],
@@ -1230,7 +1274,9 @@ test.concurrent("row custom-text-tool: C<->R admit, M rejects", () => {
     responseId: "resp_custom",
     model: "wire-model",
     delivery: "complete",
-    parts: [{ type: "tool_call", partId: "p1", call: { type: "custom", callId: "call_1", name: "my_tool", inputText: "x" } }],
+    parts: [
+      { type: "tool_call", partId: "p1", call: { type: "custom", callId: "call_1", name: "my_tool", inputText: "x" } },
+    ],
     finish: { reason: "tool_calls" },
   };
   const customCallPre = preflightOutcome(customCallOutcome as never, "anthropic-messages->openai-chat");
@@ -1259,9 +1305,10 @@ test.concurrent("row custom-text-tool: C<->R admit, M rejects", () => {
     assert.equal(call.call_id, "call_1");
     assert.equal(call.name, "my_tool");
     assert.equal(call.input, "raw");
-    const output = input.find(
-      (i) => (i as Record<string, unknown>).type === "custom_tool_call_output",
-    ) as Record<string, unknown>;
+    const output = input.find((i) => (i as Record<string, unknown>).type === "custom_tool_call_output") as Record<
+      string,
+      unknown
+    >;
     assert.equal(output.call_id, "call_1");
     assert.equal(output.output, "result text");
   }
@@ -1274,7 +1321,11 @@ test.concurrent("row custom-grammar-tool: grammar transform and M rejections", (
     tools: [
       {
         type: "custom",
-        custom: { name: "my_grammar", description: "d", format: { type: "grammar", grammar: { definition: "rule", syntax: "lark" } } },
+        custom: {
+          name: "my_grammar",
+          description: "d",
+          format: { type: "grammar", grammar: { definition: "rule", syntax: "lark" } },
+        },
       },
     ],
   };
@@ -1292,7 +1343,14 @@ test.concurrent("row custom-grammar-tool: grammar transform and M rejections", (
   const rGrammar = {
     model: "wire-model",
     input: "hi",
-    tools: [{ type: "custom", name: "my_grammar", description: "d", format: { type: "grammar", definition: "rule", syntax: "lark" } }],
+    tools: [
+      {
+        type: "custom",
+        name: "my_grammar",
+        description: "d",
+        format: { type: "grammar", definition: "rule", syntax: "lark" },
+      },
+    ],
   };
   const rToC = translateRequest(coordinator(), "openai-responses", "openai-chat", rGrammar as never);
   assertOk(rToC, "custom-grammar R->C");
@@ -1351,7 +1409,12 @@ test.concurrent("row custom-tool-streaming: request and output gates", () => {
     tools: [{ type: "function" as const, name: "get_weather", inputSchema: { ...FUNC_SCHEMA } }],
     items: [{ type: "message" as const, role: "user" as const, content: [{ type: "text" as const, text: "hi" }] }],
   };
-  const customSubset = { allowedToolSubset: { mode: "auto" as const, tools: [{ type: "custom" as const, name: "my_tool", format: { type: "text" as const } }] } };
+  const customSubset = {
+    allowedToolSubset: {
+      mode: "auto" as const,
+      tools: [{ type: "custom" as const, name: "my_tool", format: { type: "text" as const } }],
+    },
+  };
   for (const [src, dst] of ALL_DIRECTIONS) {
     const dir = `${src}->${dst}` as never;
     const res = preflightStreamRequest(standardIr as never, dir, customSubset as never);
@@ -1362,7 +1425,12 @@ test.concurrent("row custom-tool-streaming: request and output gates", () => {
   const sm = createIrStreamStateMachine();
   const r1 = sm.feed({ type: "response_start", responseId: "r1", model: "m", wireOptions: {} } as never);
   assert.equal(r1.ok, true);
-  const r2 = sm.feed({ type: "part_start", responseId: "r1", partId: "p1", part: { type: "custom_call", callId: "c1", name: "n" } } as never);
+  const r2 = sm.feed({
+    type: "part_start",
+    responseId: "r1",
+    partId: "p1",
+    part: { type: "custom_call", callId: "c1", name: "n" },
+  } as never);
   assert.equal(r2.ok, false, "custom_call part_start should fail");
   if (!r2.ok) {
     assert.equal((r2.error as { capability?: string }).capability, "custom-tool-streaming");
@@ -1380,7 +1448,7 @@ test.concurrent("row function-arguments-streaming & tool-stream-delta: piecewise
     'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_w","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":"}}]},"finish_reason":null}]}\n\n',
     'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"SF\\"}"}}]},"finish_reason":null}]}\n\n',
     'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-    'data: [DONE]\n\n',
+    "data: [DONE]\n\n",
   ];
 
   const responsesStreamFrames = [
@@ -1424,13 +1492,28 @@ test.concurrent("row function-arguments-streaming & tool-stream-delta: piecewise
       assert.ok(output.includes("get_weather"), `chat client should contain get_weather for ${client}<-${provider}`);
       assert.ok(output.includes("[DONE]"), `chat client should contain [DONE] for ${client}<-${provider}`);
     } else if (client === "openai-responses") {
-      assert.ok(output.includes("function_call"), `responses client should contain function_call for ${client}<-${provider}`);
-      assert.ok(output.includes("function_call_arguments.delta"), `responses client should contain delta for ${client}<-${provider}`);
-      assert.ok(output.includes("response.completed"), `responses client should contain response.completed for ${client}<-${provider}`);
+      assert.ok(
+        output.includes("function_call"),
+        `responses client should contain function_call for ${client}<-${provider}`,
+      );
+      assert.ok(
+        output.includes("function_call_arguments.delta"),
+        `responses client should contain delta for ${client}<-${provider}`,
+      );
+      assert.ok(
+        output.includes("response.completed"),
+        `responses client should contain response.completed for ${client}<-${provider}`,
+      );
     } else {
       assert.ok(output.includes("tool_use"), `messages client should contain tool_use for ${client}<-${provider}`);
-      assert.ok(output.includes("input_json_delta"), `messages client should contain input_json_delta for ${client}<-${provider}`);
-      assert.ok(output.includes("message_stop"), `messages client should contain message_stop for ${client}<-${provider}`);
+      assert.ok(
+        output.includes("input_json_delta"),
+        `messages client should contain input_json_delta for ${client}<-${provider}`,
+      );
+      assert.ok(
+        output.includes("message_stop"),
+        `messages client should contain message_stop for ${client}<-${provider}`,
+      );
     }
   }
 });
@@ -1443,7 +1526,7 @@ test.concurrent("row finish-tool-calls: stream-side finish reason mapping across
       frames = [
         'data: {"id":"chatcmpl-f","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_f","type":"function","function":{"name":"fn","arguments":"{}"}}]},"finish_reason":null}]}\n\n',
         'data: {"id":"chatcmpl-f","object":"chat.completion.chunk","created":1775606400,"model":"gpt-main","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-        'data: [DONE]\n\n',
+        "data: [DONE]\n\n",
       ];
     } else if (provider === "openai-responses") {
       frames = [
@@ -1473,7 +1556,10 @@ test.concurrent("row finish-tool-calls: stream-side finish reason mapping across
     if (fin.ok) emitted.push(...fin.value);
     const out = joinStreamEmitted(emitted);
     if (client === "openai-chat") {
-      assert.ok(out.includes('"finish_reason":"tool_calls"'), `finish_reason tool_calls expected for ${client}<-${provider}`);
+      assert.ok(
+        out.includes('"finish_reason":"tool_calls"'),
+        `finish_reason tool_calls expected for ${client}<-${provider}`,
+      );
     } else if (client === "openai-responses") {
       assert.ok(out.includes("response.completed"), `response.completed expected for ${client}<-${provider}`);
     } else {
@@ -1490,7 +1576,15 @@ test.concurrent("row tool-output-schema: R tools with output_schema", () => {
   const body = {
     model: "wire-model",
     input: "hi",
-    tools: [{ type: "function", name: "get_weather", parameters: { ...FUNC_SCHEMA }, strict: false, output_schema: { type: "object" } }],
+    tools: [
+      {
+        type: "function",
+        name: "get_weather",
+        parameters: { ...FUNC_SCHEMA },
+        strict: false,
+        output_schema: { type: "object" },
+      },
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "openai-responses", dst, body as never);
@@ -1502,7 +1596,9 @@ test.concurrent("row deferred-tools: R and M defer_loading", () => {
   const rBody = {
     model: "wire-model",
     input: "hi",
-    tools: [{ type: "function", name: "get_weather", parameters: { ...FUNC_SCHEMA }, strict: false, defer_loading: true }],
+    tools: [
+      { type: "function", name: "get_weather", parameters: { ...FUNC_SCHEMA }, strict: false, defer_loading: true },
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "openai-responses", dst, rBody as never);
@@ -1697,7 +1793,12 @@ test.concurrent("row tool-input-examples: examples in tool definition", () => {
     model: "wire-model",
     max_tokens: 1024,
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-    tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA }, input_examples: [{ city: "SF" }] } as unknown as Record<string, unknown>],
+    tools: [
+      { name: "get_weather", input_schema: { ...FUNC_SCHEMA }, input_examples: [{ city: "SF" }] } as unknown as Record<
+        string,
+        unknown
+      >,
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "anthropic-messages", dst, mWithExamples as never);
@@ -1711,7 +1812,12 @@ test.concurrent("row eager-tool-streaming: eager + null eager", () => {
     model: "wire-model",
     max_tokens: 1024,
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-    tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA }, eager_input_streaming: true } as unknown as Record<string, unknown>],
+    tools: [
+      { name: "get_weather", input_schema: { ...FUNC_SCHEMA }, eager_input_streaming: true } as unknown as Record<
+        string,
+        unknown
+      >,
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "anthropic-messages", dst, mEager as never);
@@ -1721,7 +1827,12 @@ test.concurrent("row eager-tool-streaming: eager + null eager", () => {
     model: "wire-model",
     max_tokens: 1024,
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-    tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA }, eager_input_streaming: null } as unknown as Record<string, unknown>],
+    tools: [
+      { name: "get_weather", input_schema: { ...FUNC_SCHEMA }, eager_input_streaming: null } as unknown as Record<
+        string,
+        unknown
+      >,
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "anthropic-messages", dst, mEagerNull as never);
@@ -1767,7 +1878,13 @@ test.concurrent("row programmatic-tools: programmatic surfaces", () => {
     model: "wire-model",
     input: [
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-      { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "{}", caller: { type: "programmatic" } },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "get_weather",
+        arguments: "{}",
+        caller: { type: "programmatic" },
+      },
     ],
     tools: [{ type: "function", name: "get_weather", parameters: { ...FUNC_SCHEMA }, strict: false }],
   };
@@ -1871,7 +1988,14 @@ test.concurrent("row hosted types: M tools table maps to exact IDs", () => {
   const reqBlock = {
     model: "wire-model",
     max_tokens: 1024,
-    messages: [{ role: "user", content: [{ type: "server_tool_use", id: "srv_1", name: "web_search", input: {} } as unknown as Record<string, unknown>] }],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "server_tool_use", id: "srv_1", name: "web_search", input: {} } as unknown as Record<string, unknown>,
+        ],
+      },
+    ],
   };
   assertUnsupported(
     translateRequest(coordinator(), "anthropic-messages", "openai-chat", reqBlock as never) as never,
@@ -1970,7 +2094,13 @@ test.concurrent("row responses-message-phase: replayed function_call status comp
     model: "wire-model",
     input: [
       { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-      { type: "function_call", call_id: "call_1", name: "get_weather", arguments: '{"city":"SF"}', status: "completed" },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "get_weather",
+        arguments: '{"city":"SF"}',
+        status: "completed",
+      },
     ],
     tools: [{ type: "function", name: "get_weather", parameters: { ...FUNC_SCHEMA }, strict: false }],
   };
@@ -1985,7 +2115,14 @@ test.concurrent("row hosted output discovery: R and M output items", () => {
     object: "response",
     status: "completed",
     model: "wire-model",
-    output: [{ type: "web_search_call", id: "ws_1", action: { type: "open_page", url: "https://example.com" }, status: "completed" }],
+    output: [
+      {
+        type: "web_search_call",
+        id: "ws_1",
+        action: { type: "open_page", url: "https://example.com" },
+        status: "completed",
+      },
+    ],
     usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
   };
   const dec = new ResponsesIngressDecoder().decodeOutcome(200, {}, rOutcomeOpenPage as never);
@@ -2002,7 +2139,16 @@ test.concurrent("row hosted output discovery: R and M output items", () => {
     object: "response",
     status: "completed",
     model: "wire-model",
-    output: [{ type: "computer_call", id: "cc_1", call_id: "call_1", action: { type: "click", x: 0, y: 0 }, pending_safety_checks: [{ code: "x", message: "y" }], status: "completed" }],
+    output: [
+      {
+        type: "computer_call",
+        id: "cc_1",
+        call_id: "call_1",
+        action: { type: "click", x: 0, y: 0 },
+        pending_safety_checks: [{ code: "x", message: "y" }],
+        status: "completed",
+      },
+    ],
     usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
   };
   const dec2 = new ResponsesIngressDecoder().decodeOutcome(200, {}, rCompPending as never);
@@ -2021,12 +2167,25 @@ test.concurrent("row hosted output discovery: R and M output items", () => {
     object: "response",
     status: "completed",
     model: "wire-model",
-    output: [{ type: "function_call", id: "fc_1", call_id: "call_1", name: "get_weather", arguments: '{"city":"SF"}', ...extra }],
+    output: [
+      {
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_1",
+        name: "get_weather",
+        arguments: '{"city":"SF"}',
+        ...extra,
+      },
+    ],
     usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
   });
   const nsDec = new ResponsesIngressDecoder().decodeOutcome(200, {}, outcomeCall({ namespace: "my_ns" }) as never);
   assertUnsupported(nsDec as never, "tool-namespaces", "outcome function_call namespace");
-  const callerDec = new ResponsesIngressDecoder().decodeOutcome(200, {}, outcomeCall({ caller: { type: "programmatic" } }) as never);
+  const callerDec = new ResponsesIngressDecoder().decodeOutcome(
+    200,
+    {},
+    outcomeCall({ caller: { type: "programmatic" } }) as never,
+  );
   assertUnsupported(callerDec as never, "programmatic-tools", "outcome function_call caller");
   const statusDec = new ResponsesIngressDecoder().decodeOutcome(
     200,
@@ -2041,7 +2200,13 @@ test.concurrent("row hosted output discovery: R and M output items", () => {
     type: "message",
     role: "assistant",
     model: "wire-model",
-    content: [{ type: "web_search_tool_result", content: [{ type: "text", text: "hi" }], encrypted_content: "xxx" } as unknown as Record<string, unknown>],
+    content: [
+      {
+        type: "web_search_tool_result",
+        content: [{ type: "text", text: "hi" }],
+        encrypted_content: "xxx",
+      } as unknown as Record<string, unknown>,
+    ],
     stop_reason: "end_turn",
     stop_sequence: null,
     usage: { input_tokens: 1, output_tokens: 1 },
@@ -2234,7 +2399,13 @@ test.concurrent("row chat-legacy-functions: functions param and function_call fi
   }
   const assistantFunc = {
     model: "wire-model",
-    messages: [{ role: "assistant", content: null, function_call: { name: "get_weather", arguments: "{}" } } as unknown as Record<string, unknown>],
+    messages: [
+      {
+        role: "assistant",
+        content: null,
+        function_call: { name: "get_weather", arguments: "{}" },
+      } as unknown as Record<string, unknown>,
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "openai-chat", dst, assistantFunc as never);
@@ -2259,7 +2430,11 @@ test.concurrent("row chat-legacy-functions: functions param and function_call fi
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: "hi", function_call: { name: "get_weather", arguments: "{}" } } as unknown as Record<string, unknown>,
+        message: {
+          role: "assistant",
+          content: "hi",
+          function_call: { name: "get_weather", arguments: "{}" },
+        } as unknown as Record<string, unknown>,
         finish_reason: "stop",
       },
     ],
@@ -2321,8 +2496,22 @@ test.concurrent("row finish-tool-calls: six-direction admission and well-formedn
     status: "completed",
     model: "wire-model",
     output: [
-      { type: "function_call", id: "fc_a", call_id: "call_a", name: "get_weather", arguments: '{"city":"SF"}', status: "completed" },
-      { type: "function_call", id: "fc_b", call_id: "call_b", name: "get_time", arguments: '{"tz":"PST"}', status: "completed" },
+      {
+        type: "function_call",
+        id: "fc_a",
+        call_id: "call_a",
+        name: "get_weather",
+        arguments: '{"city":"SF"}',
+        status: "completed",
+      },
+      {
+        type: "function_call",
+        id: "fc_b",
+        call_id: "call_b",
+        name: "get_time",
+        arguments: '{"tz":"PST"}',
+        status: "completed",
+      },
     ],
     usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
   };
@@ -2353,7 +2542,11 @@ test.concurrent("row finish-tool-calls: six-direction admission and well-formedn
       body: providerOutcome as never,
       logicalModel: "logical-key",
     });
-    assert.equal(res.ok, true, `finish-tool-calls ${client}->${provider} should admit (provider ${provider} -> client ${client})`);
+    assert.equal(
+      res.ok,
+      true,
+      `finish-tool-calls ${client}->${provider} should admit (provider ${provider} -> client ${client})`,
+    );
     if (res.ok) {
       const body = res.value.body as Record<string, unknown>;
       if (client === "openai-chat") {
@@ -2362,21 +2555,30 @@ test.concurrent("row finish-tool-calls: six-direction admission and well-formedn
         const msg = choice.message as Record<string, unknown>;
         assert.equal(msg.content, null, "chat tool-only content is null");
         const calls = msg.tool_calls as Array<Record<string, unknown>>;
-        assert.deepEqual(calls.map((c) => c.id), ["call_a", "call_b"]);
+        assert.deepEqual(
+          calls.map((c) => c.id),
+          ["call_a", "call_b"],
+        );
         assert.equal(choice.finish_reason, "tool_calls");
       } else if (client === "openai-responses") {
         // Tool-only outcome: no spurious empty message item beside the calls.
         const output = body.output as Array<Record<string, unknown>>;
         assert.equal(output.length, 2, "responses emits exactly the two call items");
         assert.ok(output.every((i) => i.type === "function_call"));
-        assert.deepEqual(output.map((i) => i.call_id), ["call_a", "call_b"]);
+        assert.deepEqual(
+          output.map((i) => i.call_id),
+          ["call_a", "call_b"],
+        );
         assert.equal(output[0]?.status, "completed");
       } else {
         // Tool-only outcome: no spurious empty text block beside tool_use.
         const content = body.content as Array<Record<string, unknown>>;
         assert.equal(content.length, 2, "messages emits exactly the two tool_use blocks");
         assert.ok(content.every((b) => b.type === "tool_use"));
-        assert.deepEqual(content.map((b) => b.id), ["call_a", "call_b"]);
+        assert.deepEqual(
+          content.map((b) => b.id),
+          ["call_a", "call_b"],
+        );
         assert.equal(body.stop_reason, "tool_use");
       }
     }
@@ -2437,7 +2639,13 @@ test.concurrent("cross-row prompt-cache-breakpoint: M tool definition cache_cont
     model: "wire-model",
     max_tokens: 1024,
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
-    tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA }, cache_control: { type: "ephemeral" } } as unknown as Record<string, unknown>],
+    tools: [
+      {
+        name: "get_weather",
+        input_schema: { ...FUNC_SCHEMA },
+        cache_control: { type: "ephemeral" },
+      } as unknown as Record<string, unknown>,
+    ],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "anthropic-messages", dst, body as never);
@@ -2483,7 +2691,14 @@ test.concurrent("cross-row prompt-cache-breakpoint: M tool_result marker -> C ar
       { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "SF" } }] },
       {
         role: "user",
-        content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok", cache_control: { type: "ephemeral" } } as unknown as Record<string, unknown>],
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: "ok",
+            cache_control: { type: "ephemeral" },
+          } as unknown as Record<string, unknown>,
+        ],
       },
     ],
     tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA } }],
@@ -2508,7 +2723,15 @@ test.concurrent("cross-row prompt-cache-breakpoint: tool_call-anchored markers r
       { role: "user", content: [{ type: "text", text: "hi" }] },
       {
         role: "assistant",
-        content: [{ type: "tool_use", id: "call_1", name: "get_weather", input: { city: "SF" }, cache_control: { type: "ephemeral" } } as unknown as Record<string, unknown>],
+        content: [
+          {
+            type: "tool_use",
+            id: "call_1",
+            name: "get_weather",
+            input: { city: "SF" },
+            cache_control: { type: "ephemeral" },
+          } as unknown as Record<string, unknown>,
+        ],
       },
     ],
     tools: [{ name: "get_weather", input_schema: { ...FUNC_SCHEMA } }],
@@ -2643,7 +2866,9 @@ test.concurrent("provider-container: R container_file_citation annotation reject
           {
             type: "output_text",
             text: "see page",
-            annotations: [{ type: "url_citation", url: "https://example.com", title: "t", start_index: 0, end_index: 3 }],
+            annotations: [
+              { type: "url_citation", url: "https://example.com", title: "t", start_index: 0, end_index: 3 },
+            ],
           },
         ],
       },

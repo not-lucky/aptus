@@ -65,7 +65,8 @@ const SCENARIOS: readonly ScenarioEntry[] = [
   },
   {
     file: "cancellation",
-    descriptor: "process: client disconnect mid-stream stops the relay with cancelled:client and no partial stream files",
+    descriptor:
+      "process: client disconnect mid-stream stops the relay with cancelled:client and no partial stream files",
     harness: "three-origin",
     counts: { chatOrigin: 1, responsesOrigin: 0, messagesOrigin: 0 },
   },
@@ -334,11 +335,17 @@ test.concurrent("process: dispatch-count sweep is internally consistent across e
     } else {
       // Single-origin harnesses wire exactly one origin; the others are unwired
       // and must stay at zero (any dispatch there would be a wiring bug).
-      assert.equal(counts.backupOrigin, undefined, `${entry.descriptor}: single-origin scenarios have no backup origin`);
+      assert.equal(
+        counts.backupOrigin,
+        undefined,
+        `${entry.descriptor}: single-origin scenarios have no backup origin`,
+      );
       assert.ok(target !== undefined, `${entry.descriptor}: single-origin scenarios must declare a target`);
-      const targetCount = { chat: counts.chatOrigin, responses: counts.responsesOrigin, messages: counts.messagesOrigin }[
-        target
-      ];
+      const targetCount = {
+        chat: counts.chatOrigin,
+        responses: counts.responsesOrigin,
+        messages: counts.messagesOrigin,
+      }[target];
       assert.ok(
         Number.isInteger(targetCount) && targetCount >= 0,
         `${entry.descriptor}: target origin count must be a non-negative integer`,

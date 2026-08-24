@@ -83,7 +83,12 @@ test.concurrent("translation codec responses: decodes and encodes outcome", () =
 
     const encoded = encoder.encodeOutcome(outcome);
     assert.equal(encoded.status, 200);
-    const body = encoded.body as { object: string; status: string; output: Array<{ content: Array<{ text: string }> }>; usage: { input_tokens: number } };
+    const body = encoded.body as {
+      object: string;
+      status: string;
+      output: Array<{ content: Array<{ text: string }> }>;
+      usage: { input_tokens: number };
+    };
     assert.equal(body.object, "response");
     assert.equal(body.status, "completed");
     assert.equal(body.output[0]?.content[0]?.text, "Hello from Responses!");

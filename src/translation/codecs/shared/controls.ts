@@ -35,7 +35,7 @@ export const MESSAGES_SERVICE_TIERS: ReadonlySet<string> = new Set(["auto", "sta
 /** Custom-tool grammar syntax literals shared by the Chat and Responses wires. */
 const GRAMMAR_SYNTAXES: ReadonlySet<GrammarSyntax> = new Set(GRAMMAR_SYNTAX_VALUES);
 
-/** Chat wire constraint on function tool names (decode and C-target preflight). */
+/** Chat wire constraint on function tool names (decode and C-target preflight, also structured output). */
 export const CHAT_TOOL_NAME_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /** Returns the value when it is a finite number; otherwise undefined. Never NaN/±Infinity. */

@@ -487,24 +487,26 @@ test.concurrent("usage null-policy: explicit null usage is absence on every prot
     assert.equal("usage" in body, false);
   }
 
-  const responsesNull = new ResponsesIngressDecoder().decodeOutcome(
-    200,
-    {},
-    { ...responsesBase, usage: null } as JsonObject,
-  );
+  const responsesNull = new ResponsesIngressDecoder().decodeOutcome(200, {}, {
+    ...responsesBase,
+    usage: null,
+  } as JsonObject);
   assert.equal(responsesNull.ok, true);
   if (responsesNull.ok) assert.equal(responsesNull.value.irOutcome.usage, undefined);
 
-  const messagesNull = new MessagesIngressDecoder().decodeOutcome(
-    200,
-    {},
-    { ...messagesBase, usage: null } as JsonObject,
-  );
+  const messagesNull = new MessagesIngressDecoder().decodeOutcome(200, {}, {
+    ...messagesBase,
+    usage: null,
+  } as JsonObject);
   assert.equal(messagesNull.ok, true);
   if (messagesNull.ok) assert.equal(messagesNull.value.irOutcome.usage, undefined);
 
   // Chat stream: a null usage chunk is absence; the terminal event carries none.
-  const cStream = new ChatProviderStreamDecoder({ responseId: "resp_sun_c", model: "logical-key", createPartId: () => "p1" });
+  const cStream = new ChatProviderStreamDecoder({
+    responseId: "resp_sun_c",
+    model: "logical-key",
+    createPartId: () => "p1",
+  });
   cStream.push({
     event: "start",
     data: '{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
@@ -633,110 +635,86 @@ test.concurrent("usage details wrappers: explicit null details are absence; non-
   const messagesDecoder = new MessagesIngressDecoder();
 
   // Explicit null wrappers decode to plain totals with no subdivisions.
-  const chatNull = chatDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "chatcmpl_dn",
-      object: "chat.completion",
-      created: 1,
-      model: "upstream-target",
-      choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
-      usage: {
-        prompt_tokens: 10,
-        completion_tokens: 4,
-        total_tokens: 14,
-        prompt_tokens_details: null,
-        completion_tokens_details: null,
-      },
-    } as JsonObject,
-  );
+  const chatNull = chatDecoder.decodeOutcome(200, {}, {
+    id: "chatcmpl_dn",
+    object: "chat.completion",
+    created: 1,
+    model: "upstream-target",
+    choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 4,
+      total_tokens: 14,
+      prompt_tokens_details: null,
+      completion_tokens_details: null,
+    },
+  } as JsonObject);
   assert.equal(chatNull.ok, true);
   if (chatNull.ok) assert.deepEqual(chatNull.value.irOutcome.usage, { input: 10, output: 4, total: 14 });
 
-  const responsesNull = responsesDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "resp_dn",
-      object: "response",
-      status: "completed",
-      model: "upstream-target",
-      output: [],
-      usage: {
-        input_tokens: 10,
-        output_tokens: 4,
-        total_tokens: 14,
-        input_tokens_details: null,
-        output_tokens_details: null,
-      },
-    } as JsonObject,
-  );
+  const responsesNull = responsesDecoder.decodeOutcome(200, {}, {
+    id: "resp_dn",
+    object: "response",
+    status: "completed",
+    model: "upstream-target",
+    output: [],
+    usage: {
+      input_tokens: 10,
+      output_tokens: 4,
+      total_tokens: 14,
+      input_tokens_details: null,
+      output_tokens_details: null,
+    },
+  } as JsonObject);
   assert.equal(responsesNull.ok, true);
   if (responsesNull.ok) assert.deepEqual(responsesNull.value.irOutcome.usage, { input: 10, output: 4, total: 14 });
 
-  const messagesNull = messagesDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "msg_dn",
-      type: "message",
-      role: "assistant",
-      model: "upstream-target",
-      content: [{ type: "text", text: "hi" }],
-      stop_reason: "end_turn",
-      stop_sequence: null,
-      usage: { input_tokens: 5, output_tokens: 4, output_tokens_details: null },
-    } as JsonObject,
-  );
+  const messagesNull = messagesDecoder.decodeOutcome(200, {}, {
+    id: "msg_dn",
+    type: "message",
+    role: "assistant",
+    model: "upstream-target",
+    content: [{ type: "text", text: "hi" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 4, output_tokens_details: null },
+  } as JsonObject);
   assert.equal(messagesNull.ok, true);
   if (messagesNull.ok) assert.deepEqual(messagesNull.value.irOutcome.usage, { input: 5, output: 4 });
 
   // Present non-null non-object wrappers are malformed wire.
-  const chatJunk = chatDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "chatcmpl_dj",
-      object: "chat.completion",
-      created: 1,
-      model: "upstream-target",
-      choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14, prompt_tokens_details: "junk" },
-    } as JsonObject,
-  );
+  const chatJunk = chatDecoder.decodeOutcome(200, {}, {
+    id: "chatcmpl_dj",
+    object: "chat.completion",
+    created: 1,
+    model: "upstream-target",
+    choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14, prompt_tokens_details: "junk" },
+  } as JsonObject);
   assert.equal(chatJunk.ok, false);
   if (!chatJunk.ok) assert.equal(chatJunk.error.capability, undefined);
 
-  const responsesJunk = responsesDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "resp_dj",
-      object: "response",
-      status: "completed",
-      model: "upstream-target",
-      output: [],
-      usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14, input_tokens_details: "junk" },
-    } as JsonObject,
-  );
+  const responsesJunk = responsesDecoder.decodeOutcome(200, {}, {
+    id: "resp_dj",
+    object: "response",
+    status: "completed",
+    model: "upstream-target",
+    output: [],
+    usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14, input_tokens_details: "junk" },
+  } as JsonObject);
   assert.equal(responsesJunk.ok, false);
   if (!responsesJunk.ok) assert.equal(responsesJunk.error.capability, undefined);
 
-  const messagesJunk = messagesDecoder.decodeOutcome(
-    200,
-    {},
-    {
-      id: "msg_dj",
-      type: "message",
-      role: "assistant",
-      model: "upstream-target",
-      content: [{ type: "text", text: "hi" }],
-      stop_reason: "end_turn",
-      stop_sequence: null,
-      usage: { input_tokens: 5, output_tokens: 4, output_tokens_details: "junk" },
-    } as JsonObject,
-  );
+  const messagesJunk = messagesDecoder.decodeOutcome(200, {}, {
+    id: "msg_dj",
+    type: "message",
+    role: "assistant",
+    model: "upstream-target",
+    content: [{ type: "text", text: "hi" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 4, output_tokens_details: "junk" },
+  } as JsonObject);
   assert.equal(messagesJunk.ok, false);
   if (!messagesJunk.ok) assert.equal(messagesJunk.error.capability, undefined);
 });

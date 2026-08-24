@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  MATRIX,
-  getCapabilityRow,
-} from "../../src/translation/matrix.ts";
+import { getCapabilityRow, MATRIX } from "../../src/translation/matrix.ts";
 
 const DIRECTIONS = [
   "openai-chat->openai-responses",
@@ -70,5 +67,3 @@ test.concurrent("translation matrix: getCapabilityRow correctly retrieves capabi
 
   assert.equal(getCapabilityRow("non-existent-capability"), undefined);
 });
-
-

@@ -18,6 +18,7 @@ import { failure, invalidRequest, ok, unsupportedCapability } from "../../result
 import type { SseFrame } from "../../sse.ts";
 import { firstUnknownKey } from "../shared/controls.ts";
 import { parseFunctionArgumentsOnce } from "../shared/hosted-tools.ts";
+import { chatOutputFormatFields } from "../shared/output-format.ts";
 import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
 import { chatToolFields } from "../shared/tool-fields.ts";
 import { buildChatMessages, chatFinishReason, chatGenerationFields } from "../shared/transcript.ts";
@@ -101,6 +102,7 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
       ...chatGenerationFields(request.generation),
       ...chatResponsesRequestFields(requestWireOptions),
       ...chatToolFields(request, requestWireOptions),
+      ...chatOutputFormatFields(request.output, requestWireOptions),
     };
   }
 }

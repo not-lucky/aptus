@@ -40,7 +40,14 @@ test.concurrent("messages stream decoder: streamed hosted blocks fail closed wit
     event: "message_start",
     data: JSON.stringify({
       type: "message_start",
-      message: { id: "msg_1", type: "message", role: "assistant", model: "claude-3-5-sonnet", content: [], usage: { input_tokens: 10, output_tokens: 1 } },
+      message: {
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude-3-5-sonnet",
+        content: [],
+        usage: { input_tokens: 10, output_tokens: 1 },
+      },
     }),
   });
 
@@ -62,7 +69,14 @@ test.concurrent("messages stream decoder: streamed hosted blocks fail closed wit
     event: "message_start",
     data: JSON.stringify({
       type: "message_start",
-      message: { id: "msg_2", type: "message", role: "assistant", model: "claude-3-5-sonnet", content: [], usage: { input_tokens: 10, output_tokens: 1 } },
+      message: {
+        id: "msg_2",
+        type: "message",
+        role: "assistant",
+        model: "claude-3-5-sonnet",
+        content: [],
+        usage: { input_tokens: 10, output_tokens: 1 },
+      },
     }),
   });
   const codeExecRes = codeExecDecoder.push({
@@ -82,7 +96,12 @@ test.concurrent("messages stream decoder: streamed hosted blocks fail closed wit
 test.concurrent("messages stream encoder: fails on unknown part_start type", () => {
   const encoder = new MessagesClientStreamEncoder(session);
   encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
-  const res = encoder.encode({ type: "part_start", responseId: "resp_123", partId: "part_x", part: { type: "unknown_custom" as never } });
+  const res = encoder.encode({
+    type: "part_start",
+    responseId: "resp_123",
+    partId: "part_x",
+    part: { type: "unknown_custom" as never },
+  });
   assert.equal(res.ok, false);
   if (!res.ok) {
     assert.equal(res.error.capability, "unknown-stream-event");
@@ -92,9 +111,20 @@ test.concurrent("messages stream encoder: fails on unknown part_start type", () 
 test.concurrent("messages stream encoder: fails with payload_too_large when serialized function arguments exceed limit", () => {
   const encoder = new MessagesClientStreamEncoder(session);
   encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
-  encoder.encode({ type: "part_start", responseId: "resp_123", partId: "part_fn", part: { type: "function_call", callId: "call_1", name: "big_fn" } });
+  encoder.encode({
+    type: "part_start",
+    responseId: "resp_123",
+    partId: "part_fn",
+    part: { type: "function_call", callId: "call_1", name: "big_fn" },
+  });
   const hugeString = "x".repeat(34 * 1024 * 1024);
-  const endRes = encoder.encode({ type: "part_end", responseId: "resp_123", partId: "part_fn", partType: "function_call", arguments: { data: hugeString } });
+  const endRes = encoder.encode({
+    type: "part_end",
+    responseId: "resp_123",
+    partId: "part_fn",
+    partType: "function_call",
+    arguments: { data: hugeString },
+  });
   assert.equal(endRes.ok, false);
   if (!endRes.ok) assert.equal(endRes.error.category, "payload_too_large");
 });
@@ -102,7 +132,10 @@ test.concurrent("messages stream encoder: fails with payload_too_large when seri
 test.concurrent("messages stream decoder: client tool arguments with encrypted_content key are admitted", () => {
   const decoder = new MessagesProviderStreamDecoder(session);
   const frames = [
-    { event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1", model: "claude-3-5" } }) },
+    {
+      event: "message_start",
+      data: JSON.stringify({ type: "message_start", message: { id: "m1", model: "claude-3-5" } }),
+    },
     {
       event: "content_block_start",
       data: JSON.stringify({
@@ -143,7 +176,10 @@ test.concurrent("messages stream decoder: client tool arguments with encrypted_c
 test.concurrent("messages stream decoder: rejects content block index reuse across stream lifecycle", () => {
   const decoder = new MessagesProviderStreamDecoder(session);
   decoder.push({ event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1" } }) });
-  decoder.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }) });
+  decoder.push({
+    event: "content_block_start",
+    data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+  });
   decoder.push({ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) });
 
   // Reusing index 0 on a new block start must fail closed
@@ -160,10 +196,34 @@ test.concurrent("messages stream decoder: rejects content block index reuse acro
 test.concurrent("messages stream decoder: decodes tool_use and input_json_delta", () => {
   const decoder = new MessagesProviderStreamDecoder(session);
   const frames = [
-    { event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1", model: "claude-3-5" } }) },
-    { event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_m1", name: "get_weather", input: {} } }) },
-    { event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"city":' } }) },
-    { event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '"SF"}' } }) },
+    {
+      event: "message_start",
+      data: JSON.stringify({ type: "message_start", message: { id: "m1", model: "claude-3-5" } }),
+    },
+    {
+      event: "content_block_start",
+      data: JSON.stringify({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_m1", name: "get_weather", input: {} },
+      }),
+    },
+    {
+      event: "content_block_delta",
+      data: JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"city":' },
+      }),
+    },
+    {
+      event: "content_block_delta",
+      data: JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '"SF"}' },
+      }),
+    },
     { event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) },
     { event: "message_delta", data: JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" } }) },
     { event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
@@ -206,7 +266,11 @@ test.concurrent("messages stream decoder: requires non-negative integer index on
   decoder.push({ event: "message_start", data: JSON.stringify({ type: "message_start", message: { id: "m1" } }) });
   const invalidIndexRes = decoder.push({
     event: "content_block_start",
-    data: JSON.stringify({ type: "content_block_start", index: "0" as unknown as number, content_block: { type: "text", text: "" } }),
+    data: JSON.stringify({
+      type: "content_block_start",
+      index: "0" as unknown as number,
+      content_block: { type: "text", text: "" },
+    }),
   });
   assert.equal(invalidIndexRes.ok, false);
   if (!invalidIndexRes.ok) {
@@ -448,8 +512,7 @@ test.concurrent("messages stream decoder: usage.inference_geo on message_start o
   const startDecoder = new MessagesProviderStreamDecoder(session);
   const startRes = startDecoder.push({
     event: "message_start",
-    data:
-      '{"type":"message_start","message":{"id":"msg_geo","type":"message","role":"assistant","content":[],"model":"claude","usage":{"input_tokens":10,"output_tokens":1,"inference_geo":"global"}}}',
+    data: '{"type":"message_start","message":{"id":"msg_geo","type":"message","role":"assistant","content":[],"model":"claude","usage":{"input_tokens":10,"output_tokens":1,"inference_geo":"global"}}}',
   });
   assert.equal(startRes.ok, false);
   if (!startRes.ok) assert.equal(startRes.error.capability, "inference-geography");
@@ -458,13 +521,11 @@ test.concurrent("messages stream decoder: usage.inference_geo on message_start o
   const deltaDecoder = new MessagesProviderStreamDecoder(session);
   deltaDecoder.push({
     event: "message_start",
-    data:
-      '{"type":"message_start","message":{"id":"msg_geo","type":"message","role":"assistant","content":[],"model":"claude","usage":{"input_tokens":10,"output_tokens":1}}}',
+    data: '{"type":"message_start","message":{"id":"msg_geo","type":"message","role":"assistant","content":[],"model":"claude","usage":{"input_tokens":10,"output_tokens":1}}}',
   });
   const deltaRes = deltaDecoder.push({
     event: "message_delta",
-    data:
-      '{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8,"inference_geo":"global"}}',
+    data: '{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8,"inference_geo":"global"}}',
   });
   assert.equal(deltaRes.ok, false);
   if (!deltaRes.ok) assert.equal(deltaRes.error.capability, "inference-geography");
@@ -474,11 +535,21 @@ test.concurrent("messages stream encoder: tracks monotonic part indices across m
   const encoder = new MessagesClientStreamEncoder(session);
   encoder.encode({ type: "response_start", responseId: "resp_123", model: "claude-main" });
 
-  const p1Start = encoder.encode({ type: "part_start", responseId: "resp_123", partId: "part_a", part: { type: "text" } });
+  const p1Start = encoder.encode({
+    type: "part_start",
+    responseId: "resp_123",
+    partId: "part_a",
+    part: { type: "text" },
+  });
   const p1Delta = encoder.encode({ type: "text_delta", responseId: "resp_123", partId: "part_a", text: "Part 1" });
   const p1End = encoder.encode({ type: "part_end", responseId: "resp_123", partId: "part_a", partType: "text" });
 
-  const p2Start = encoder.encode({ type: "part_start", responseId: "resp_123", partId: "part_b", part: { type: "text" } });
+  const p2Start = encoder.encode({
+    type: "part_start",
+    responseId: "resp_123",
+    partId: "part_b",
+    part: { type: "text" },
+  });
   const p2Delta = encoder.encode({ type: "text_delta", responseId: "resp_123", partId: "part_b", text: "Part 2" });
   const p2End = encoder.encode({ type: "part_end", responseId: "resp_123", partId: "part_b", partType: "text" });
 
@@ -499,4 +570,3 @@ test.concurrent("messages stream encoder: tracks monotonic part indices across m
     assert.equal(JSON.parse(p2End.value[0]!.data).index, 1);
   }
 });
-

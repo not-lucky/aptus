@@ -194,7 +194,7 @@ export function chatGenerationFields(generation: IrGenerationControls | undefine
 
 /**
  * Projects IR generation controls onto Responses wire fields:
- * temperature / top_p / max_output_tokens / text.verbosity / reasoning.effort.
+ * temperature / top_p / max_output_tokens / reasoning.effort.
  */
 export function responsesGenerationFields(generation: IrGenerationControls | undefined): Record<string, JsonValue> {
   if (generation === undefined) return {};
@@ -202,7 +202,6 @@ export function responsesGenerationFields(generation: IrGenerationControls | und
   if (generation.temperature !== undefined) fields.temperature = generation.temperature;
   if (generation.topP !== undefined) fields.top_p = generation.topP;
   if (generation.maxOutputTokens !== undefined) fields.max_output_tokens = generation.maxOutputTokens;
-  if (generation.verbosity !== undefined) fields.text = { verbosity: generation.verbosity };
   if (generation.reasoning?.effort !== undefined) fields.reasoning = { effort: generation.reasoning.effort };
   return fields;
 }

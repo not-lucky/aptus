@@ -45,7 +45,14 @@ test.concurrent("chat stream decoder: duplicate tool_call id across different in
       object: "chat.completion.chunk",
       created: 100,
       model: "upstream",
-      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_dup", type: "function", function: { name: "fn1", arguments: "{}" } }] } }],
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 0, id: "call_dup", type: "function", function: { name: "fn1", arguments: "{}" } }],
+          },
+        },
+      ],
     }),
   });
   assert.equal(chunk1.ok, true);
@@ -56,7 +63,14 @@ test.concurrent("chat stream decoder: duplicate tool_call id across different in
       object: "chat.completion.chunk",
       created: 101,
       model: "upstream",
-      choices: [{ index: 0, delta: { tool_calls: [{ index: 1, id: "call_dup", type: "function", function: { name: "fn2", arguments: "{}" } }] } }],
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 1, id: "call_dup", type: "function", function: { name: "fn2", arguments: "{}" } }],
+          },
+        },
+      ],
     }),
   });
   assert.equal(chunk2.ok, false);
@@ -73,7 +87,22 @@ test.concurrent("chat stream decoder: unrecognized extra keys on tool_calls or f
       object: "chat.completion.chunk",
       created: 100,
       model: "upstream",
-      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "fn1", arguments: "{}" }, extra_field: true }] } }],
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                type: "function",
+                function: { name: "fn1", arguments: "{}" },
+                extra_field: true,
+              },
+            ],
+          },
+        },
+      ],
     }),
   });
   assert.equal(extraKeyChunk.ok, false);
@@ -125,7 +154,9 @@ test.concurrent("chat stream decoder: malformed choices and tool_calls fail clos
   const resNonStringArgs = decoder.push({
     data: JSON.stringify({
       object: "chat.completion.chunk",
-      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "fn", arguments: 123 } }] } }],
+      choices: [
+        { index: 0, delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "fn", arguments: 123 } }] } },
+      ],
     }),
   });
   assert.equal(resNonStringArgs.ok, false);
@@ -258,7 +289,14 @@ test.concurrent("chat stream decoder: enforces maxArgumentBytes on tool argument
       object: "chat.completion.chunk",
       created: 100,
       model: "upstream",
-      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "fn", arguments: "12345678901" } }] } }],
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "fn", arguments: "12345678901" } }],
+          },
+        },
+      ],
     }),
   });
   assert.equal(res.ok, false);

@@ -7,6 +7,7 @@ import type { IrFinishReason, IrOutcome, IrRequest } from "./ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import {
   validateMessagesObjectRoot,
+  validateMessagesOutputSchema,
   validateMessagesStrictSchema,
   validateOpenAiStrictSchema,
 } from "./schema-dialect.ts";
@@ -15,6 +16,30 @@ import {
 const METADATA_MAX_ENTRIES = 16;
 const METADATA_MAX_KEY_LENGTH = 64;
 const METADATA_MAX_VALUE_LENGTH = 512;
+
+function preflightOutputFormat(req: IrRequest, facts: DirectionFacts): Result<void, NormalizedFailure> {
+  const output = req.output;
+  if (output === undefined || output.type !== "json_schema") return ok(undefined);
+  const { isTargetMessages } = facts;
+
+  if (isTargetMessages) {
+    if (output.strict === true) {
+      return unsupportedCapability("structured-strict-guarantee");
+    }
+    if (typeof output.description === "string" && output.description.length > 0) {
+      return unsupportedCapability("structured-name-description");
+    }
+    return validateMessagesOutputSchema(output.schema, "structured-json-schema");
+  }
+
+  if (output.strict === true) {
+    return validateOpenAiStrictSchema(output.schema, "structured-strict-guarantee");
+  }
+  if (output.schema.type !== "object") {
+    return unsupportedCapability("structured-json-schema", "/: root type must be object");
+  }
+  return ok(undefined);
+}
 
 /**
  * Validates the C/R metadata size/count subset: at most 16 entries, keys ≤64
@@ -49,104 +74,19 @@ interface DirectionFacts {
   readonly isSourceMessages: boolean;
 }
 
-const DIRECTION_FACTS: Record<Direction, DirectionFacts> = {
-  "openai-chat->openai-responses": {
-    source: "openai-chat",
-    target: "openai-responses",
-    involvesMessages: false,
-    isTargetChat: false,
-    isTargetResponses: true,
-    isTargetMessages: false,
-    isChatResponses: true,
-    isSourceMessages: false,
-  },
-  "openai-chat->anthropic-messages": {
-    source: "openai-chat",
-    target: "anthropic-messages",
-    involvesMessages: true,
-    isTargetChat: false,
-    isTargetResponses: false,
-    isTargetMessages: true,
-    isChatResponses: false,
-    isSourceMessages: false,
-  },
-  "openai-responses->openai-chat": {
-    source: "openai-responses",
-    target: "openai-chat",
-    involvesMessages: false,
-    isTargetChat: true,
-    isTargetResponses: false,
-    isTargetMessages: false,
-    isChatResponses: true,
-    isSourceMessages: false,
-  },
-  "openai-responses->anthropic-messages": {
-    source: "openai-responses",
-    target: "anthropic-messages",
-    involvesMessages: true,
-    isTargetChat: false,
-    isTargetResponses: false,
-    isTargetMessages: true,
-    isChatResponses: false,
-    isSourceMessages: false,
-  },
-  "anthropic-messages->openai-chat": {
-    source: "anthropic-messages",
-    target: "openai-chat",
-    involvesMessages: true,
-    isTargetChat: true,
-    isTargetResponses: false,
-    isTargetMessages: false,
-    isChatResponses: false,
-    isSourceMessages: true,
-  },
-  "anthropic-messages->openai-responses": {
-    source: "anthropic-messages",
-    target: "openai-responses",
-    involvesMessages: true,
-    isTargetChat: false,
-    isTargetResponses: true,
-    isTargetMessages: false,
-    isChatResponses: false,
-    isSourceMessages: true,
-  },
-};
-
-const SAME_PROTOCOL_FACTS: Readonly<Record<string, DirectionFacts>> = {
-  "openai-chat->openai-chat": {
-    source: "openai-chat",
-    target: "openai-chat",
-    involvesMessages: false,
-    isTargetChat: true,
-    isTargetResponses: false,
-    isTargetMessages: false,
-    isChatResponses: true,
-    isSourceMessages: false,
-  },
-  "openai-responses->openai-responses": {
-    source: "openai-responses",
-    target: "openai-responses",
-    involvesMessages: false,
-    isTargetChat: false,
-    isTargetResponses: true,
-    isTargetMessages: false,
-    isChatResponses: true,
-    isSourceMessages: false,
-  },
-  "anthropic-messages->anthropic-messages": {
-    source: "anthropic-messages",
-    target: "anthropic-messages",
-    involvesMessages: true,
-    isTargetChat: false,
-    isTargetResponses: false,
-    isTargetMessages: true,
-    isChatResponses: false,
-    isSourceMessages: true,
-  },
-};
-
 function directionFacts(direction: Direction): DirectionFacts {
-  return DIRECTION_FACTS[direction] ?? SAME_PROTOCOL_FACTS[direction];
+  const [source, target] = direction.split("->") as [Protocol, Protocol];
+  const involvesMessages = source === "anthropic-messages" || target === "anthropic-messages";
+  return {
+    source,
+    target,
+    involvesMessages,
+    isTargetChat: target === "openai-chat",
+    isTargetResponses: target === "openai-responses",
+    isTargetMessages: target === "anthropic-messages",
+    isChatResponses: !involvesMessages,
+    isSourceMessages: source === "anthropic-messages",
+  };
 }
 
 /**
@@ -246,6 +186,7 @@ const MESSAGES_FORBIDDEN_REQUEST_OPTIONS: ReadonlyArray<readonly [keyof RequestW
   ["safetyIdentifier", "safety-identifier"],
   ["moderation", "moderation-policy-result"],
   ["allowedToolSubset", "allowed-tool-subset"],
+  ["legacyJsonObject", "legacy-json-object"],
 ];
 
 function preflightRequestWireOptions(
@@ -411,11 +352,8 @@ function preflightPlainTextRequestFeatures(
   if (!generationResult.ok) return generationResult;
   const sidecarResult = preflightRequestWireOptions(req, facts, requestWireOptions);
   if (!sidecarResult.ok) return sidecarResult;
-
-  // Gated structured output
-  if (req.output !== undefined && req.output.type !== "text") {
-    return unsupportedCapability("structured-json-schema");
-  }
+  const outputResult = preflightOutputFormat(req, facts);
+  if (!outputResult.ok) return outputResult;
 
   return preflightTranscript(req, facts);
 }

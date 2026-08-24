@@ -77,7 +77,7 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
         model: input.logicalModel,
       };
 
-      // 2. Validate IR request invariants (IR-only: never inspects the sidecar)
+      // 2. Validate IR request invariants and sidecar mutual exclusion
       const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
       if (!validateResult.ok) {
         return validateResult;

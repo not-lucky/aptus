@@ -1,5 +1,6 @@
 import type { RequestWireOptions } from "../../contracts.ts";
 import type { IrInputPart, IrRequest, JsonObject, JsonValue } from "../../ir.ts";
+import { messagesOutputConfigFields } from "./output-format.ts";
 import { messagesToolFields } from "./tool-fields.ts";
 import { messagesGenerationFields, messagesWireOptionFields } from "./transcript.ts";
 
@@ -101,6 +102,7 @@ export function buildMessagesRequestBody(
     ...messagesGenerationFields(request.generation),
     ...messagesWireOptionFields(requestWireOptions),
     ...messagesToolFields(request, requestWireOptions),
+    ...messagesOutputConfigFields(request.output),
   };
   if (systemBlocks.length > 0) payload.system = systemBlocks as JsonValue;
   return payload as JsonObject;

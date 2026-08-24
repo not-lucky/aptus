@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import type {
-  IrFinish,
-  IrOutcome,
-  IrOutputPart,
-  IrRequest,
-  IrUsage,
-} from "../../src/translation/ir.ts";
+import type { IrFinish, IrOutcome, IrOutputPart, IrRequest, IrUsage } from "../../src/translation/ir.ts";
 
 test.concurrent("translation ir: constructs fully typed IrRequest", () => {
   const request: IrRequest = {

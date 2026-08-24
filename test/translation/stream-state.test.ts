@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import type { JsonObject } from "../../src/domain/contracts.ts";
 import fc from "fast-check";
 import { test } from "vitest";
+import type { JsonObject } from "../../src/domain/contracts.ts";
 import type { IrStreamEvent } from "../../src/translation/ir.ts";
 import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
 
@@ -69,7 +69,12 @@ test.concurrent("state machine: property test for legal interleaved text and fun
           seq.push({ type: "part_end", responseId, partId, partType: "text" });
         } else {
           functionPartCount++;
-          seq.push({ type: "part_start", responseId, partId, part: { type: "function_call", callId, name: `fn_${i}` } });
+          seq.push({
+            type: "part_start",
+            responseId,
+            partId,
+            part: { type: "function_call", callId, name: `fn_${i}` },
+          });
           for (let d = 0; d < spec.deltaCount; d++) {
             seq.push({ type: "tool_arguments_delta", responseId, partId, callId, text: `{"k${d}":${d}}` });
           }
@@ -90,7 +95,11 @@ test.concurrent("state machine: property test for legal interleaved text and fun
         if (evt === undefined) continue;
         if (queue.length === 0) remaining--;
         const res = sm.feed(evt);
-        assert.equal(res.ok, true, `Legal mixed interleaved event '${evt.type}' failed: ${!res.ok ? res.error.message : ""}`);
+        assert.equal(
+          res.ok,
+          true,
+          `Legal mixed interleaved event '${evt.type}' failed: ${!res.ok ? res.error.message : ""}`,
+        );
       }
 
       const finishReason = functionPartCount > 0 ? "tool_calls" : "stop";
@@ -106,7 +115,6 @@ test.concurrent("state machine: property test for legal interleaved text and fun
     { numRuns: 50 },
   );
 });
-
 
 test.concurrent("state machine: supports interleaved open text parts", () => {
   const sm = createIrStreamStateMachine();
@@ -214,37 +222,64 @@ test.concurrent("state machine: legal interleaved function call and text parts",
   const sm = createIrStreamStateMachine({ expectedResponseId: "r_fn", expectedModel: "m_fn" });
   assert.equal(sm.feed({ type: "response_start", responseId: "r_fn", model: "m_fn" }).ok, true);
   assert.equal(
-    sm.feed({ type: "part_start", responseId: "r_fn", partId: "p_fn1", part: { type: "function_call", callId: "call_1", name: "get_weather" } }).ok,
+    sm.feed({
+      type: "part_start",
+      responseId: "r_fn",
+      partId: "p_fn1",
+      part: { type: "function_call", callId: "call_1", name: "get_weather" },
+    }).ok,
     true,
   );
   assert.equal(
-    sm.feed({ type: "tool_arguments_delta", responseId: "r_fn", partId: "p_fn1", callId: "call_1", text: '{"loc":' }).ok,
+    sm.feed({ type: "tool_arguments_delta", responseId: "r_fn", partId: "p_fn1", callId: "call_1", text: '{"loc":' })
+      .ok,
     true,
   );
   assert.equal(
-    sm.feed({ type: "part_start", responseId: "r_fn", partId: "p_fn2", part: { type: "function_call", callId: "call_2", name: "get_time" } }).ok,
+    sm.feed({
+      type: "part_start",
+      responseId: "r_fn",
+      partId: "p_fn2",
+      part: { type: "function_call", callId: "call_2", name: "get_time" },
+    }).ok,
     true,
   );
   assert.equal(
-    sm.feed({ type: "tool_arguments_delta", responseId: "r_fn", partId: "p_fn2", callId: "call_2", text: '{"zone": "UTC"}' }).ok,
+    sm.feed({
+      type: "tool_arguments_delta",
+      responseId: "r_fn",
+      partId: "p_fn2",
+      callId: "call_2",
+      text: '{"zone": "UTC"}',
+    }).ok,
     true,
   );
   assert.equal(
-    sm.feed({ type: "tool_arguments_delta", responseId: "r_fn", partId: "p_fn1", callId: "call_1", text: ' "Tokyo"}' }).ok,
+    sm.feed({ type: "tool_arguments_delta", responseId: "r_fn", partId: "p_fn1", callId: "call_1", text: ' "Tokyo"}' })
+      .ok,
     true,
   );
   assert.equal(
-    sm.feed({ type: "part_end", responseId: "r_fn", partId: "p_fn1", partType: "function_call", arguments: { loc: "Tokyo" } }).ok,
+    sm.feed({
+      type: "part_end",
+      responseId: "r_fn",
+      partId: "p_fn1",
+      partType: "function_call",
+      arguments: { loc: "Tokyo" },
+    }).ok,
     true,
   );
   assert.equal(
-    sm.feed({ type: "part_end", responseId: "r_fn", partId: "p_fn2", partType: "function_call", arguments: { zone: "UTC" } }).ok,
+    sm.feed({
+      type: "part_end",
+      responseId: "r_fn",
+      partId: "p_fn2",
+      partType: "function_call",
+      arguments: { zone: "UTC" },
+    }).ok,
     true,
   );
-  assert.equal(
-    sm.feed({ type: "response_end", responseId: "r_fn", finish: { reason: "tool_calls" } }).ok,
-    true,
-  );
+  assert.equal(sm.feed({ type: "response_end", responseId: "r_fn", finish: { reason: "tool_calls" } }).ok, true);
   assert.equal(sm.isTerminal(), true);
 });
 
@@ -252,7 +287,12 @@ test.concurrent("state machine: rejects duplicate callId across stream", () => {
   const sm = createIrStreamStateMachine();
   sm.feed({ type: "response_start", responseId: "r_dup", model: "m" });
   assert.equal(
-    sm.feed({ type: "part_start", responseId: "r_dup", partId: "p1", part: { type: "function_call", callId: "call_same", name: "fn1" } }).ok,
+    sm.feed({
+      type: "part_start",
+      responseId: "r_dup",
+      partId: "p1",
+      part: { type: "function_call", callId: "call_same", name: "fn1" },
+    }).ok,
     true,
   );
   sm.feed({ type: "part_end", responseId: "r_dup", partId: "p1", partType: "function_call" });
@@ -272,7 +312,12 @@ test.concurrent("state machine: rejects duplicate callId across stream", () => {
 test.concurrent("state machine: rejects tool_arguments_delta for closed part or mismatched callId", () => {
   const sm = createIrStreamStateMachine();
   sm.feed({ type: "response_start", responseId: "r_delta", model: "m" });
-  sm.feed({ type: "part_start", responseId: "r_delta", partId: "p1", part: { type: "function_call", callId: "c1", name: "fn" } });
+  sm.feed({
+    type: "part_start",
+    responseId: "r_delta",
+    partId: "p1",
+    part: { type: "function_call", callId: "c1", name: "fn" },
+  });
 
   const wrongCallId = sm.feed({
     type: "tool_arguments_delta",
@@ -311,7 +356,12 @@ test.concurrent("state machine: rejects tool_calls finish reason if zero functio
 test.concurrent("state machine: rejects non-object arguments at part_end", () => {
   const sm = createIrStreamStateMachine();
   sm.feed({ type: "response_start", responseId: "r_nonobj", model: "m" });
-  sm.feed({ type: "part_start", responseId: "r_nonobj", partId: "p1", part: { type: "function_call", callId: "c1", name: "fn" } });
+  sm.feed({
+    type: "part_start",
+    responseId: "r_nonobj",
+    partId: "p1",
+    part: { type: "function_call", callId: "c1", name: "fn" },
+  });
   const nonObj = sm.feed({
     type: "part_end",
     responseId: "r_nonobj",

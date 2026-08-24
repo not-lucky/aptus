@@ -16,6 +16,7 @@ import type { IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
 import { parseFunctionArgumentsOnce, responsesReasoningItemFailure } from "../shared/hosted-tools.ts";
+import { responsesTextConfig } from "../shared/output-format.ts";
 import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
 import { responsesToolFields } from "../shared/tool-fields.ts";
 import { buildResponsesInput, responsesFinishStatus, responsesGenerationFields } from "../shared/transcript.ts";
@@ -66,6 +67,7 @@ export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
       input,
       stream: true,
       ...responsesGenerationFields(request.generation),
+      ...responsesTextConfig(request.generation, request.output, requestWireOptions),
       ...chatResponsesRequestFields(requestWireOptions),
       ...responsesToolFields(request, requestWireOptions),
     };

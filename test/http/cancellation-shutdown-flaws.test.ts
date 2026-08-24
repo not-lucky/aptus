@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import type { TerminalFact, TraceSession } from "../../src/domain/contracts.ts";
 import { createTerminalCoordinator } from "../../src/http/coordinator.ts";
 import { classifyAbortReason } from "../../src/routing/attempt.ts";
-import type { TerminalFact, TraceSession } from "../../src/domain/contracts.ts";
 
 test.concurrent("classifyAbortReason classifies timeout, shutdown, and client correctly", () => {
   const timeoutCtrl = new AbortController();
@@ -92,7 +92,7 @@ test.concurrent("TerminalCoordinator tracks attempt counts and uses them on canc
 });
 
 test.concurrent("TerminalCoordinator falls back to shutdown_abort when trace.finish rejects on shutdown cancellation", async () => {
-  let finishCalls: any[] = [];
+  const finishCalls: any[] = [];
   const mockTrace: TraceSession = {
     recordJson: async () => {},
     recordBytes: async () => {},

@@ -762,10 +762,15 @@ const OWNED_ROW_TIERS: ReadonlyArray<readonly [string, string]> = [
   ["hosted-web-search-preview", "T3,T3,T3,T3,T3,T3"],
   ["hosted-computer-use-preview", "T3,T3,T3,T3,T3,T3"],
   ["hosted-local-shell-preview", "T3,T3,T3,T3,T3,T3"],
+  // Structured output
+  ["structured-json-schema", "T1,T2,T1,T2,T2,T2"],
+  ["structured-strict-guarantee", "T1,T3,T1,T3,T3,T3"],
+  ["structured-name-description", "T1,T2,T1,T2,T2,T2"],
+  ["legacy-json-object", "T1,T3,T1,T3,T3,T3"],
 ];
 
-test.concurrent("owned rows: each of the 101 rows is single-assigned with the pinned six-direction tier vector", () => {
-  assert.equal(OWNED_ROW_TIERS.length, 101);
+test.concurrent("owned rows: each of the 105 rows is single-assigned with the pinned six-direction tier vector", () => {
+  assert.equal(OWNED_ROW_TIERS.length, 105);
   for (const [id, expectedVector] of OWNED_ROW_TIERS) {
     const row = getCapabilityRow(id);
     assert.ok(row !== undefined, `missing matrix row for ${id}`);

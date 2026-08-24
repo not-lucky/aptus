@@ -8,7 +8,7 @@ import type {
   RequestWireOptions,
 } from "../../contracts.ts";
 import { invalidRequestFailure, unsupportedCapabilityFailure } from "../../failures.ts";
-import type { IrGenerationControls, IrItem, IrRequest, IrToolChoice, NonEmpty } from "../../ir.ts";
+import type { IrGenerationControls, IrItem, IrOutputFormat, IrRequest, IrToolChoice, NonEmpty } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import {
   asNonEmptyStopSequences,
@@ -62,27 +62,38 @@ function parseMessagesThinking(value: unknown): NormalizedFailure {
 }
 
 /**
- * Classifies the `output_config` request control into its matrix-row failure:
- * `effort` is the M `reasoning-effort-common` trigger (same five shared
- * literals, blocked in every M direction); `format` stays the
- * `structured-json-schema` trigger. The check is key-order-independent, and an
- * object carrying neither sub-field is structurally invalid. The control is
- * never admitted, so this always yields a failure.
+ * Parses the Messages `output_config` request control: `effort` fails with
+ * `reasoning-effort-common`; `format` is parsed into `IrOutputFormat`.
  */
-function parseMessagesOutputConfig(value: unknown): NormalizedFailure {
+function parseMessagesOutputConfig(value: unknown): Result<IrOutputFormat | undefined, NormalizedFailure> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return invalidRequestFailure("output_config must be an object");
+    return invalidRequest("output_config must be an object");
   }
   const raw = value as Record<string, unknown>;
   const extra = firstUnknownKey(raw, ["effort", "format"]);
-  if (extra !== undefined) return invalidRequestFailure(`output_config.${extra} is not recognized`);
+  if (extra !== undefined) return invalidRequest(`output_config.${extra} is not recognized`);
   if (raw.effort !== undefined) {
-    return unsupportedCapabilityFailure("reasoning-effort-common");
+    return unsupportedCapability("reasoning-effort-common");
   }
   if (raw.format !== undefined) {
-    return unsupportedCapabilityFailure("structured-json-schema");
+    const format = raw.format;
+    if (typeof format !== "object" || format === null || Array.isArray(format)) {
+      return invalidRequest("output_config.format must be an object");
+    }
+    const fmtObj = format as Record<string, unknown>;
+    const fmtExtra = firstUnknownKey(fmtObj, ["type", "schema"]);
+    if (fmtExtra !== undefined) return invalidRequest(`output_config.format.${fmtExtra} is not recognized`);
+    const type = fmtObj.type;
+    if (type !== "json_schema") {
+      return unsupportedCapability("structured-json-schema");
+    }
+    const schema = fmtObj.schema;
+    if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+      return invalidRequest("output_config.format.schema must be an object");
+    }
+    return ok({ type: "json_schema", schema: schema as JsonObject });
   }
-  return invalidRequestFailure("output_config must carry 'effort' or 'format'");
+  return invalidRequest("output_config must carry 'effort' or 'format'");
 }
 
 const MESSAGES_ALLOWED_CALLERS: ReadonlySet<string> = new Set([
@@ -160,8 +171,11 @@ export function parseMessagesRequestBody(
   if (body.thinking !== undefined) {
     return failure(parseMessagesThinking(body.thinking));
   }
+  let output: IrOutputFormat | undefined;
   if (body.output_config !== undefined) {
-    return failure(parseMessagesOutputConfig(body.output_config));
+    const outputResult = parseMessagesOutputConfig(body.output_config);
+    if (!outputResult.ok) return outputResult;
+    output = outputResult.value;
   }
 
   // Check for unknown request fields outside recognized schema
@@ -378,6 +392,7 @@ export function parseMessagesRequestBody(
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { toolChoice } : {}),
     ...(parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
+    ...(output !== undefined ? { output } : {}),
   };
 
   return ok({ irRequest, requestWireOptions: wireOptions });

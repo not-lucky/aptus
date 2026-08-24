@@ -14,6 +14,7 @@ import type {
   IrInputPart,
   IrItem,
   IrOutcome,
+  IrOutputFormat,
   IrOutputPart,
   IrRequest,
   IrTool,
@@ -25,6 +26,7 @@ import { invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import {
   asNonEmptyStopSequences,
   CHAT_TOOL_NAME_REGEX,
+  firstUnknownKey,
   parseCustomCallInput,
   parseGrammarFields,
   parsePositiveSafeInteger,
@@ -230,8 +232,67 @@ export function parseChatRequestBody(
   if (body.web_search_options !== undefined) {
     return unsupportedCapability("hosted-web-search");
   }
+
+  let output: IrOutputFormat | undefined;
+  let legacyJsonObject: boolean | undefined;
   if (body.response_format !== undefined) {
-    return unsupportedCapability("structured-json-schema");
+    const rf = body.response_format;
+    if (typeof rf !== "object" || rf === null || Array.isArray(rf)) {
+      return invalidRequest("response_format must be an object");
+    }
+    const rfObj = rf as Record<string, unknown>;
+    const type = rfObj.type;
+    if (type === "text") {
+      const extra = firstUnknownKey(rfObj, ["type"]);
+      if (extra !== undefined) return invalidRequest(`response_format.${extra} is not recognized`);
+      output = { type: "text" };
+    } else if (type === "json_object") {
+      const extra = firstUnknownKey(rfObj, ["type"]);
+      if (extra !== undefined) return invalidRequest(`response_format.${extra} is not recognized`);
+      legacyJsonObject = true;
+    } else if (type === "json_schema") {
+      const extra = firstUnknownKey(rfObj, ["type", "json_schema"]);
+      if (extra !== undefined) return invalidRequest(`response_format.${extra} is not recognized`);
+      const jsonSchema = rfObj.json_schema;
+      if (typeof jsonSchema !== "object" || jsonSchema === null || Array.isArray(jsonSchema)) {
+        return invalidRequest("response_format.json_schema must be an object");
+      }
+      const jsObj = jsonSchema as Record<string, unknown>;
+      const schemaExtra = firstUnknownKey(jsObj, ["name", "schema", "description", "strict"]);
+      if (schemaExtra !== undefined)
+        return invalidRequest(`response_format.json_schema.${schemaExtra} is not recognized`);
+      const name = jsObj.name;
+      if (typeof name !== "string" || !CHAT_TOOL_NAME_REGEX.test(name)) {
+        return invalidRequest(`response_format.json_schema.name must match ${CHAT_TOOL_NAME_REGEX}`);
+      }
+      const schema = jsObj.schema;
+      if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+        return invalidRequest("response_format.json_schema.schema must be an object");
+      }
+      let description: string | undefined;
+      if (jsObj.description !== undefined) {
+        if (typeof jsObj.description !== "string") {
+          return invalidRequest("response_format.json_schema.description must be a string");
+        }
+        description = jsObj.description;
+      }
+      let strict: boolean | undefined;
+      if (jsObj.strict !== undefined) {
+        if (typeof jsObj.strict !== "boolean") {
+          return invalidRequest("response_format.json_schema.strict must be a boolean");
+        }
+        strict = jsObj.strict;
+      }
+      output = {
+        type: "json_schema",
+        schema: schema as JsonObject,
+        name,
+        ...(description !== undefined ? { description } : {}),
+        ...(strict !== undefined ? { strict } : {}),
+      };
+    } else {
+      return invalidRequest(`response_format.type '${String(type)}' is not recognized`);
+    }
   }
   if (body.audio !== undefined || body.modalities !== undefined) {
     return unsupportedCapability("audio-input");
@@ -249,6 +310,9 @@ export function parseChatRequestBody(
   const sidecarResult = parseChatResponsesWireOptions(body);
   if (!sidecarResult.ok) return sidecarResult;
   let wireOptions = sidecarResult.value;
+  if (legacyJsonObject === true) {
+    wireOptions = { ...wireOptions, legacyJsonObject: true };
+  }
 
   // ---- Client tool surfaces (definitions, choice, parallelism) ----
   const toolsResult = parseToolArray(body.tools, "tools", CHAT_TOOL_SPEC);
@@ -545,6 +609,7 @@ export function parseChatRequestBody(
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { toolChoice } : {}),
     ...(parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
+    ...(output !== undefined ? { output } : {}),
   };
 
   return ok({ irRequest, requestWireOptions: wireOptions });
