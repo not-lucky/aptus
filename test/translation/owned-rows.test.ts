@@ -767,10 +767,42 @@ const OWNED_ROW_TIERS: ReadonlyArray<readonly [string, string]> = [
   ["structured-strict-guarantee", "T1,T3,T1,T3,T3,T3"],
   ["structured-name-description", "T1,T2,T1,T2,T2,T2"],
   ["legacy-json-object", "T1,T3,T1,T3,T3,T3"],
+  // Media, documents, citations (Task 16)
+  ["image-url", "T1,T1,T1,T1,T1,T1"],
+  ["image-inline-bytes", "T1,T2,T1,T2,T1,T1"],
+  ["image-detail-auto-low-high", "T1,T3,T1,T3,T3,T3"],
+  ["image-detail-original", "T3,T3,T3,T3,T3,T3"],
+  ["provider-image-id", "T1,T3,T1,T3,T3,T3"],
+  ["document-url", "T3,T3,T3,T1,T3,T1"],
+  ["document-inline-bytes", "T1,T2,T1,T2,T2,T2"],
+  ["document-inline-text", "T3,T3,T3,T2,T3,T2"],
+  // Tier/behavior exception: the gateway_file IR type fails closed in every
+  // direction (no resolver or file store exists until a documented file
+  // lifecycle lands), so the row's T1/T2 cells are recorded but unrealized.
+  ["gateway-file-reference", "T1,T2,T1,T2,T1,T2"],
+  ["provider-file-id", "T1,T3,T1,T3,T3,T3"],
+  ["document-context-title", "T2,T2,T2,T2,T2,T2"],
+  ["url-citation-source", "T3,T3,T3,T3,T3,T3"],
+  ["file-document-citation-source", "T3,T3,T3,T3,T3,T3"],
+  ["citation-output-span", "T3,T3,T3,T3,T3,T3"],
+  ["citation-document-location", "T3,T3,T3,T3,T3,T3"],
+  // Tier/behavior exception: every client stream encoder rejects citation
+  // events, because no current R↔M case preserves citation source without
+  // locator reconstruction (protocol-ir.md streaming rules: R annotations and
+  // M citations_delta carry incompatible offset/quote requirements). The
+  // unrealized T2 cells await a documented timing-only semantics.
+  ["citation-stream-timing", "T3,T3,T3,T2,T3,T2"],
+  ["citation-stream-event", "T3,T3,T3,T2,T3,T2"],
+  ["audio-input", "T3,T3,T3,T3,T3,T3"],
+  ["audio-output", "T3,T3,T3,T3,T3,T3"],
+  ["audio-streaming", "T3,T3,T3,T3,T3,T3"],
+  ["audio-continuation-id", "T3,T3,T3,T3,T3,T3"],
+  ["tool-result-multipart", "T3,T3,T3,T1,T3,T1"],
+  ["request-body-size-limit", "T1,T1,T1,T1,T1,T1"],
 ];
 
-test.concurrent("owned rows: each of the 105 rows is single-assigned with the pinned six-direction tier vector", () => {
-  assert.equal(OWNED_ROW_TIERS.length, 105);
+test.concurrent("owned rows: each of the 128 rows is single-assigned with the pinned six-direction tier vector", () => {
+  assert.equal(OWNED_ROW_TIERS.length, 128);
   for (const [id, expectedVector] of OWNED_ROW_TIERS) {
     const row = getCapabilityRow(id);
     assert.ok(row !== undefined, `missing matrix row for ${id}`);

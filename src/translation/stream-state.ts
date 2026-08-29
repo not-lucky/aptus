@@ -193,7 +193,22 @@ export class IrStreamStateMachine {
     }
 
     if (event.type === "citation") {
-      return unsupportedCapability("citation-stream-timing");
+      if (event.responseId !== this.responseId) {
+        return invalidRequest(
+          `citation responseId '${event.responseId}' does not match stream responseId '${this.responseId}'`,
+        );
+      }
+      const open = this.openParts.get(event.partId);
+      if (open === undefined) {
+        return invalidRequest(`citation received for non-open or unknown partId '${event.partId}'`);
+      }
+      if (open.partType !== "text") {
+        return invalidRequest(`citation received for partId '${event.partId}' of type '${open.partType}'`);
+      }
+      if (!event.citation || typeof event.citation !== "object") {
+        return invalidRequest("citation event must contain a citation object");
+      }
+      return ok(undefined);
     }
 
     if (event.type === "part_end") {

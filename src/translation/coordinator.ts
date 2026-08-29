@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
+import { TRANSLATED_MEDIA_BODY_LIMIT_BYTES } from "./codecs/shared/media.ts";
 import type {
   CreateStreamSessionInput,
   Direction,
@@ -16,7 +17,6 @@ import type {
   TranslationCodecs,
   TranslationCoordinator,
 } from "./contracts.ts";
-
 import type { IrOutcome, IrRequest } from "./ir.ts";
 import {
   normalizeOutcomeWireOptions,
@@ -25,7 +25,7 @@ import {
   preflightStreamRequest,
 } from "./preflight.ts";
 import { prepareTranslatedProviderRequest } from "./prepare.ts";
-import { ok, unsupportedCapability } from "./result.ts";
+import { ok, payloadTooLarge, unsupportedCapability } from "./result.ts";
 import { validateIrOutcome, validateIrRequest } from "./validate.ts";
 
 /**
@@ -45,6 +45,21 @@ function resolveMessagesMaxTokens(
     );
   }
   return ok(maxTokens);
+}
+
+function finalizeMessagesRequestBody(
+  encodedBody: Record<string, unknown>,
+  irRequest: IrRequest,
+  targetDefaultMaxTokens: number | undefined,
+): Result<void, NormalizedFailure> {
+  const maxTokens = resolveMessagesMaxTokens(irRequest, targetDefaultMaxTokens);
+  if (!maxTokens.ok) return maxTokens;
+  encodedBody.max_tokens = maxTokens.value;
+  const serializedBytes = Buffer.byteLength(JSON.stringify(encodedBody), "utf8");
+  if (serializedBytes > TRANSLATED_MEDIA_BODY_LIMIT_BYTES) {
+    return payloadTooLarge("serialized Anthropic Messages request body exceeds 32 MiB limit");
+  }
+  return ok(undefined);
 }
 
 /**
@@ -95,9 +110,12 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       // 5. Anthropic Messages target: inject the resolved required max_tokens
       //    (caller limit first, configured model default as fallback).
       if (input.targetProtocol === "anthropic-messages") {
-        const maxTokens = resolveMessagesMaxTokens(irRequest, input.targetDefaultMaxTokens);
-        if (!maxTokens.ok) return maxTokens;
-        (encodedBody as Record<string, unknown>).max_tokens = maxTokens.value;
+        const finalize = finalizeMessagesRequestBody(
+          encodedBody as Record<string, unknown>,
+          irRequest,
+          input.targetDefaultMaxTokens,
+        );
+        if (!finalize.ok) return finalize;
       }
 
       return ok({
@@ -147,9 +165,12 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
 
       // 5. Anthropic Messages target: inject the resolved required max_tokens
       if (input.targetProtocol === "anthropic-messages") {
-        const maxTokens = resolveMessagesMaxTokens(irRequest, input.targetDefaultMaxTokens);
-        if (!maxTokens.ok) return maxTokens;
-        (encodedBody as Record<string, unknown>).max_tokens = maxTokens.value;
+        const finalize = finalizeMessagesRequestBody(
+          encodedBody as Record<string, unknown>,
+          irRequest,
+          input.targetDefaultMaxTokens,
+        );
+        if (!finalize.ok) return finalize;
       }
 
       return ok({

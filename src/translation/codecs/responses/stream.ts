@@ -26,7 +26,7 @@ import {
   chatResponsesRequestFields,
   responsesOutcomeWireFields,
 } from "../shared/wire-options.ts";
-import { parseResponsesRequestBody } from "./ingress.ts";
+import { parseResponsesAnnotation, parseResponsesRequestBody } from "./ingress.ts";
 /**
  * Decodes a streaming OpenAI Responses request.
  *
@@ -60,7 +60,7 @@ export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
     const markedItems = new Set(
       (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
     );
-    const input = buildResponsesInput(request.items, markedItems);
+    const input = buildResponsesInput(request.items, markedItems, requestWireOptions);
 
     return {
       model: targetModel,
@@ -313,6 +313,29 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         text,
       });
       return ok(events);
+    }
+
+    if (eventName === "response.output_text.annotation.added") {
+      const annot = chunk.annotation as Record<string, unknown> | undefined;
+      if (!annot || typeof annot !== "object") {
+        return invalidRequest("response.output_text.annotation.added missing annotation object");
+      }
+      if (annot.type === "container_file_citation") {
+        return unsupportedCapability("provider-container");
+      }
+      if (!this.partStarted || this.currentPartId === undefined) {
+        return invalidRequest("annotation.added received before open output_text part");
+      }
+      const parsed = parseResponsesAnnotation(annot);
+      if (!parsed.ok) return parsed;
+      return ok([
+        {
+          type: "citation",
+          responseId: this.session.responseId,
+          partId: this.currentPartId,
+          citation: parsed.value,
+        },
+      ]);
     }
 
     if (eventName === "response.function_call_arguments.delta") {
@@ -725,6 +748,10 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
         }),
       });
       return ok(frames);
+    }
+
+    if (event.type === "citation") {
+      return unsupportedCapability("citation-output-span");
     }
 
     if (event.type === "part_end") {

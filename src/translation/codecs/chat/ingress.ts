@@ -5,6 +5,7 @@ import type {
   IngressDecoder,
   OutcomeDecodeResult,
   PromptCacheBreakpoint,
+  ProviderFileRef,
   RequestDecodeResult,
 } from "../../contracts.ts";
 import type {
@@ -36,6 +37,7 @@ import {
   parseVerbosity,
 } from "../shared/controls.ts";
 import { parseFunctionArgumentsOnce } from "../shared/hosted-tools.ts";
+import { inferExtensionMediaType, parseDataUri, validateHttpsUrl } from "../shared/media.ts";
 import { parseToolArray, parseToolChoice, type ToolWireSpec } from "../shared/tool-parsing.ts";
 import { parseChatUsage } from "../shared/usage.ts";
 import { captureBreakpoint, captureOutcomeWireFacts, parseChatResponsesWireOptions } from "../shared/wire-options.ts";
@@ -295,7 +297,10 @@ export function parseChatRequestBody(
     }
   }
   if (body.audio !== undefined || body.modalities !== undefined) {
-    return unsupportedCapability("audio-input");
+    if (body.stream === true) {
+      return unsupportedCapability("audio-streaming");
+    }
+    return unsupportedCapability("audio-output");
   }
 
   // Check for unknown request fields outside recognized schema
@@ -307,6 +312,7 @@ export function parseChatRequestBody(
 
   // ---- Wire-only sidecar capture (admitted fields, verbatim) ----
   const breakpoints: PromptCacheBreakpoint[] = [];
+  const providerFileRefs: ProviderFileRef[] = [];
   const sidecarResult = parseChatResponsesWireOptions(body);
   if (!sidecarResult.ok) return sidecarResult;
   let wireOptions = sidecarResult.value;
@@ -409,15 +415,114 @@ export function parseChatRequestBody(
               breakpoints.push(markerResult.value);
             }
           } else if (rawPart?.type === "image_url") {
-            return unsupportedCapability("image-url");
+            const imgObj = rawPart.image_url;
+            let url: string;
+            let detail: "auto" | "low" | "high" | undefined;
+            // Chat pins image_url to the {url, detail?} object form; the bare
+            // string spelling belongs to Responses input_image, not this wire.
+            if (
+              typeof imgObj === "object" &&
+              imgObj !== null &&
+              typeof (imgObj as Record<string, unknown>).url === "string"
+            ) {
+              const rec = imgObj as Record<string, unknown>;
+              url = rec.url as string;
+              if (rec.detail !== undefined) {
+                if (rec.detail !== "auto" && rec.detail !== "low" && rec.detail !== "high") {
+                  return invalidRequest(`message [${i}] part [${pIdx}]: image detail must be 'auto', 'low', or 'high'`);
+                }
+                detail = rec.detail;
+              }
+            } else {
+              return invalidRequest(`message [${i}] part [${pIdx}]: image_url must contain url string`);
+            }
+            if (url.startsWith("data:")) {
+              const parsed = parseDataUri(url);
+              if (!parsed?.mediaType.startsWith("image/")) {
+                return invalidRequest(`message [${i}] part [${pIdx}]: invalid image data URI`);
+              }
+              parts.push({
+                type: "image",
+                source: { type: "bytes", mediaType: parsed.mediaType, base64: parsed.base64 },
+                ...(detail !== undefined ? { detail } : {}),
+              });
+            } else {
+              if (!validateHttpsUrl(url)) {
+                return invalidRequest(`message [${i}] part [${pIdx}]: image URL must be an absolute HTTPS URL`);
+              }
+              parts.push({
+                type: "image",
+                source: { type: "url", url },
+                ...(detail !== undefined ? { detail } : {}),
+              });
+            }
+            if (rawPart.prompt_cache_breakpoint !== undefined) {
+              const markerResult = captureBreakpoint(
+                `message [${i}] part [${pIdx}]`,
+                rawPart.prompt_cache_breakpoint,
+                itemIndex,
+                pIdx,
+              );
+              if (!markerResult.ok) return markerResult;
+              breakpoints.push(markerResult.value);
+            }
           } else if (rawPart?.type === "input_audio") {
             return unsupportedCapability("audio-input");
           } else if (rawPart?.type === "file") {
             const file = rawPart.file as Record<string, unknown> | undefined;
-            if (file !== undefined && typeof file === "object" && file !== null && file.file_id !== undefined) {
-              return unsupportedCapability("provider-uploaded-file");
+            if (typeof file !== "object" || file === null) {
+              return invalidRequest(`message [${i}] part [${pIdx}]: file part must contain file object`);
             }
-            return unsupportedCapability("document-inline-bytes");
+            const hasFileId = file.file_id !== undefined;
+            const hasFileData = file.file_data !== undefined;
+            if ((hasFileId && hasFileData) || (!hasFileId && !hasFileData)) {
+              return invalidRequest(
+                `message [${i}] part [${pIdx}]: file part must contain exactly one of file_id or file_data`,
+              );
+            }
+            const filename = typeof file.filename === "string" ? file.filename : undefined;
+            if (hasFileId) {
+              if (typeof file.file_id !== "string" || file.file_id.trim() === "") {
+                return invalidRequest(`message [${i}] part [${pIdx}]: file_id must be a non-empty string`);
+              }
+              providerFileRefs.push({
+                itemIndex,
+                partIndex: pIdx,
+                mediaKind: "document",
+                fileId: file.file_id,
+                ...(filename !== undefined ? { filename } : {}),
+              });
+            } else {
+              if (typeof file.file_data !== "string" || file.file_data.trim() === "") {
+                return invalidRequest(`message [${i}] part [${pIdx}]: file_data must be a non-empty base64 string`);
+              }
+              // A Chat file part is a bytes part: `file_data` crosses to
+              // Responses byte-verbatim (the document-inline-bytes T1 cell) and
+              // into Messages only as PDF, so the filename infers a media type
+              // and never selects a text representation. Text-source documents
+              // are reachable only from Responses and Messages ingress.
+              const inferred = inferExtensionMediaType(filename);
+              parts.push({
+                type: "document",
+                documentId: randomUUID(),
+                source: {
+                  type: "bytes",
+                  mediaType: inferred?.mediaType ?? "application/octet-stream",
+                  base64: file.file_data,
+                },
+                ...(filename !== undefined ? { name: filename } : {}),
+              });
+            }
+            if (rawPart.prompt_cache_breakpoint !== undefined) {
+              const markerResult = captureBreakpoint(
+                `message [${i}] part [${pIdx}]`,
+                rawPart.prompt_cache_breakpoint,
+                itemIndex,
+                pIdx,
+              );
+              if (!markerResult.ok) return markerResult;
+              breakpoints.push(markerResult.value);
+            }
           } else {
             return unsupportedCapability("unknown-content-item");
           }
@@ -426,7 +531,10 @@ export function parseChatRequestBody(
         return invalidRequest(`User message [${i}] missing string or array content`);
       }
       if (parts.length === 0) {
-        return invalidRequest(`User message [${i}] has empty content`);
+        const hasMatchingRef = providerFileRefs.some((r) => r.itemIndex === itemIndex);
+        if (!hasMatchingRef) {
+          return invalidRequest(`User message [${i}] has empty content`);
+        }
       }
       items.push({
         type: "message",
@@ -441,7 +549,7 @@ export function parseChatRequestBody(
         return unsupportedCapability("chat-legacy-functions");
       }
       if (rawMsg.audio !== undefined) {
-        return unsupportedCapability("audio-output");
+        return unsupportedCapability("audio-continuation-id");
       }
 
       const parts: IrAssistantPart[] = [];
@@ -551,6 +659,9 @@ export function parseChatRequestBody(
 
   if (breakpoints.length > 0) {
     wireOptions = { ...wireOptions, promptCacheBreakpoints: breakpoints };
+  }
+  if (providerFileRefs.length > 0) {
+    wireOptions = { ...wireOptions, providerFileRefs };
   }
 
   // ---- Generation controls (strict bounds; never clamped, never dropped) ----

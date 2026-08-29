@@ -20,7 +20,12 @@ import {
 } from "../shared/controls.ts";
 import { MESSAGES_HOSTED_TOOL_TYPES } from "../shared/hosted-tools.ts";
 import { parseToolArray, parseToolChoice, type ToolWireSpec } from "../shared/tool-parsing.ts";
-import { decodeMessagesContent, messagesHostedBlockFailure, parseMessagesCacheControl } from "./content.ts";
+import {
+  decodeMessagesContent,
+  messagesHostedBlockFailure,
+  messagesRequestCitationsFailure,
+  parseMessagesCacheControl,
+} from "./content.ts";
 import { parseMessagesOutcome } from "./outcome.ts";
 
 const RECOGNIZED_MESSAGES_REQUEST_FIELDS = new Set([
@@ -266,6 +271,8 @@ export function parseMessagesRequestBody(
           // payload, never translatable instruction text.
           const hosted = messagesHostedBlockFailure(b);
           if (hosted !== undefined) return failure(hosted);
+          const citationsFailure = messagesRequestCitationsFailure(`system block [${bIdx}]`, b.citations);
+          if (citationsFailure !== undefined) return failure(citationsFailure);
           items.push({
             type: "instruction",
             authority: "system",

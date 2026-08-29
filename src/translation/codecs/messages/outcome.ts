@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type { OutcomeDecodeResult } from "../../contracts.ts";
-import type { IrFinishReason, IrOutcome, IrOutputPart, IrUsage } from "../../ir.ts";
+import type { IrCitation, IrFinishReason, IrOutcome, IrOutputPart, IrUsage } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import { accumulateMessagesUsage, collapseMessagesUsage, type MessagesUsageAccumulator } from "../shared/usage.ts";
-import { messagesHostedBlockFailure, messagesServerToolUseFailure, parseMessagesToolUseBlock } from "./content.ts";
+import {
+  messagesHostedBlockFailure,
+  messagesServerToolUseFailure,
+  parseMessagesCitation,
+  parseMessagesToolUseBlock,
+} from "./content.ts";
 
 /** Decodes one complete Anthropic Messages outcome independently of request parsing. */
 export function parseMessagesOutcome(status: number, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
@@ -37,7 +42,27 @@ export function parseMessagesOutcome(status: number, body: JsonObject): Result<O
         if (typeof b.text !== "string") {
           return invalidRequest("Messages output text block: text must be a string");
         }
-        parts.push({ type: "text", partId: randomUUID(), text: b.text });
+        const citations: IrCitation[] = [];
+        if (Array.isArray(b.citations)) {
+          // Citation translation never drops information: an entry that cannot
+          // be fully parsed terminates the outcome instead of translating a
+          // success that omits provider-supplied citations (protocol-ir.md).
+          for (const c of b.citations) {
+            const cit = c as Record<string, unknown> | undefined;
+            if (cit === null || typeof cit !== "object") {
+              return invalidRequest("Messages output text block: citations entries must be objects");
+            }
+            const parsed = parseMessagesCitation(cit);
+            if (!parsed.ok) return parsed;
+            citations.push(parsed.value);
+          }
+        }
+        parts.push({
+          type: "text",
+          partId: randomUUID(),
+          text: b.text,
+          ...(citations.length > 0 ? { citations } : {}),
+        });
         if (b.signature !== undefined) return unsupportedCapability("reasoning-signature");
       } else if (b?.type === "tool_use") {
         const callResult = parseMessagesToolUseBlock(b, "Messages output tool_use");

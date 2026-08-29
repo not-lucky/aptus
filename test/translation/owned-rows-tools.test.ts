@@ -2334,29 +2334,37 @@ test.concurrent("row hosted output discovery: R and M output items", () => {
   };
   assertUnsupported(
     translateRequest(coordinator(), "anthropic-messages", "openai-chat", mToolResultImage as never) as never,
-    "image-url",
+    "tool-result-multipart",
     "M tool_result image",
   );
 });
 
 test.concurrent("row provider-uploaded-file: file_id surfaces", () => {
-  // R input_file with file_id
+  // R input_file with file_id: passes through C↔R via sidecar, rejects into M with provider-file-id
   const rFile = {
     model: "wire-model",
     input: [{ type: "message", role: "user", content: [{ type: "input_file", file_id: "file_123" }] }],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "openai-responses", dst, rFile as never);
-    assertUnsupported(res as never, "provider-uploaded-file", `R input_file -> ${dst}`);
+    if (dst === "anthropic-messages") {
+      assertUnsupported(res as never, "provider-file-id", `R input_file -> ${dst}`);
+    } else {
+      assert.equal(res.ok, true, `R input_file -> ${dst}`);
+    }
   }
-  // C user file part with file_id
+  // C user file part with file_id: passes through C↔R via sidecar, rejects into M with provider-file-id
   const cFile = {
     model: "wire-model",
     messages: [{ role: "user", content: [{ type: "file", file: { file_id: "file_123" } }] }],
   };
   for (const [, dst] of ALL_DIRECTIONS) {
     const res = translateRequest(coordinator(), "openai-chat", dst, cFile as never);
-    assertUnsupported(res as never, "provider-uploaded-file", `C file -> ${dst}`);
+    if (dst === "anthropic-messages") {
+      assertUnsupported(res as never, "provider-file-id", `C file -> ${dst}`);
+    } else {
+      assert.equal(res.ok, true, `C file -> ${dst}`);
+    }
   }
   // function_call_output with file_id - accept either unsupported or invalid_request depending on decode path
   const rOutputFile = {

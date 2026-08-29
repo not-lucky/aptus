@@ -1,4 +1,4 @@
-import type { RequestWireOptions } from "../../contracts.ts";
+import type { ProviderFileRef, RequestWireOptions } from "../../contracts.ts";
 import type {
   IrFinish,
   IrFinishReason,
@@ -11,6 +11,165 @@ import type {
   JsonObject,
   JsonValue,
 } from "../../ir.ts";
+
+function attachPromptCacheBreakpoints(
+  parts: Array<Record<string, unknown>>,
+  itemIndex: number,
+  markedItems: ReadonlySet<number>,
+  requestWireOptions: RequestWireOptions | undefined,
+  marker: { readonly mode: "explicit" },
+): void {
+  if (!markedItems.has(itemIndex)) return;
+  const breakpoints = (requestWireOptions?.promptCacheBreakpoints ?? []).filter((b) => b.itemIndex === itemIndex);
+  for (const b of breakpoints) {
+    const targetPart = b.partIndex !== undefined && parts[b.partIndex] ? parts[b.partIndex] : parts[0];
+    if (targetPart) targetPart.prompt_cache_breakpoint = marker;
+  }
+  if (breakpoints.length === 0 && parts[0]) parts[0].prompt_cache_breakpoint = marker;
+}
+
+function chatFileRefPart(ref: ProviderFileRef): Record<string, unknown> {
+  return {
+    type: "file",
+    file: {
+      file_id: ref.fileId,
+      ...(ref.filename ? { filename: ref.filename } : {}),
+    },
+  };
+}
+
+function responsesFileRefPart(ref: ProviderFileRef): Record<string, unknown> {
+  if (ref.mediaKind === "image") {
+    return {
+      type: "input_image",
+      file_id: ref.fileId,
+      ...(ref.detail ? { detail: ref.detail } : {}),
+    };
+  }
+  return {
+    type: "input_file",
+    file_id: ref.fileId,
+    ...(ref.filename ? { filename: ref.filename } : {}),
+  };
+}
+
+function chatPartToWire(part: IrInputPart): Record<string, unknown> | undefined {
+  if (part.type === "text") return { type: "text", text: part.text };
+  if (part.type === "image") {
+    if (part.source.type === "url") {
+      return {
+        type: "image_url",
+        image_url: {
+          url: part.source.url,
+          ...(part.detail ? { detail: part.detail } : {}),
+        },
+      };
+    }
+    if (part.source.type === "bytes") {
+      return {
+        type: "image_url",
+        image_url: {
+          url: `data:${part.source.mediaType};base64,${part.source.base64}`,
+          ...(part.detail ? { detail: part.detail } : {}),
+        },
+      };
+    }
+  } else if (part.type === "document" && part.source.type === "bytes") {
+    return {
+      type: "file",
+      file: {
+        file_data: part.source.base64,
+        // A document without a source name stays filename-less: inventing one
+        // would mislabel arbitrary bytes on the target wire.
+        ...(part.name ? { filename: part.name } : {}),
+      },
+    };
+  }
+  return undefined;
+}
+
+function responsesMessagePartToWire(part: IrInputPart): Record<string, unknown> | undefined {
+  if (part.type === "text") return { type: "input_text", text: part.text };
+  if (part.type === "image") {
+    if (part.source.type === "url") {
+      return {
+        type: "input_image",
+        image_url: part.source.url,
+        ...(part.detail ? { detail: part.detail } : {}),
+      };
+    }
+    if (part.source.type === "bytes") {
+      return {
+        type: "input_image",
+        image_url: `data:${part.source.mediaType};base64,${part.source.base64}`,
+        ...(part.detail ? { detail: part.detail } : {}),
+      };
+    }
+  } else if (part.type === "document") {
+    if (part.source.type === "url") {
+      return {
+        type: "input_file",
+        file_url: part.source.url,
+        ...(part.name ? { filename: part.name } : {}),
+      };
+    }
+    if (part.source.type === "text") {
+      return {
+        type: "input_file",
+        file_data: Buffer.from(part.source.text, "utf8").toString("base64"),
+        // A document without a source name stays filename-less: inventing one
+        // would mislabel arbitrary bytes on the target wire.
+        ...(part.name ? { filename: part.name } : {}),
+      };
+    }
+    if (part.source.type === "bytes") {
+      return {
+        type: "input_file",
+        file_data: part.source.base64,
+        ...(part.name ? { filename: part.name } : {}),
+      };
+    }
+  }
+  return undefined;
+}
+
+function responsesToolResultPartToWire(part: IrInputPart): Record<string, unknown> | undefined {
+  if (part.type === "text") return { type: "input_text", text: part.text };
+  if (part.type === "image") {
+    if (part.source.type === "url") {
+      return { type: "input_image", image_url: part.source.url };
+    }
+    if (part.source.type === "bytes") {
+      return {
+        type: "input_image",
+        image_url: `data:${part.source.mediaType};base64,${part.source.base64}`,
+      };
+    }
+  } else if (part.type === "document") {
+    if (part.source.type === "url") {
+      return {
+        type: "input_file",
+        file_url: part.source.url,
+        ...(part.name ? { filename: part.name } : {}),
+      };
+    }
+    if (part.source.type === "text") {
+      return {
+        type: "input_file",
+        file_data: Buffer.from(part.source.text, "utf8").toString("base64"),
+        ...(part.name ? { filename: part.name } : {}),
+      };
+    }
+    if (part.source.type === "bytes") {
+      return {
+        type: "input_file",
+        file_data: part.source.base64,
+        ...(part.name ? { filename: part.name } : {}),
+      };
+    }
+  }
+  return undefined;
+}
 
 /**
  * Egress reconstruction of the three transcript shapes and the finish/usage
@@ -30,9 +189,15 @@ import type {
  * tool-only assistant message when none precedes), and tool results become
  * `role:"tool"` messages.
  */
-export function buildChatMessages(items: readonly IrItem[], markedItems: ReadonlySet<number>): JsonObject[] {
+export function buildChatMessages(
+  items: readonly IrItem[],
+  markedItems: ReadonlySet<number>,
+  requestWireOptions?: RequestWireOptions,
+): JsonObject[] {
   const messages: JsonObject[] = [];
   const marker = { mode: "explicit" } as const;
+  const providerFileRefs = requestWireOptions?.providerFileRefs ?? [];
+
   for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
     const item = items[itemIndex];
     if (item === undefined) continue;
@@ -44,14 +209,52 @@ export function buildChatMessages(items: readonly IrItem[], markedItems: Readonl
           : item.text,
       });
     } else if (item.type === "message") {
-      let text = "";
-      for (const part of item.content) {
-        if (part.type === "text") text += part.text;
+      if (item.role === "assistant") {
+        let text = "";
+        for (const part of item.content) {
+          if (part.type === "text") text += part.text;
+        }
+        messages.push({
+          role: item.role,
+          content: markedItems.has(itemIndex) ? [{ type: "text", text, prompt_cache_breakpoint: marker }] : text,
+        });
+      } else {
+        const itemRefs = providerFileRefs
+          .filter((r) => r.itemIndex === itemIndex)
+          .sort((a, b) => a.partIndex - b.partIndex);
+        const hasMediaOrRefs = itemRefs.length > 0 || item.content.some((p) => p.type !== "text");
+
+        if (!hasMediaOrRefs) {
+          let text = "";
+          for (const part of item.content) {
+            if (part.type === "text") text += part.text;
+          }
+          messages.push({
+            role: "user",
+            content: markedItems.has(itemIndex) ? [{ type: "text", text, prompt_cache_breakpoint: marker }] : text,
+          });
+        } else {
+          const parts: Array<Record<string, unknown>> = [];
+          const refBySlot = new Map(itemRefs.map((r) => [r.partIndex, r] as const));
+          const totalSlots = item.content.length + itemRefs.length;
+          let irIdx = 0;
+          for (let s = 0; s < totalSlots; s++) {
+            const ref = refBySlot.get(s);
+            if (ref !== undefined) {
+              parts.push(chatFileRefPart(ref));
+            } else {
+              const part = item.content[irIdx++];
+              if (part === undefined) continue;
+              const wire = chatPartToWire(part);
+              if (wire !== undefined) parts.push(wire);
+            }
+          }
+
+          attachPromptCacheBreakpoints(parts, itemIndex, markedItems, requestWireOptions, marker);
+
+          messages.push({ role: "user", content: parts as JsonObject[] });
+        }
       }
-      messages.push({
-        role: item.role,
-        content: markedItems.has(itemIndex) ? [{ type: "text", text, prompt_cache_breakpoint: marker }] : text,
-      });
     } else if (item.type === "tool_call") {
       const callEntry: JsonObject =
         item.call.type === "function"
@@ -93,7 +296,11 @@ export function buildChatMessages(items: readonly IrItem[], markedItems: Readonl
  * `output_text`; tool calls become function_call/custom_tool_call items and
  * tool results the matching output items).
  */
-export function buildResponsesInput(items: readonly IrItem[], markedItems: ReadonlySet<number>): JsonObject[] {
+export function buildResponsesInput(
+  items: readonly IrItem[],
+  markedItems: ReadonlySet<number>,
+  requestWireOptions?: RequestWireOptions,
+): JsonObject[] {
   const input: JsonObject[] = [];
   // Result items name their call kind through the referenced call: a result
   // for a custom call becomes custom_tool_call_output, otherwise
@@ -103,6 +310,8 @@ export function buildResponsesInput(items: readonly IrItem[], markedItems: Reado
     if (item?.type === "tool_call") callKindByCallId.set(item.call.callId, item.call.type);
   }
   const marker = { mode: "explicit" } as const;
+  const providerFileRefs = requestWireOptions?.providerFileRefs ?? [];
+
   for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
     const item = items[itemIndex];
     if (item === undefined) continue;
@@ -118,21 +327,50 @@ export function buildResponsesInput(items: readonly IrItem[], markedItems: Reado
         ],
       });
     } else if (item.type === "message") {
-      let text = "";
-      for (const part of item.content) {
-        if (part.type === "text") text += part.text;
+      if (item.role === "assistant") {
+        let text = "";
+        for (const part of item.content) {
+          if (part.type === "text") text += part.text;
+        }
+        input.push({
+          type: "message",
+          role: item.role,
+          content: [
+            {
+              type: "output_text",
+              text,
+              ...(markedItems.has(itemIndex) ? { prompt_cache_breakpoint: marker } : {}),
+            },
+          ],
+        });
+      } else {
+        const itemRefs = providerFileRefs
+          .filter((r) => r.itemIndex === itemIndex)
+          .sort((a, b) => a.partIndex - b.partIndex);
+        const parts: Array<Record<string, unknown>> = [];
+        const refBySlot = new Map(itemRefs.map((r) => [r.partIndex, r] as const));
+        const totalSlots = item.content.length + itemRefs.length;
+        let irIdx = 0;
+        for (let s = 0; s < totalSlots; s++) {
+          const ref = refBySlot.get(s);
+          if (ref !== undefined) {
+            parts.push(responsesFileRefPart(ref));
+          } else {
+            const part = item.content[irIdx++];
+            if (part === undefined) continue;
+            const wire = responsesMessagePartToWire(part);
+            if (wire !== undefined) parts.push(wire);
+          }
+        }
+
+        attachPromptCacheBreakpoints(parts, itemIndex, markedItems, requestWireOptions, marker);
+
+        input.push({
+          type: "message",
+          role: "user",
+          content: parts as JsonObject[],
+        });
       }
-      input.push({
-        type: "message",
-        role: item.role,
-        content: [
-          {
-            type: item.role === "assistant" ? "output_text" : "input_text",
-            text,
-            ...(markedItems.has(itemIndex) ? { prompt_cache_breakpoint: marker } : {}),
-          },
-        ],
-      });
     } else if (item.type === "tool_call") {
       input.push(
         item.call.type === "function"
@@ -151,17 +389,18 @@ export function buildResponsesInput(items: readonly IrItem[], markedItems: Reado
             },
       );
     } else if (item.type === "tool_result") {
-      // Tool result content is text-only by decode: zero parts emit the empty
-      // string, one text part the bare string, several the content array.
       let output: JsonValue;
       if (item.content.length === 0) {
         output = "";
       } else if (item.content.length === 1 && item.content[0]?.type === "text") {
         output = item.content[0].text;
       } else {
-        output = item.content
-          .filter((part): part is Extract<IrInputPart, { type: "text" }> => part.type === "text")
-          .map((part) => ({ type: "input_text", text: part.text }));
+        const outParts: JsonObject[] = [];
+        for (const part of item.content) {
+          const wire = responsesToolResultPartToWire(part);
+          if (wire !== undefined) outParts.push(wire as JsonObject);
+        }
+        output = outParts;
       }
       input.push(
         callKindByCallId.get(item.callId) === "custom"

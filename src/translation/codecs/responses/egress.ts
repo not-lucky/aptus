@@ -38,7 +38,7 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     const markedItems = new Set(
       (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
     );
-    const input = buildResponsesInput(request.items, markedItems);
+    const input = buildResponsesInput(request.items, markedItems, requestWireOptions);
 
     return {
       model: targetModel,

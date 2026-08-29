@@ -1,6 +1,6 @@
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import { invalidRequestFailure, unsupportedCapabilityFailure } from "./failures.ts";
+import { invalidRequestFailure, payloadTooLargeFailure, unsupportedCapabilityFailure } from "./failures.ts";
 
 /**
  * The single spelling of "produce a {@link Result}" for the translation layer.
@@ -28,6 +28,13 @@ export function failure<T = never>(error: NormalizedFailure): Result<T, Normaliz
  */
 export function invalidRequest<T = never>(message: string): Result<T, NormalizedFailure> {
   return failure(invalidRequestFailure(message));
+}
+
+/**
+ * Fails with `payload_too_large`: request body or inline media payload exceeds size limits.
+ */
+export function payloadTooLarge<T = never>(message: string): Result<T, NormalizedFailure> {
+  return failure(payloadTooLargeFailure(message));
 }
 
 /**

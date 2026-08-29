@@ -5,11 +5,13 @@ import type {
   IngressDecoder,
   OutcomeDecodeResult,
   PromptCacheBreakpoint,
+  ProviderFileRef,
   RequestDecodeResult,
 } from "../../contracts.ts";
 import { unsupportedCapabilityFailure } from "../../failures.ts";
 import type {
   IrAssistantPart,
+  IrCitation,
   IrFinishReason,
   IrGenerationControls,
   IrInputPart,
@@ -40,6 +42,7 @@ import {
   RESPONSES_HOSTED_TOOL_TYPES,
   responsesReasoningItemFailure,
 } from "../shared/hosted-tools.ts";
+import { inferExtensionMediaType, isBase64Valid, parseDataUri, validateHttpsUrl } from "../shared/media.ts";
 import { parseToolArray, parseToolChoice, type ToolWireSpec } from "../shared/tool-parsing.ts";
 import { parseResponsesUsage } from "../shared/usage.ts";
 import { captureBreakpoint, captureOutcomeWireFacts, parseChatResponsesWireOptions } from "../shared/wire-options.ts";
@@ -74,6 +77,8 @@ const RECOGNIZED_RESPONSES_REQUEST_FIELDS = new Set([
   "context_management",
   "prompt",
   "top_logprobs",
+  "audio",
+  "modalities",
 ]);
 
 const RESPONSES_ALLOWED_CALLERS: ReadonlySet<string> = new Set(["direct", "programmatic"]);
@@ -168,17 +173,199 @@ function parseResponsesToolOutputPayload(value: unknown, context: string): Resul
     if ((p?.type === "text" || p?.type === "input_text") && typeof p.text === "string") {
       parts.push({ type: "text", text: p.text });
     } else if (p?.type === "image" || p?.type === "input_image") {
-      return unsupportedCapability("image-url");
+      const res = parseResponsesImagePart(p, `${context} part [${pIdx}] (image)`);
+      if (!res.ok) return res;
+      if (res.value.kind === "ref") {
+        return unsupportedCapability("provider-image-id");
+      }
+      parts.push(res.value.part);
     } else if (p?.type === "file" || p?.type === "input_file") {
       if (p.file_id !== undefined) {
         return unsupportedCapability("provider-uploaded-file");
       }
-      return unsupportedCapability("document-inline-bytes");
+      const res = parseResponsesFilePart(p, `${context} part [${pIdx}] (file)`);
+      if (!res.ok) return res;
+      if (res.value.kind === "ref") {
+        return unsupportedCapability("provider-uploaded-file");
+      }
+      parts.push(res.value.part);
     } else {
       return unsupportedCapability("unknown-content-item");
     }
   }
   return ok(parts);
+}
+
+type ResponsesImageParseResult =
+  | { readonly kind: "part"; readonly part: IrInputPart }
+  | { readonly kind: "ref"; readonly fileId: string; readonly detail?: "auto" | "low" | "high" };
+
+function parseResponsesImagePart(
+  p: Record<string, unknown>,
+  context: string,
+): Result<ResponsesImageParseResult, NormalizedFailure> {
+  const hasUrl = p.image_url !== undefined;
+  const hasId = p.file_id !== undefined;
+  if ((hasUrl && hasId) || (!hasUrl && !hasId)) {
+    return invalidRequest(`${context}: exactly one of image_url or file_id must be provided`);
+  }
+  let detail: "auto" | "low" | "high" | undefined;
+  if (p.detail === "original") {
+    return unsupportedCapability("image-detail-original");
+  }
+  if (p.detail !== undefined) {
+    if (p.detail !== "auto" && p.detail !== "low" && p.detail !== "high") {
+      return invalidRequest(`${context}: detail must be 'auto', 'low', or 'high'`);
+    }
+    detail = p.detail;
+  }
+  if (hasId) {
+    if (typeof p.file_id !== "string" || p.file_id.trim() === "") {
+      return invalidRequest(`${context}: file_id must be a non-empty string`);
+    }
+    return ok({ kind: "ref", fileId: p.file_id, ...(detail !== undefined ? { detail } : {}) });
+  }
+  if (typeof p.image_url !== "string") {
+    return invalidRequest(`${context}: image_url must be a string`);
+  }
+  if (p.image_url.startsWith("data:")) {
+    const parsed = parseDataUri(p.image_url);
+    if (!parsed?.mediaType.startsWith("image/")) {
+      return invalidRequest(`${context}: invalid image data URI`);
+    }
+    return ok({
+      kind: "part",
+      part: {
+        type: "image",
+        source: { type: "bytes", mediaType: parsed.mediaType, base64: parsed.base64 },
+        ...(detail !== undefined ? { detail } : {}),
+      },
+    });
+  }
+  if (!validateHttpsUrl(p.image_url)) {
+    return invalidRequest(`${context}: image_url must be an absolute HTTPS URL`);
+  }
+  return ok({
+    kind: "part",
+    part: {
+      type: "image",
+      source: { type: "url", url: p.image_url },
+      ...(detail !== undefined ? { detail } : {}),
+    },
+  });
+}
+
+type ResponsesFileParseResult =
+  | { readonly kind: "part"; readonly part: IrInputPart }
+  | { readonly kind: "ref"; readonly fileId: string; readonly filename?: string };
+
+function parseResponsesFilePart(
+  p: Record<string, unknown>,
+  context: string,
+): Result<ResponsesFileParseResult, NormalizedFailure> {
+  const count =
+    (p.file_data !== undefined ? 1 : 0) + (p.file_url !== undefined ? 1 : 0) + (p.file_id !== undefined ? 1 : 0);
+  if (count !== 1) {
+    return invalidRequest(`${context}: exactly one of file_data, file_url, or file_id must be provided`);
+  }
+  const filename = typeof p.filename === "string" ? p.filename : undefined;
+  if (p.file_id !== undefined) {
+    if (typeof p.file_id !== "string" || p.file_id.trim() === "") {
+      return invalidRequest(`${context}: file_id must be a non-empty string`);
+    }
+    return ok({ kind: "ref", fileId: p.file_id, ...(filename !== undefined ? { filename } : {}) });
+  }
+  if (p.file_url !== undefined) {
+    if (typeof p.file_url !== "string" || !validateHttpsUrl(p.file_url)) {
+      return invalidRequest(`${context}: file_url must be an absolute HTTPS URL`);
+    }
+    return ok({
+      kind: "part",
+      part: {
+        type: "document",
+        documentId: randomUUID(),
+        source: { type: "url", url: p.file_url },
+        ...(filename !== undefined ? { name: filename } : {}),
+      },
+    });
+  }
+  if (typeof p.file_data !== "string" || p.file_data.trim() === "") {
+    return invalidRequest(`${context}: file_data must be a non-empty base64 string`);
+  }
+  const inferred = inferExtensionMediaType(filename);
+  if (inferred?.kind === "text") {
+    // A text document source is UTF-8 text/plain by IR definition, so a payload
+    // that is not valid base64 or not valid UTF-8 cannot be represented
+    // faithfully. Node's base64 decoder skips illegal characters and a lenient
+    // UTF-8 decode emits U+FFFD, so both are checked explicitly instead of
+    // dispatching garbled text.
+    if (!isBase64Valid(p.file_data)) {
+      return invalidRequest(`${context}: file_data must be valid base64`);
+    }
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(p.file_data, "base64"));
+    } catch {
+      return invalidRequest(`${context}: file_data must decode to UTF-8 text`);
+    }
+    return ok({
+      kind: "part",
+      part: {
+        type: "document",
+        documentId: randomUUID(),
+        source: { type: "text", mediaType: "text/plain", text },
+        ...(filename !== undefined ? { name: filename } : {}),
+      },
+    });
+  }
+  return ok({
+    kind: "part",
+    part: {
+      type: "document",
+      documentId: randomUUID(),
+      source: {
+        type: "bytes",
+        mediaType: inferred?.mediaType ?? "application/octet-stream",
+        base64: p.file_data,
+      },
+      ...(filename !== undefined ? { name: filename } : {}),
+    },
+  });
+}
+
+/**
+ * Parses one Responses output-text annotation into an IR citation. This is the
+ * single authority for annotation citation semantics, shared by the
+ * complete-outcome decoder and the stream decoder so the two paths cannot
+ * drift: only a `url_citation` carrying a `url` yields a citation; every other
+ * annotation fails closed with its owning capability row and never silently
+ * drops provider-supplied citation content.
+ *
+ * Callers reject `container_file_citation` before calling: it is the
+ * provider-container row's cited-file surface (research R:193) and fails with
+ * `provider-container` regardless of surrounding decoder state.
+ */
+export function parseResponsesAnnotation(annot: Record<string, unknown>): Result<IrCitation, NormalizedFailure> {
+  if (annot.type === "url_citation") {
+    if (typeof annot.url !== "string") {
+      return unsupportedCapability("url-citation-source");
+    }
+    return ok({
+      source: {
+        type: "url",
+        url: annot.url,
+        ...(typeof annot.title === "string" ? { title: annot.title } : {}),
+      },
+    });
+  }
+  if (annot.type === "file_citation" && typeof annot.file_id === "string") {
+    // Provider file citations cannot resolve to gateway files and cannot be
+    // translated without locator reconstruction.
+    return unsupportedCapability("file-document-citation-source");
+  }
+  // A url-less `url_citation`, a `file_citation` without `file_id`, and any
+  // unrecognized annotation type all belong to the url-citation rows.
+  return unsupportedCapability("url-citation-source");
 }
 
 /**
@@ -316,6 +503,14 @@ export function parseResponsesRequestBody(
   if (body.truncation !== undefined) {
     return unsupportedCapability("truncation-policy");
   }
+  if (body.audio !== undefined || body.modalities !== undefined) {
+    // Audio is T3 native-only across all directions; fail closed with exact
+    // capability attribution matching Chat ingress.
+    if (body.stream === true) {
+      return unsupportedCapability("audio-streaming");
+    }
+    return unsupportedCapability("audio-output");
+  }
 
   let output: IrOutputFormat | undefined;
   let legacyJsonObject: boolean | undefined;
@@ -388,6 +583,7 @@ export function parseResponsesRequestBody(
 
   // ---- Wire-only sidecar capture (admitted fields, verbatim) ----
   const breakpoints: PromptCacheBreakpoint[] = [];
+  const providerFileRefs: ProviderFileRef[] = [];
   const sidecarResult = parseChatResponsesWireOptions(body);
   if (!sidecarResult.ok) return sidecarResult;
   let wireOptions = sidecarResult.value;
@@ -463,6 +659,10 @@ export function parseResponsesRequestBody(
 
       const itemObj = rawItem as Record<string, unknown>;
 
+      if (itemObj.type === "input_audio") {
+        return unsupportedCapability("audio-input");
+      }
+
       // A transcript-replay `reasoning` input item is provider-owned reasoning
       // state (readable text or encrypted content) and fails closed. The
       // reasoning-handle rows own the whole item including its status field,
@@ -486,13 +686,50 @@ export function parseResponsesRequestBody(
         return unsupportedCapability("responses-item-reference");
       }
       if (itemObj.type === "input_image") {
-        return unsupportedCapability("image-url");
+        const itemIndex = items.length;
+        const res = parseResponsesImagePart(itemObj, `Responses input item [${i}] (input_image)`);
+        if (!res.ok) return res;
+        if (res.value.kind === "ref") {
+          providerFileRefs.push({
+            itemIndex,
+            partIndex: 0,
+            mediaKind: "image",
+            fileId: res.value.fileId,
+            ...(res.value.detail !== undefined ? { detail: res.value.detail } : {}),
+          });
+          items.push({ type: "message", role: "user", content: [] as unknown as NonEmpty<IrInputPart> });
+        } else {
+          items.push({ type: "message", role: "user", content: [res.value.part] as unknown as NonEmpty<IrInputPart> });
+        }
+        if (itemObj.prompt_cache_breakpoint !== undefined) {
+          const markerResult = captureBreakpoint(`input item [${i}]`, itemObj.prompt_cache_breakpoint, itemIndex, 0);
+          if (!markerResult.ok) return markerResult;
+          breakpoints.push(markerResult.value);
+        }
+        continue;
       }
       if (itemObj.type === "input_file") {
-        if (itemObj.file_id !== undefined) {
-          return unsupportedCapability("provider-uploaded-file");
+        const itemIndex = items.length;
+        const res = parseResponsesFilePart(itemObj, `Responses input item [${i}] (input_file)`);
+        if (!res.ok) return res;
+        if (res.value.kind === "ref") {
+          providerFileRefs.push({
+            itemIndex,
+            partIndex: 0,
+            mediaKind: "document",
+            fileId: res.value.fileId,
+            ...(res.value.filename !== undefined ? { filename: res.value.filename } : {}),
+          });
+          items.push({ type: "message", role: "user", content: [] as unknown as NonEmpty<IrInputPart> });
+        } else {
+          items.push({ type: "message", role: "user", content: [res.value.part] as unknown as NonEmpty<IrInputPart> });
         }
-        return unsupportedCapability("document-inline-bytes");
+        if (itemObj.prompt_cache_breakpoint !== undefined) {
+          const markerResult = captureBreakpoint(`input item [${i}]`, itemObj.prompt_cache_breakpoint, itemIndex, 0);
+          if (!markerResult.ok) return markerResult;
+          breakpoints.push(markerResult.value);
+        }
+        continue;
       }
 
       if (itemObj.type === "function_call") {
@@ -586,19 +823,65 @@ export function parseResponsesRequestBody(
                 breakpoints.push(markerResult.value);
               }
             } else if (p?.type === "input_image") {
-              return unsupportedCapability("image-url");
-            } else if (p?.type === "input_file") {
-              if (p.file_id !== undefined) {
-                return unsupportedCapability("provider-uploaded-file");
+              const res = parseResponsesImagePart(p, `input item [${i}] part [${pIdx}] (input_image)`);
+              if (!res.ok) return res;
+              if (res.value.kind === "ref") {
+                providerFileRefs.push({
+                  itemIndex,
+                  partIndex: pIdx,
+                  mediaKind: "image",
+                  fileId: res.value.fileId,
+                  ...(res.value.detail !== undefined ? { detail: res.value.detail } : {}),
+                });
+              } else {
+                parts.push(res.value.part);
               }
-              return unsupportedCapability("document-inline-bytes");
+              if (p.prompt_cache_breakpoint !== undefined) {
+                const markerResult = captureBreakpoint(
+                  `input item [${i}] part [${pIdx}]`,
+                  p.prompt_cache_breakpoint,
+                  itemIndex,
+                  pIdx,
+                );
+                if (!markerResult.ok) return markerResult;
+                breakpoints.push(markerResult.value);
+              }
+            } else if (p?.type === "input_file") {
+              const res = parseResponsesFilePart(p, `input item [${i}] part [${pIdx}] (input_file)`);
+              if (!res.ok) return res;
+              if (res.value.kind === "ref") {
+                providerFileRefs.push({
+                  itemIndex,
+                  partIndex: pIdx,
+                  mediaKind: "document",
+                  fileId: res.value.fileId,
+                  ...(res.value.filename !== undefined ? { filename: res.value.filename } : {}),
+                });
+              } else {
+                parts.push(res.value.part);
+              }
+              if (p.prompt_cache_breakpoint !== undefined) {
+                const markerResult = captureBreakpoint(
+                  `input item [${i}] part [${pIdx}]`,
+                  p.prompt_cache_breakpoint,
+                  itemIndex,
+                  pIdx,
+                );
+                if (!markerResult.ok) return markerResult;
+                breakpoints.push(markerResult.value);
+              }
+            } else if (p?.type === "input_audio") {
+              return unsupportedCapability("audio-input");
             } else {
               return unsupportedCapability("unknown-content-item");
             }
           }
         }
         if (parts.length === 0) {
-          return invalidRequest(`Responses input item [${i}] has empty content`);
+          const hasMatchingRef = providerFileRefs.some((r) => r.itemIndex === itemIndex);
+          if (!hasMatchingRef) {
+            return invalidRequest(`Responses input item [${i}] has empty content`);
+          }
         }
         items.push({
           type: "message",
@@ -651,6 +934,9 @@ export function parseResponsesRequestBody(
 
   if (breakpoints.length > 0) {
     wireOptions = { ...wireOptions, promptCacheBreakpoints: breakpoints };
+  }
+  if (providerFileRefs.length > 0) {
+    wireOptions = { ...wireOptions, providerFileRefs };
   }
 
   // ---- Generation controls (strict bounds; never clamped, never dropped) ----
@@ -761,10 +1047,23 @@ export class ResponsesIngressDecoder implements IngressDecoder {
               if (typeof cp.text !== "string") {
                 return invalidRequest("Responses output_text part: text must be a string");
               }
+              const citations: IrCitation[] = [];
+              if (Array.isArray(cp.annotations)) {
+                for (const a of cp.annotations) {
+                  const annot = a as Record<string, unknown> | undefined;
+                  if (annot === null || typeof annot !== "object") {
+                    return invalidRequest("Responses output_text part: annotations entries must be objects");
+                  }
+                  const parsed = parseResponsesAnnotation(annot as Record<string, unknown>);
+                  if (!parsed.ok) return parsed;
+                  citations.push(parsed.value);
+                }
+              }
               parts.push({
                 type: "text",
                 partId: randomUUID(),
                 text: cp.text,
+                ...(citations.length > 0 ? { citations } : {}),
               });
             } else if (cp?.type === "refusal") {
               parts.push({

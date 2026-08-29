@@ -49,6 +49,19 @@ export interface PromptCacheBreakpoint {
 }
 
 /**
+ * Wire-only provider file/image reference captured from source wire payloads.
+ * Preserved for C↔R pass-through via sidecar; rejected into M.
+ */
+export interface ProviderFileRef {
+  readonly itemIndex: number;
+  readonly partIndex: number;
+  readonly mediaKind: "image" | "document";
+  readonly fileId: string;
+  readonly filename?: string;
+  readonly detail?: "auto" | "low" | "high";
+}
+
+/**
  * Wire-only request options traveling beside the IR.
  *
  * Matrix-admitted semantic fields (storage, prompt-cache key/mode/ttl/breakpoints,
@@ -99,6 +112,8 @@ export interface RequestWireOptions {
   readonly toolAllowedCallers?: ReadonlyArray<string>;
   /** `legacy-json-object`: legacy JSON-object mode (C↔R only). */
   readonly legacyJsonObject?: boolean;
+  /** `provider-file-id` / `provider-image-id`: C↔R passthrough file/image resource handles. */
+  readonly providerFileRefs?: ReadonlyArray<ProviderFileRef>;
 }
 
 /**

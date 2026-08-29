@@ -89,7 +89,7 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
     const markedItems = new Set(
       (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
     );
-    const messages = buildChatMessages(request.items, markedItems);
+    const messages = buildChatMessages(request.items, markedItems, requestWireOptions);
 
     return {
       model: targetModel,
@@ -557,6 +557,10 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
         ],
       };
       return ok([{ data: JSON.stringify(chunk) }]);
+    }
+
+    if (event.type === "citation") {
+      return unsupportedCapability("citation-stream-event");
     }
 
     if (event.type === "part_end") {

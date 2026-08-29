@@ -1,9 +1,10 @@
 import type { Protocol, Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { CHAT_TOOL_NAME_REGEX } from "./codecs/shared/controls.ts";
+import { M_IMAGE_MEDIA_TYPES } from "./codecs/shared/media.ts";
 import type { Direction, OutcomeWireOptions, RequestWireOptions } from "./contracts.ts";
 import { unsupportedCapabilityFailure } from "./failures.ts";
-import type { IrFinishReason, IrOutcome, IrRequest } from "./ir.ts";
+import type { IrFinishReason, IrInputPart, IrOutcome, IrRequest } from "./ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import {
   validateMessagesObjectRoot,
@@ -224,6 +225,19 @@ function preflightRequestWireOptions(
       const metadataResult = validateMetadataLimits(requestWireOptions.metadata);
       if (!metadataResult.ok) return metadataResult;
     }
+    // provider-file-id / provider-image-id: C↔R only, every M direction is T3.
+    if (requestWireOptions.providerFileRefs !== undefined && requestWireOptions.providerFileRefs.length > 0) {
+      if (involvesMessages) {
+        for (const ref of requestWireOptions.providerFileRefs) {
+          if (ref.mediaKind === "image") {
+            return unsupportedCapability("provider-image-id");
+          }
+          if (ref.mediaKind === "document") {
+            return unsupportedCapability("provider-file-id");
+          }
+        }
+      }
+    }
     // prompt-cache-breakpoints: C↔R is direct and into/out of M is marker-only
     // with declared TTL loss (egress-side), except breakpoints anchored to
     // assistant content cannot target Responses: R egress would re-emit the
@@ -249,6 +263,36 @@ function preflightRequestWireOptions(
           return unsupportedCapability("prompt-cache-breakpoint");
         }
       }
+    }
+  }
+  return ok(undefined);
+}
+
+function checkMediaPart(part: IrInputPart, facts: DirectionFacts): Result<void, NormalizedFailure> {
+  if (part.type === "image") {
+    if (part.source.type === "gateway_file") {
+      return unsupportedCapability("gateway-file-reference");
+    }
+    if (facts.isTargetMessages) {
+      if (part.detail !== undefined) {
+        return unsupportedCapability("image-detail-auto-low-high");
+      }
+      if (part.source.type === "bytes" && !M_IMAGE_MEDIA_TYPES.has(part.source.mediaType)) {
+        return unsupportedCapability("image-inline-bytes");
+      }
+    }
+  } else if (part.type === "document") {
+    if (part.source.type === "gateway_file") {
+      return unsupportedCapability("gateway-file-reference");
+    }
+    if (part.source.type === "url" && facts.isTargetChat) {
+      return unsupportedCapability("document-url");
+    }
+    if (part.source.type === "text" && facts.isTargetChat) {
+      return unsupportedCapability("document-inline-text");
+    }
+    if (part.source.type === "bytes" && facts.isTargetMessages && part.source.mediaType !== "application/pdf") {
+      return unsupportedCapability("document-inline-bytes");
     }
   }
   return ok(undefined);
@@ -305,17 +349,17 @@ function preflightTranscript(req: IrRequest, facts: DirectionFacts): Result<void
       if (isTargetChat && !(item.content.length === 1 && item.content[0]?.type === "text")) {
         return unsupportedCapability("tool-result-multipart");
       }
+      for (const part of item.content) {
+        const mediaResult = checkMediaPart(part, facts);
+        if (!mediaResult.ok) return mediaResult;
+      }
     }
 
     if (item.type === "message") {
       if (item.role === "user") {
         for (const part of item.content) {
-          if (part.type === "image") {
-            return unsupportedCapability("image-url");
-          }
-          if (part.type === "document") {
-            return unsupportedCapability("document-inline-bytes");
-          }
+          const mediaResult = checkMediaPart(part, facts);
+          if (!mediaResult.ok) return mediaResult;
         }
       } else if (item.role === "assistant") {
         for (const part of item.content) {
@@ -323,12 +367,31 @@ function preflightTranscript(req: IrRequest, facts: DirectionFacts): Result<void
             return unsupportedCapability("refusal-content");
           }
           if (part.type === "text" && part.citations !== undefined && part.citations.length > 0) {
-            return unsupportedCapability("url-citation-source");
+            const firstCit = part.citations[0];
+            if (firstCit === undefined) continue;
+            if (isTargetChat) {
+              return unsupportedCapability(
+                firstCit.source.type === "url" ? "url-citation-source" : "file-document-citation-source",
+              );
+            }
+            if (facts.isTargetResponses) {
+              return unsupportedCapability("citation-output-span");
+            }
+            if (isTargetMessages) {
+              return unsupportedCapability(
+                firstCit.source.type === "url" ? "url-citation-source" : "citation-document-location",
+              );
+            }
           }
         }
       }
     }
   }
+
+  // Size enforcement lives at exactly two documented points: the HTTP ingress
+  // body limit and the M-bound serialized-body check in the coordinator. No
+  // direction-independent media-byte cap exists here — the request-body-size
+  // row pins no universal JSON cap for C/R traffic.
   return ok(undefined);
 }
 
@@ -510,6 +573,8 @@ export function preflightOutcome(
   if (wireOptionsFailure !== undefined) return failure(wireOptionsFailure);
 
   const clientIsMessages = facts.source === "anthropic-messages";
+  const clientIsChat = facts.source === "openai-chat";
+  const clientIsResponses = facts.source === "openai-responses";
 
   // Inspect output parts
   for (const part of out.parts) {
@@ -527,7 +592,21 @@ export function preflightOutcome(
       }
     }
     if (part.type === "text" && part.citations !== undefined && part.citations.length > 0) {
-      return unsupportedCapability("url-citation-source");
+      const firstCit = part.citations[0];
+      if (firstCit === undefined) continue;
+      if (clientIsChat) {
+        return unsupportedCapability(
+          firstCit.source.type === "url" ? "url-citation-source" : "file-document-citation-source",
+        );
+      }
+      if (clientIsResponses) {
+        return unsupportedCapability("citation-output-span");
+      }
+      if (clientIsMessages) {
+        return unsupportedCapability(
+          firstCit.source.type === "url" ? "url-citation-source" : "citation-document-location",
+        );
+      }
     }
   }
 

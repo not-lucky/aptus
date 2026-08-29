@@ -195,16 +195,29 @@ test.concurrent("state machine: fail-closed profile rejections for non-text feat
     assert.equal(refusalDelta.error.capability, "refusal-stream-delta");
   }
 
+  sm.feed({
+    type: "part_start",
+    responseId: "r1",
+    partId: "p1",
+    part: { type: "text" },
+  });
+
   const citation = sm.feed({
     type: "citation",
     responseId: "r1",
     partId: "p1",
     citation: { source: { type: "url", url: "https://example.com" } },
   });
-  assert.equal(citation.ok, false);
-  if (!citation.ok) {
-    assert.equal(citation.error.capability, "citation-stream-timing");
-  }
+  assert.equal(citation.ok, true);
+
+  // Citation on unknown partId fails closed
+  const badCitation = sm.feed({
+    type: "citation",
+    responseId: "r1",
+    partId: "unknown-part",
+    citation: { source: { type: "url", url: "https://example.com" } },
+  });
+  assert.equal(badCitation.ok, false);
 
   const customToolStart = sm.feed({
     type: "part_start",

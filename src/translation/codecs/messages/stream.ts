@@ -26,7 +26,12 @@ import {
   type MessagesUsageAccumulator,
   messagesUsageBody,
 } from "../shared/usage.ts";
-import { messagesHostedBlockFailure, messagesServerToolUseFailure, messagesToolUseCallerFailure } from "./content.ts";
+import {
+  messagesHostedBlockFailure,
+  messagesServerToolUseFailure,
+  messagesToolUseCallerFailure,
+  parseMessagesCitation,
+} from "./content.ts";
 import { parseMessagesRequestBody } from "./ingress.ts";
 /**
  * Decodes a streaming Anthropic Messages request.
@@ -263,6 +268,23 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       const partId = this.partIndexMap.get(index);
       if (partId === undefined) {
         return invalidRequest(`content_block_delta received for unknown index '${index}'`);
+      }
+
+      if (delta?.type === "citations_delta") {
+        const cit = delta.citation as Record<string, unknown> | undefined;
+        if (!cit || typeof cit !== "object") {
+          return invalidRequest("citations_delta missing citation object");
+        }
+        const parsed = parseMessagesCitation(cit);
+        if (!parsed.ok) return parsed;
+        return ok([
+          {
+            type: "citation",
+            responseId: this.session.responseId,
+            partId,
+            citation: parsed.value,
+          },
+        ]);
       }
 
       if (delta?.type !== "text_delta") {
@@ -521,6 +543,13 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
         }),
       });
       return ok(frames);
+    }
+
+    if (event.type === "citation") {
+      if (event.citation.source.type === "url") {
+        return unsupportedCapability("url-citation-source");
+      }
+      return unsupportedCapability("citation-document-location");
     }
 
     if (event.type === "part_end") {

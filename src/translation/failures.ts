@@ -32,3 +32,17 @@ export function invalidRequestFailure(message: string): NormalizedFailure {
     retryable: false,
   };
 }
+
+/**
+ * Creates a normalized failure for a payload exceeding configured size limits.
+ *
+ * @param message - Description of the exceeded limit.
+ * @returns Normalized domain failure with category `payload_too_large`.
+ */
+export function payloadTooLargeFailure(message: string): NormalizedFailure {
+  return {
+    category: "payload_too_large",
+    message,
+    retryable: false,
+  };
+}

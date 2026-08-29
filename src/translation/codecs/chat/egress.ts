@@ -36,7 +36,7 @@ export class ChatEgressEncoder implements EgressEncoder {
     const markedItems = new Set(
       (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
     );
-    const messages = buildChatMessages(request.items, markedItems);
+    const messages = buildChatMessages(request.items, markedItems, requestWireOptions);
 
     return {
       model: targetModel,

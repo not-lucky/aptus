@@ -2,11 +2,13 @@ import type { Result } from "../domain/contracts.ts";
 import { isPlainObject, jsonEqual } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { CHAT_TOOL_NAME_REGEX, firstUnknownKey } from "./codecs/shared/controls.ts";
+import { base64DecodedLength, validateHttpsUrl } from "./codecs/shared/media.ts";
 import type { RequestWireOptions } from "./contracts.ts";
 import {
   GRAMMAR_SYNTAX_VALUES,
   type IrAssistantPart,
   type IrBinarySource,
+  type IrCitation,
   type IrDocumentSource,
   type IrInputPart,
   type IrItem,
@@ -31,8 +33,6 @@ const VERBOSITY_LITERALS = new Set<string>(VERBOSITY_VALUES);
 
 const REASONING_EFFORT_LITERALS = new Set<string>(REASONING_EFFORT_VALUES);
 const GRAMMAR_SYNTAX_LITERALS = new Set<string>(GRAMMAR_SYNTAX_VALUES);
-
-const BASE64_REGEX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function isNonNegativeSafeInteger(n: unknown): n is number {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
@@ -159,7 +159,7 @@ function validateGenerationControls(generation: IrRequest["generation"]): Result
 
 function validateBinarySource(source: IrBinarySource, context: string): Result<void, NormalizedFailure> {
   if (source.type === "url") {
-    if (typeof source.url !== "string" || !source.url.startsWith("https://")) {
+    if (!validateHttpsUrl(source.url)) {
       return invalidRequest(`${context}: URL source must be an absolute HTTPS URL`);
     }
     return ok(undefined);
@@ -168,11 +168,7 @@ function validateBinarySource(source: IrBinarySource, context: string): Result<v
     if (typeof source.mediaType !== "string" || source.mediaType.trim() === "") {
       return invalidRequest(`${context}: mediaType must be a non-empty string`);
     }
-    if (
-      typeof source.base64 !== "string" ||
-      source.base64.trim() === "" ||
-      !BASE64_REGEX.test(source.base64.replaceAll(/\s/g, ""))
-    ) {
+    if (base64DecodedLength(source.base64) === undefined) {
       return invalidRequest(`${context}: base64 payload must be valid base64`);
     }
     return ok(undefined);
@@ -204,21 +200,80 @@ function validateInputPart(part: IrInputPart, index: number): Result<void, Norma
     return ok(undefined);
   }
   if (part.type === "image") {
+    if (part.detail !== undefined && part.detail !== "auto" && part.detail !== "low" && part.detail !== "high") {
+      return invalidRequest(`input part [${index}] (image): detail must be 'auto', 'low', or 'high'`);
+    }
     return validateBinarySource(part.source, `input part [${index}] (image)`);
   }
   if (part.type === "document") {
     if (typeof part.documentId !== "string" || part.documentId.trim() === "") {
       return invalidRequest(`input part [${index}] (document): documentId must be non-empty`);
     }
+    if (part.name !== undefined && typeof part.name !== "string") {
+      return invalidRequest(`input part [${index}] (document): name must be a string if present`);
+    }
     return validateDocumentSource(part.source, `input part [${index}] (document)`);
   }
   return invalidRequest(`input part [${index}]: unknown input part type`);
+}
+
+function validateCitation(citation: IrCitation, context: string): Result<void, NormalizedFailure> {
+  if (typeof citation !== "object" || citation === null) {
+    return invalidRequest(`${context}: citation must be an object`);
+  }
+  if (citation.quotedText !== undefined && typeof citation.quotedText !== "string") {
+    return invalidRequest(`${context}: citation quotedText must be a string if present`);
+  }
+  const source = citation.source;
+  if (typeof source !== "object" || source === null) {
+    return invalidRequest(`${context}: citation source must be an object`);
+  }
+  if (source.type === "url") {
+    if (!validateHttpsUrl(source.url)) {
+      return invalidRequest(`${context}: citation URL source must be an absolute HTTPS URL`);
+    }
+    if (source.title !== undefined && typeof source.title !== "string") {
+      return invalidRequest(`${context}: citation title must be a string if present`);
+    }
+    return ok(undefined);
+  }
+  if (source.type === "gateway_file") {
+    if (typeof source.fileId !== "string" || source.fileId.trim() === "") {
+      return invalidRequest(`${context}: citation gateway_file must have non-empty fileId`);
+    }
+    if (source.name !== undefined && typeof source.name !== "string") {
+      return invalidRequest(`${context}: citation name must be a string if present`);
+    }
+    return ok(undefined);
+  }
+  if (source.type === "input_document") {
+    if (typeof source.documentId !== "string" || source.documentId.trim() === "") {
+      return invalidRequest(`${context}: citation input_document must have non-empty documentId`);
+    }
+    if (source.name !== undefined && typeof source.name !== "string") {
+      return invalidRequest(`${context}: citation name must be a string if present`);
+    }
+    return ok(undefined);
+  }
+  return invalidRequest(`${context}: unknown citation source type`);
 }
 
 function validateAssistantPart(part: IrAssistantPart, index: number): Result<void, NormalizedFailure> {
   if (part.type === "text") {
     if (typeof part.text !== "string") {
       return invalidRequest(`assistant part [${index}]: text must be a string`);
+    }
+    if (part.citations !== undefined) {
+      if (!Array.isArray(part.citations)) {
+        return invalidRequest(`assistant part [${index}] (text): citations must be an array`);
+      }
+      for (let cIdx = 0; cIdx < part.citations.length; cIdx++) {
+        const cit = part.citations[cIdx];
+        if (cit !== undefined) {
+          const citRes = validateCitation(cit, `assistant part [${index}] citation [${cIdx}]`);
+          if (!citRes.ok) return citRes;
+        }
+      }
     }
     return ok(undefined);
   }
@@ -231,7 +286,11 @@ function validateAssistantPart(part: IrAssistantPart, index: number): Result<voi
   return invalidRequest(`assistant part [${index}]: unknown assistant part type`);
 }
 
-function validateItem(item: IrItem, index: number): Result<void, NormalizedFailure> {
+function validateItem(
+  item: IrItem,
+  index: number,
+  requestWireOptions?: RequestWireOptions,
+): Result<void, NormalizedFailure> {
   if (item.type === "instruction") {
     if (item.authority !== "system" && item.authority !== "developer") {
       return invalidRequest(`item [${index}] (instruction): authority must be system or developer`);
@@ -247,8 +306,14 @@ function validateItem(item: IrItem, index: number): Result<void, NormalizedFailu
 
   if (item.type === "message") {
     if (item.role === "user") {
-      if (!Array.isArray(item.content) || item.content.length === 0) {
-        return invalidRequest(`item [${index}] (user message): content must be a non-empty array`);
+      if (!Array.isArray(item.content)) {
+        return invalidRequest(`item [${index}] (user message): content must be an array`);
+      }
+      if (item.content.length === 0) {
+        const hasMatchingRef = requestWireOptions?.providerFileRefs?.some((ref) => ref.itemIndex === index);
+        if (!hasMatchingRef) {
+          return invalidRequest(`item [${index}] (user message): content must be a non-empty array`);
+        }
       }
       for (let pIdx = 0; pIdx < item.content.length; pIdx++) {
         const part = item.content[pIdx];
@@ -307,6 +372,13 @@ function validateItem(item: IrItem, index: number): Result<void, NormalizedFailu
       return invalidRequest(
         `item [${index}] (tool_result): callId must be a non-empty string, isError a boolean, and content an array`,
       );
+    }
+    for (let pIdx = 0; pIdx < item.content.length; pIdx++) {
+      const part = item.content[pIdx];
+      if (part !== undefined) {
+        const partResult = validateInputPart(part, pIdx);
+        if (!partResult.ok) return partResult;
+      }
     }
     return ok(undefined);
   }
@@ -442,7 +514,7 @@ export function validateIrRequest(
     if (item.type === "message" && (item.role === "user" || item.role === "assistant")) {
       hasMessage = true;
     }
-    const itemResult = validateItem(item, i);
+    const itemResult = validateItem(item, i, requestWireOptions);
     if (!itemResult.ok) return itemResult;
   }
 
@@ -496,6 +568,18 @@ function validateOutputPart(part: IrOutputPart, index: number): Result<void, Nor
   if (part.type === "text") {
     if (typeof part.text !== "string") {
       return invalidRequest(`output part [${index}] (text): text must be a string`);
+    }
+    if (part.citations !== undefined) {
+      if (!Array.isArray(part.citations)) {
+        return invalidRequest(`output part [${index}] (text): citations must be an array`);
+      }
+      for (let cIdx = 0; cIdx < part.citations.length; cIdx++) {
+        const cit = part.citations[cIdx];
+        if (cit !== undefined) {
+          const citRes = validateCitation(cit, `output part [${index}] citation [${cIdx}]`);
+          if (!citRes.ok) return citRes;
+        }
+      }
     }
     return ok(undefined);
   }
