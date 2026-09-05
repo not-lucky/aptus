@@ -420,7 +420,7 @@ export class MessagesIngressDecoder implements IngressDecoder {
     return parseMessagesRequestBody(body, body.stream === true ? "stream" : "complete");
   }
 
-  decodeOutcome(status: number, _headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
-    return parseMessagesOutcome(status, body);
+  decodeOutcome(status: number, headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
+    return parseMessagesOutcome(status, body, headers);
   }
 }

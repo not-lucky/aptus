@@ -12,7 +12,7 @@ import type {
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
-
+import { truncateProviderErrorString } from "../../failures.ts";
 import type { IrFinishReason, IrRequest, IrStreamEvent, IrUsage } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
@@ -121,6 +121,8 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
   private readonly budget: StreamToolArgumentsBudget;
   private responseStartEmitted = false;
   private openTextPartId: string | undefined;
+  private openRefusalPartId: string | undefined;
+  private sawRefusal = false;
   private readonly seenCallIds = new Set<string>();
   private readonly openToolParts = new Map<
     number,
@@ -179,11 +181,19 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
         return invalidRequest("Chat stream in-band error must be a JSON object");
       }
       const err = chunk.error as Record<string, unknown>;
+      // Upstream message/code strings are diagnostic-only and bounded; the
+      // full bytes remain in Trace.
+      const message = typeof err.message === "string" ? err.message : "Chat provider stream in-band error";
+      const code = typeof err.code === "string" ? err.code : undefined;
+      // The chatcmpl chunk `id` is a response object id, not a request id;
+      // only an explicit error-body request id is an observed request id.
+      const requestId = typeof err.request_id === "string" ? err.request_id : undefined;
       return failure({
         category: "provider",
-        message: typeof err.message === "string" ? err.message : "Chat provider stream in-band error",
-        code: typeof err.code === "string" ? err.code : undefined,
+        message: truncateProviderErrorString(message),
+        code: code !== undefined ? truncateProviderErrorString(code) : undefined,
         retryable: false,
+        ...(requestId !== undefined ? { requestId } : {}),
       });
     }
 
@@ -346,17 +356,43 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
         }
       }
       if (delta.refusal !== undefined && delta.refusal !== null) {
-        return unsupportedCapability("refusal-content");
+        // A present-but-malformed refusal delta fabricates nothing: only a
+        // string carries refusal text, anything else fails closed.
+        if (typeof delta.refusal !== "string") {
+          return invalidRequest("delta.refusal must be a string when present");
+        }
+        this.sawRefusal = true;
+        if (this.openRefusalPartId === undefined) {
+          const partId = this.session.createPartId();
+          this.openRefusalPartId = partId;
+          events.push({
+            type: "part_start",
+            responseId: this.session.responseId,
+            partId,
+            part: { type: "refusal" },
+          });
+        }
+        events.push({
+          type: "refusal_delta",
+          responseId: this.session.responseId,
+          partId: this.openRefusalPartId,
+          text: delta.refusal,
+        });
       }
 
-      if (typeof delta.content === "string" && delta.content.length > 0) {
-        const partId = this.openTextPartId ?? this.startTextPart(events);
-        events.push({
-          type: "text_delta",
-          responseId: this.session.responseId,
-          partId,
-          text: delta.content,
-        });
+      if (delta.content !== undefined && delta.content !== null) {
+        if (typeof delta.content !== "string") {
+          return invalidRequest("delta.content must be a string when present");
+        }
+        if (delta.content.length > 0) {
+          const partId = this.openTextPartId ?? this.startTextPart(events);
+          events.push({
+            type: "text_delta",
+            responseId: this.session.responseId,
+            partId,
+            text: delta.content,
+          });
+        }
       } else if (delta.role === "assistant" && this.openTextPartId === undefined) {
         this.startTextPart(events);
       }
@@ -364,13 +400,16 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
       if (choice.finish_reason === "stop") {
-        this.finishReason = "stop";
+        this.finishReason = this.sawRefusal ? "refusal" : "stop";
       } else if (choice.finish_reason === "length") {
         this.finishReason = "length";
       } else if (choice.finish_reason === "tool_calls") {
+        if (this.sawRefusal) {
+          return invalidRequest("Chat stream encountered both refusal and tool_calls");
+        }
         this.finishReason = "tool_calls";
       } else if (choice.finish_reason === "content_filter") {
-        return unsupportedCapability("finish-content-filter");
+        this.finishReason = "content_filter";
       } else {
         return unsupportedCapability("finish-other-unknown");
       }
@@ -383,6 +422,15 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
           partType: "text",
         });
         this.openTextPartId = undefined;
+      }
+      if (this.openRefusalPartId !== undefined) {
+        events.push({
+          type: "part_end",
+          responseId: this.session.responseId,
+          partId: this.openRefusalPartId,
+          partType: "refusal",
+        });
+        this.openRefusalPartId = undefined;
       }
       for (const tool of this.openToolParts.values()) {
         const parsed = parseFunctionArgumentsOnce(tool.arguments);
@@ -489,6 +537,23 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
           {
             index: 0,
             delta: { content: event.text },
+            finish_reason: null,
+          },
+        ],
+      };
+      return ok([{ data: JSON.stringify(chunk) }]);
+    }
+
+    if (event.type === "refusal_delta") {
+      const chunk = {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: { refusal: event.text },
             finish_reason: null,
           },
         ],

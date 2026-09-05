@@ -4,7 +4,7 @@ import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
 import type { ResponseOwnership } from "../translation/sse.ts";
 import type { TranslatedStreamPump } from "../translation/stream-pump.ts";
 import { classifyAbortReason } from "./attempt.ts";
-import { interruptedFailure, timeoutFailure } from "./failures.ts";
+import { interruptedFailure, statusFromCategory, timeoutFailure } from "./failures.ts";
 import type { Clock } from "./timing.ts";
 
 /**
@@ -16,6 +16,8 @@ export interface TranslatedStreamRelayContext {
   readonly started: number;
   readonly attemptCount: number;
   readonly targetProtocol: Protocol;
+  /** Client protocol owning the response envelope; maps failure categories to status. */
+  readonly clientProtocol: Protocol;
   readonly providerName: string;
   readonly canonicalName: string;
   readonly pricing: PricingConfig | null;
@@ -104,6 +106,49 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
     controller.close();
   }
 
+  async function finalizeInBandError(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    failure: NormalizedFailure,
+  ): Promise<void> {
+    if (isClosed()) return;
+    ownership = { kind: "closed", reason: "failed" };
+
+    await providerSink.complete().catch(() => undefined);
+    await irEventsSink.complete().catch(() => undefined);
+
+    // The wire status is already 200 once headers are sent; this status is
+    // Trace bookkeeping derived from the failure category exactly like the
+    // pre-header path via statusFromCategory.
+    const status = statusFromCategory(failure.category, context.clientProtocol);
+    deliver = async (durationMs) => {
+      await context.coordinator.finalize({
+        terminal: {
+          kind: "failed",
+          failure,
+        },
+        outcomeCategory: "failed",
+        status,
+        attempts: context.attemptCount,
+        stream: true,
+        durationMs,
+        targetProtocol: context.targetProtocol,
+        provider: context.providerName,
+        canonicalPublicName: context.canonicalName,
+      });
+    };
+
+    controller.close();
+  }
+
+  async function finishRelay(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
+    const failure = pump.getFailure();
+    if (failure !== undefined) {
+      await finalizeInBandError(controller, failure);
+    } else {
+      await finalizeCleanSuccess(controller);
+    }
+  }
+
   async function finalizeFailure(
     controller: ReadableStreamDefaultController<Uint8Array>,
     failure: NormalizedFailure,
@@ -121,7 +166,7 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
         failure,
       },
       outcomeCategory: "failed",
-      status: 502,
+      status: statusFromCategory(failure.category, context.clientProtocol),
       attempts: context.attemptCount,
       stream: true,
       durationMs,
@@ -142,13 +187,13 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
             controller.enqueue(nextChunk);
           }
           if (clientQueue.length === 0 && isStreamDone) {
-            await finalizeCleanSuccess(controller);
+            await finishRelay(controller);
           }
           return;
         }
 
         if (isStreamDone) {
-          await finalizeCleanSuccess(controller);
+          await finishRelay(controller);
           return;
         }
 
@@ -187,10 +232,10 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
             controller.enqueue(nextChunk);
           }
           if (clientQueue.length === 0 && isStreamDone) {
-            await finalizeCleanSuccess(controller);
+            await finishRelay(controller);
           }
         } else if (isStreamDone) {
-          await finalizeCleanSuccess(controller);
+          await finishRelay(controller);
         }
       } catch (error) {
         if (isClosed()) return;

@@ -1,6 +1,12 @@
 import type { Protocol } from "../domain/contracts.ts";
 import { filterInboundHeaders } from "../domain/headers.ts";
-import type { EncodedFailure, ErrorEncoder, IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
+import {
+  anthropicErrorType,
+  type EncodedFailure,
+  type ErrorEncoder,
+  type IrFailureCategory,
+  type NormalizedFailure,
+} from "../domain/operations.ts";
 import type { AptusRequestId } from "../domain/request-id.ts";
 import { statusFromCategory } from "../routing/failures.ts";
 
@@ -126,36 +132,6 @@ function openAiErrorType(category: IrFailureCategory | "internal"): string {
     case "rate_limit":
     case "quota":
       return "rate_limit_error";
-    default:
-      return "api_error";
-  }
-}
-
-/**
- * Maps failure categories to Anthropic error types.
- */
-function anthropicErrorType(category: IrFailureCategory | "internal"): string {
-  switch (category) {
-    case "invalid_request":
-    case "unsupported_capability":
-      return "invalid_request_error";
-    case "payload_too_large":
-      return "request_too_large";
-    case "authentication":
-      return "authentication_error";
-    case "permission":
-      return "permission_error";
-    case "not_found":
-      return "not_found_error";
-    case "conflict":
-      return "conflict_error";
-    case "rate_limit":
-    case "quota":
-      return "rate_limit_error";
-    case "timeout":
-      return "timeout_error";
-    case "unavailable":
-      return "overloaded_error";
     default:
       return "api_error";
   }

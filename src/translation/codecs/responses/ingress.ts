@@ -8,7 +8,11 @@ import type {
   ProviderFileRef,
   RequestDecodeResult,
 } from "../../contracts.ts";
-import { unsupportedCapabilityFailure } from "../../failures.ts";
+import {
+  parseRetryAfterHeaderSeconds,
+  truncateProviderErrorString,
+  unsupportedCapabilityFailure,
+} from "../../failures.ts";
 import type {
   IrAssistantPart,
   IrCitation,
@@ -476,6 +480,12 @@ export function parseResponsesRequestBody(
   }
 
   // Decoder-level capability rejections for recognized native-only facts.
+  if (body.prompt_cache_retention !== undefined) {
+    return unsupportedCapability("openai-prompt-cache-retention");
+  }
+  if (body.multi_agent !== undefined || body.agents !== undefined) {
+    return unsupportedCapability("responses-preview-multi-agent");
+  }
   if (body.previous_response_id !== undefined) {
     return unsupportedCapability("responses-previous-id");
   }
@@ -994,28 +1004,36 @@ export class ResponsesIngressDecoder implements IngressDecoder {
     return parseResponsesRequestBody(body, body.stream === true ? "stream" : "complete");
   }
 
-  decodeOutcome(status: number, _headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
+  decodeOutcome(status: number, headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
     if (typeof body !== "object" || body === null) {
       return invalidRequest("Responses response body must be an object");
     }
 
+    const retryAfterSeconds = parseRetryAfterHeaderSeconds(headers["retry-after"]);
+
     if (body.status === "failed") {
       const err = (body.error ?? {}) as Record<string, unknown>;
+      const rawMessage = typeof err.message === "string" ? err.message : "Responses provider returned failed status";
+      const rawCode = typeof err.code === "string" ? err.code : undefined;
       return failure({
         category: "provider",
-        message: typeof err.message === "string" ? err.message : "Responses provider returned failed status",
-        code: typeof err.code === "string" ? err.code : undefined,
+        message: truncateProviderErrorString(rawMessage),
+        code: rawCode !== undefined ? truncateProviderErrorString(rawCode) : undefined,
         retryable: false,
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       });
     }
 
     if (status >= 400) {
       const err = (body.error ?? {}) as Record<string, unknown>;
+      const rawMessage = typeof err.message === "string" ? err.message : `Responses provider error HTTP ${status}`;
+      const rawCode = typeof err.code === "string" ? err.code : undefined;
       return failure({
         category: "provider",
-        message: typeof err.message === "string" ? err.message : `Responses provider error HTTP ${status}`,
-        code: typeof err.code === "string" ? err.code : undefined,
+        message: truncateProviderErrorString(rawMessage),
+        code: rawCode !== undefined ? truncateProviderErrorString(rawCode) : undefined,
         retryable: false,
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       });
     }
 
@@ -1066,10 +1084,23 @@ export class ResponsesIngressDecoder implements IngressDecoder {
                 ...(citations.length > 0 ? { citations } : {}),
               });
             } else if (cp?.type === "refusal") {
+              // A refusal part with present-but-malformed text fabricates
+              // nothing: non-string values fail closed, and a refusal part
+              // carrying no text at all is malformed provider output.
+              if (cp.refusal !== undefined && typeof cp.refusal !== "string") {
+                return invalidRequest("Responses refusal part: refusal must be a string when present");
+              }
+              if (cp.text !== undefined && typeof cp.text !== "string") {
+                return invalidRequest("Responses refusal part: text must be a string when present");
+              }
+              if (typeof cp.refusal !== "string" && typeof cp.text !== "string") {
+                return invalidRequest("Responses refusal part: refusal or text must be a string");
+              }
+              const refusalText = typeof cp.refusal === "string" ? cp.refusal : (cp.text as string);
               parts.push({
                 type: "refusal",
                 partId: randomUUID(),
-                text: typeof cp.text === "string" ? cp.text : undefined,
+                text: refusalText,
               });
             } else {
               // Unknown inner content parts never vanish behind a success
@@ -1109,10 +1140,16 @@ export class ResponsesIngressDecoder implements IngressDecoder {
       } else if (details.reason === "content_filter") {
         finishReason = "content_filter";
       } else {
-        finishReason = "other";
+        return unsupportedCapability("finish-other-unknown");
       }
     } else if (body.status === "completed") {
-      finishReason = parts.some((part) => part.type === "tool_call") ? "tool_calls" : "stop";
+      finishReason = parts.some((part) => part.type === "refusal")
+        ? "refusal"
+        : parts.some((part) => part.type === "tool_call")
+          ? "tool_calls"
+          : "stop";
+    } else {
+      return unsupportedCapability("finish-other-unknown");
     }
 
     // Usage counters plus the cache/reasoning subdivisions; parsed once in

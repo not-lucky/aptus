@@ -6,7 +6,7 @@ import type {
   ProviderResponse,
 } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { TranslationCoordinator } from "../translation/contracts.ts";
+import type { Direction, TranslationCoordinator } from "../translation/contracts.ts";
 import { createSseDecoder, createSseEncoder } from "../translation/sse.ts";
 import { TranslatedStreamPump } from "../translation/stream-pump.ts";
 import { createIrStreamStateMachine } from "../translation/stream-state.ts";
@@ -252,6 +252,7 @@ export async function executeTranslatedStreamAttempt(
   const stateMachine = createIrStreamStateMachine({
     expectedResponseId: sessionBundle.session.responseId,
     expectedModel: sessionBundle.session.model,
+    direction: `${request.protocol}->${candidate.provider.protocol}` as Direction,
   });
 
   const providerSink = ctx.trace.openBytes("provider_stream");
@@ -318,6 +319,27 @@ export async function executeTranslatedStreamAttempt(
         return { kind: "dispatch_failed", failure: finishResult.error };
       }
       initialClientChunks.push(...finishResult.value);
+
+      const pumpFailure = pump.getFailure();
+      // Zero-prior-bytes split: headers are not sent yet, so an in-band
+      // failure here returns dispatch_failed (retryable across candidates).
+      // Once client bytes exist the relay owns the stream and the same failure
+      // closes it post-headers instead.
+      if (pumpFailure !== undefined && initialClientChunks.length === 0) {
+        await discardTraceSinks();
+        finishAttempt(
+          ctx,
+          request,
+          candidate,
+          lease,
+          attemptNumber,
+          { result: pumpFailure.category, beforeClientBytes: true },
+          response.status,
+          dispatchDurationMs,
+          false,
+        );
+        return { kind: "dispatch_failed", failure: pumpFailure };
+      }
 
       if (!pump.isTerminal()) {
         await discardTraceSinks();
@@ -387,6 +409,7 @@ export async function executeTranslatedStreamAttempt(
     started: dispatchStarted,
     attemptCount: attemptNumber,
     targetProtocol: candidate.provider.protocol,
+    clientProtocol: request.protocol,
     providerName: candidate.provider.name,
     canonicalName: request.canonicalPublicName,
     pricing: candidate.model.pricing ?? null,

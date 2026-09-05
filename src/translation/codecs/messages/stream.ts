@@ -1,6 +1,6 @@
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import { isPlainObject } from "../../../domain/json.ts";
-import type { NormalizedFailure } from "../../../domain/operations.ts";
+import { anthropicErrorType, type NormalizedFailure } from "../../../domain/operations.ts";
 import type {
   ClientStreamEncoder,
   OutcomeWireOptions,
@@ -12,7 +12,7 @@ import type {
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
-
+import { truncateProviderErrorString } from "../../failures.ts";
 import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
@@ -291,7 +291,10 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         return unsupportedCapability("unknown-stream-event");
       }
 
-      const text = typeof delta.text === "string" ? delta.text : "";
+      if (typeof delta.text !== "string") {
+        return invalidRequest("text_delta: delta.text must be a string");
+      }
+      const text = delta.text;
       return ok([
         {
           type: "text_delta",
@@ -355,15 +358,13 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       } else if (stopReason === "tool_use") {
         this.recordedFinish = "tool_calls";
       } else if (stopReason === "refusal") {
-        return unsupportedCapability("refusal-content");
+        return unsupportedCapability("refusal-terminal-reason");
       } else if (stopReason === "model_context_window_exceeded") {
         return unsupportedCapability("finish-context-limit");
       } else if (stopReason === "pause_turn") {
         return unsupportedCapability("anthropic-pause-turn");
       } else if (stopReason !== null && stopReason !== undefined) {
         return unsupportedCapability("finish-other-unknown");
-      } else {
-        this.recordedFinish = "stop";
       }
 
       // The matched stop string is only meaningful with the `stop_sequence`
@@ -408,13 +409,16 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       if (this.usageState.sawUsage && this.usageState.outputTokens === undefined) {
         return invalidRequest("usage.output_tokens must be a finite number when usage is present");
       }
+      if (this.recordedFinish === undefined) {
+        return invalidRequest("message_stop received without a terminal stop_reason");
+      }
       const usage = collapseMessagesUsage(this.usageState);
       return ok([
         {
           type: "response_end",
           responseId: this.session.responseId,
           finish: {
-            reason: this.recordedFinish ?? "stop",
+            reason: this.recordedFinish,
             ...(this.recordedStopSequence !== undefined ? { stopSequence: this.recordedStopSequence } : {}),
           },
           ...(usage !== undefined ? { usage } : {}),
@@ -424,12 +428,30 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (eventName === "error") {
       const err = (chunk.error ?? {}) as Record<string, unknown>;
-      return failure({
-        category: "provider",
-        message: typeof err.message === "string" ? err.message : "Messages provider stream error",
-        code: typeof err.type === "string" ? err.type : undefined,
-        retryable: false,
-      });
+      this.sawMessageStop = true;
+      // Upstream message/type strings are diagnostic-only and bounded; the
+      // full bytes remain in Trace.
+      const message = typeof err.message === "string" ? err.message : "Messages provider stream error";
+      const code = typeof err.type === "string" ? err.type : undefined;
+      const requestId =
+        typeof err.request_id === "string"
+          ? err.request_id
+          : typeof chunk.request_id === "string"
+            ? (chunk.request_id as string)
+            : undefined;
+      return ok([
+        {
+          type: "error",
+          responseId: this.session.responseId,
+          failure: {
+            category: "provider",
+            message: truncateProviderErrorString(message),
+            code: code !== undefined ? truncateProviderErrorString(code) : undefined,
+            retryable: false,
+            ...(requestId !== undefined ? { requestId } : {}),
+          },
+        },
+      ]);
     }
 
     return unsupportedCapability("unknown-stream-event");
@@ -462,6 +484,7 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
   private readonly deferredFunctionParts = new Map<string, { callId: string; name: string }>();
   private readonly partIndices = new Map<string, number>();
   private nextPartIndex = 0;
+  private emittedMessageStart = false;
 
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.session = session;
@@ -483,25 +506,14 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
     const frames: SseFrame[] = [];
 
     if (event.type === "response_start") {
-      frames.push({
-        event: "message_start",
-        data: JSON.stringify({
-          type: "message_start",
-          message: {
-            id,
-            type: "message",
-            role: "assistant",
-            content: [],
-            model: this.session.model,
-            stop_reason: null,
-            stop_sequence: null,
-          },
-        }),
-      });
+      this.messageStartFrame(id, frames);
       return ok(frames);
     }
 
     if (event.type === "part_start") {
+      if (event.part.type === "refusal") {
+        return unsupportedCapability("refusal-content");
+      }
       if (event.part.type === "function_call") {
         this.deferredFunctionParts.set(event.partId, {
           callId: event.part.callId,
@@ -523,6 +535,10 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
         return ok(frames);
       }
       return unsupportedCapability("unknown-stream-event");
+    }
+
+    if (event.type === "refusal_delta") {
+      return unsupportedCapability("refusal-stream-delta");
     }
 
     if (event.type === "tool_arguments_delta") {
@@ -646,7 +662,28 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "error") {
-      return ok([]);
+      // A provider that fails before opening the message lifecycle must
+      // still yield a client stream that opens the lifecycle it then fails:
+      // the M wire has no legal stream shape whose first frame is `error`.
+      if (!this.emittedMessageStart) {
+        this.messageStartFrame(id, frames);
+      }
+      frames.push({
+        event: "error",
+        data: JSON.stringify({
+          type: "error",
+          error: {
+            type: anthropicErrorType(event.failure.category),
+            message: event.failure.message,
+          },
+          // The M error envelope documents `request_id` on error bodies
+          // ([M §5]); extending the same echo to the stream error frame keeps
+          // the observed id visible to the client without inventing fields
+          // the research does not define.
+          ...(event.failure.requestId !== undefined ? { request_id: event.failure.requestId } : {}),
+        }),
+      });
+      return ok(frames);
     }
 
     return unsupportedCapability("unknown-stream-event");
@@ -654,5 +691,30 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
 
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
     return ok([]);
+  }
+
+  /**
+   * Emits the lifecycle-opening `message_start` frame carrying the session
+   * `Message` object in its pre-content state. The `response_start` arm and
+   * the first-frame error arm share this helper so an error-before-start
+   * stream opens the same lifecycle shape as a clean one.
+   */
+  private messageStartFrame(id: string, frames: SseFrame[]): void {
+    this.emittedMessageStart = true;
+    frames.push({
+      event: "message_start",
+      data: JSON.stringify({
+        type: "message_start",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: this.session.model,
+          stop_reason: null,
+          stop_sequence: null,
+        },
+      }),
+    });
   }
 }

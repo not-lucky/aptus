@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { JsonObject, Result } from "../../../domain/contracts.ts";
+import type { HeaderMap, JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type { OutcomeDecodeResult } from "../../contracts.ts";
+import { parseRetryAfterHeaderSeconds, truncateProviderErrorString } from "../../failures.ts";
 import type { IrCitation, IrFinishReason, IrOutcome, IrOutputPart, IrUsage } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import { accumulateMessagesUsage, collapseMessagesUsage, type MessagesUsageAccumulator } from "../shared/usage.ts";
@@ -13,18 +14,26 @@ import {
 } from "./content.ts";
 
 /** Decodes one complete Anthropic Messages outcome independently of request parsing. */
-export function parseMessagesOutcome(status: number, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
+export function parseMessagesOutcome(
+  status: number,
+  body: JsonObject,
+  headers?: HeaderMap,
+): Result<OutcomeDecodeResult, NormalizedFailure> {
   if (typeof body !== "object" || body === null) {
     return invalidRequest("Messages response body must be an object");
   }
 
   if (body.type === "error" || status >= 400) {
     const err = (body.error ?? {}) as Record<string, unknown>;
+    const rawMessage = typeof err.message === "string" ? err.message : `Messages provider error HTTP ${status}`;
+    const rawCode = typeof err.type === "string" ? err.type : undefined;
+    const retryAfterSeconds = parseRetryAfterHeaderSeconds(headers?.["retry-after"]);
     return failure({
       category: "provider",
-      message: typeof err.message === "string" ? err.message : `Messages provider error HTTP ${status}`,
-      code: typeof err.type === "string" ? err.type : undefined,
+      message: truncateProviderErrorString(rawMessage),
+      code: rawCode !== undefined ? truncateProviderErrorString(rawCode) : undefined,
       retryable: false,
+      ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
     });
   }
 
@@ -81,8 +90,8 @@ export function parseMessagesOutcome(status: number, body: JsonObject): Result<O
     }
   }
 
-  let finishReason: IrFinishReason = "stop";
   const rawStopReason = body.stop_reason;
+  let finishReason: IrFinishReason;
   if (rawStopReason === "end_turn") {
     finishReason = "stop";
   } else if (rawStopReason === "max_tokens") {
@@ -98,7 +107,9 @@ export function parseMessagesOutcome(status: number, body: JsonObject): Result<O
   } else if (rawStopReason === "pause_turn") {
     return unsupportedCapability("anthropic-pause-turn");
   } else if (rawStopReason !== null && rawStopReason !== undefined) {
-    finishReason = "other";
+    return unsupportedCapability("finish-other-unknown");
+  } else {
+    return invalidRequest("Messages complete response requires a non-null stop_reason");
   }
 
   const rawUsage = body.usage as Record<string, unknown> | null | undefined;

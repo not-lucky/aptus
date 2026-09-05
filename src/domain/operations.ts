@@ -52,6 +52,11 @@ export interface NormalizedFailure {
   readonly retryAfterSeconds?: number;
 
   /**
+   * Upstream request identifier when observed on provider error responses.
+   */
+  readonly requestId?: string;
+
+  /**
    * Whether candidate routing or gateway policy permits retrying this failure on the same candidate.
    */
   readonly retryable: boolean;
@@ -289,4 +294,40 @@ export interface HealthReporter {
    * @returns An immutable, secret-free {@link HealthPayload}.
    */
   current(): HealthPayload;
+}
+
+/**
+ * Maps failure categories to Anthropic wire error types.
+ *
+ * Provides a single canonical mapping shared by HTTP error encoding and
+ * streaming in-band error translation to guarantee complete-vs-stream parity.
+ *
+ * @param category - Canonical failure category or internal marker.
+ * @returns Anthropic wire error type string.
+ */
+export function anthropicErrorType(category: IrFailureCategory | "internal"): string {
+  switch (category) {
+    case "invalid_request":
+    case "unsupported_capability":
+      return "invalid_request_error";
+    case "payload_too_large":
+      return "request_too_large";
+    case "authentication":
+      return "authentication_error";
+    case "permission":
+      return "permission_error";
+    case "not_found":
+      return "not_found_error";
+    case "conflict":
+      return "conflict_error";
+    case "rate_limit":
+    case "quota":
+      return "rate_limit_error";
+    case "timeout":
+      return "timeout_error";
+    case "unavailable":
+      return "overloaded_error";
+    default:
+      return "api_error";
+  }
 }

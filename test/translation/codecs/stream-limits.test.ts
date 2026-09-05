@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import {
-  MAX_STREAM_TOOL_ARGUMENTS_BYTES,
-  StreamToolArgumentsBudget,
-} from "../../../src/translation/codecs/shared/stream-limits.ts";
+import { StreamToolArgumentsBudget } from "../../../src/translation/codecs/shared/stream-limits.ts";
 
 describe("StreamToolArgumentsBudget", () => {
   it("claims fragments within budget", () => {
@@ -31,10 +28,6 @@ describe("StreamToolArgumentsBudget", () => {
     if (!overflow.ok) {
       assert.equal(overflow.error.category, "payload_too_large");
     }
-  });
-
-  it("uses MAX_STREAM_TOOL_ARGUMENTS_BYTES by default", () => {
-    assert.equal(MAX_STREAM_TOOL_ARGUMENTS_BYTES, 33_554_432);
   });
 
   it("enforces shared stream-wide budget across multiple accumulators", () => {

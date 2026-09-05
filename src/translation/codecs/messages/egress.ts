@@ -34,23 +34,27 @@ export class MessagesEgressEncoder implements EgressEncoder {
     readonly body: JsonObject;
   } {
     // Content blocks preserve part order; an outcome with no parts still
-    // carries one empty text block.
-    const content: JsonObject[] = partitionOutcomeParts(outcome.parts).map(
-      (segment): JsonObject =>
-        segment.type === "text"
-          ? { type: "text", text: segment.text }
-          : {
-              type: "tool_use",
-              id: segment.call.callId,
-              name: segment.call.name,
-              // Preflight admits only function calls with parsed arguments into
-              // an M client; the parse fallback keeps the encoder total.
-              input:
-                segment.call.type === "function"
-                  ? (segment.call.arguments ?? JSON.parse(segment.call.argumentsText))
-                  : JSON.parse(segment.call.inputText),
-            },
-    );
+    // carries one empty text block. Preflight rejects every non-C/R refusal
+    // before encoding, so the refusal arm below is unreachable in translated
+    // turns; it is an invariant assertion that fails loudly on preflight drift.
+    const content: JsonObject[] = partitionOutcomeParts(outcome.parts).map((segment): JsonObject => {
+      if (segment.type === "refusal") {
+        throw new Error("Anthropic Messages does not support refusal content parts");
+      }
+      return segment.type === "text"
+        ? { type: "text", text: segment.text }
+        : {
+            type: "tool_use",
+            id: segment.call.callId,
+            name: segment.call.name,
+            // Preflight admits only function calls with parsed arguments into
+            // an M client; the parse fallback keeps the encoder total.
+            input:
+              segment.call.type === "function"
+                ? (segment.call.arguments ?? JSON.parse(segment.call.argumentsText))
+                : JSON.parse(segment.call.inputText),
+          };
+    });
     if (content.length === 0) {
       content.push({ type: "text", text: "" });
     }

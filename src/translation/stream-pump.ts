@@ -16,6 +16,7 @@ import type { IrStreamStateMachine } from "./stream-state.ts";
  */
 export class TranslatedStreamPump {
   private observedUsage: IrUsage | undefined;
+  private observedFailure: NormalizedFailure | undefined;
   private readonly sseDecoder: SseDecoder;
   private readonly sseEncoder: SseEncoder;
   private readonly providerDecoder: ProviderStreamDecoder;
@@ -44,6 +45,11 @@ export class TranslatedStreamPump {
     return this.observedUsage;
   }
 
+  /** In-band error failure observed on the stream, if any. */
+  getFailure(): NormalizedFailure | undefined {
+    return this.observedFailure;
+  }
+
   /** Whether the IR state machine has reached a terminal state. */
   isTerminal(): boolean {
     return this.stateMachine.isTerminal();
@@ -55,8 +61,14 @@ export class TranslatedStreamPump {
    * @returns Ordered target client chunks, or a terminal fail-closed failure.
    */
   pushBytes(bytes: Uint8Array): Result<readonly Uint8Array[], NormalizedFailure> {
+    // An in-band provider error is terminal. Ignore bytes received after it
+    // rather than letting a later provider frame replace the first failure or
+    // turn a target-native error into a second terminal result.
+    if (this.observedFailure !== undefined) return ok([]);
+
     const chunks: Uint8Array[] = [];
     for (const res of this.sseDecoder.push(bytes)) {
+      if (this.observedFailure !== undefined) break;
       if (res.kind === "failure") {
         return failure(res.failure);
       }
@@ -74,6 +86,10 @@ export class TranslatedStreamPump {
    * @returns Remaining target client chunks, or a terminal fail-closed failure.
    */
   finish(): Result<readonly Uint8Array[], NormalizedFailure> {
+    // The provider error already emitted the target-native terminal frame.
+    // Do not flush any decoder or encoder state after it.
+    if (this.observedFailure !== undefined) return ok([]);
+
     const chunks: Uint8Array[] = [];
 
     for (const res of this.sseDecoder.finish()) {
@@ -86,6 +102,8 @@ export class TranslatedStreamPump {
       }
     }
 
+    if (this.observedFailure !== undefined) return ok(chunks);
+
     const providerFinish = this.providerDecoder.finish();
     if (!providerFinish.ok) {
       return failure(providerFinish.error);
@@ -93,7 +111,10 @@ export class TranslatedStreamPump {
     for (const evt of providerFinish.value) {
       const eventResult = this.processEvent(evt, chunks);
       if (!eventResult.ok) return eventResult;
+      if (this.observedFailure !== undefined) break;
     }
+
+    if (this.observedFailure !== undefined) return ok(chunks);
 
     const clientFinish = this.clientEncoder.finish();
     if (!clientFinish.ok) {
@@ -107,6 +128,8 @@ export class TranslatedStreamPump {
   }
 
   private processFrame(frame: SseFrame, chunks: Uint8Array[]): Result<void, NormalizedFailure> {
+    if (this.observedFailure !== undefined) return ok(undefined);
+
     const providerResult = this.providerDecoder.push(frame);
     if (!providerResult.ok) {
       return failure(providerResult.error);
@@ -114,6 +137,7 @@ export class TranslatedStreamPump {
     for (const evt of providerResult.value) {
       const eventResult = this.processEvent(evt, chunks);
       if (!eventResult.ok) return eventResult;
+      if (this.observedFailure !== undefined) break;
     }
     return ok(undefined);
   }
@@ -124,6 +148,9 @@ export class TranslatedStreamPump {
       return failure(smResult.error);
     }
     this.onEvent(evt);
+    if (evt.type === "error") {
+      this.observedFailure = evt.failure;
+    }
     // Terminal usage invariants (input ≥ cached subdivisions, total ≥
     // input + output) are enforced inside the IR state machine's feed above,
     // which fails closed before any client frame encodes.

@@ -12,7 +12,8 @@ import type {
   StreamSession,
   StreamWireOptions,
 } from "../../contracts.ts";
-import type { IrRequest, IrStreamEvent } from "../../ir.ts";
+import { truncateProviderErrorString } from "../../failures.ts";
+import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
 import { parseFunctionArgumentsOnce, responsesReasoningItemFailure } from "../shared/hosted-tools.ts";
@@ -127,6 +128,7 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
   private readonly budget: StreamToolArgumentsBudget;
   private lastSequenceNumber = 0;
   private currentPartId: string | undefined;
+  private currentPartType: "text" | "refusal" | undefined;
   private partStarted = false;
   private completed = false;
   private readonly seenFunctionItemIds = new Set<string>();
@@ -144,6 +146,7 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
   >();
   private startedFunctionPartCount = 0;
   private outcomeWireOptions: OutcomeWireOptions = {};
+  private sawRefusal = false;
 
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.session = session;
@@ -278,11 +281,24 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         return invalidRequest("content_part.added requires part object");
       }
       const part = rawPart as Record<string, unknown>;
-      if (part.type !== "output_text") {
-        return unsupportedCapability(part?.type === "refusal" ? "refusal-content" : "unknown-content-item");
+      if (part.type !== "output_text" && part.type !== "refusal") {
+        return unsupportedCapability("unknown-content-item");
       }
       this.currentPartId = this.session.createPartId();
       this.partStarted = true;
+      if (part.type === "refusal") {
+        this.currentPartType = "refusal";
+        this.sawRefusal = true;
+        return ok([
+          {
+            type: "part_start",
+            responseId: this.session.responseId,
+            partId: this.currentPartId,
+            part: { type: "refusal" },
+          },
+        ]);
+      }
+      this.currentPartType = "text";
       return ok([
         {
           type: "part_start",
@@ -295,9 +311,10 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
 
     if (eventName === "response.output_text.delta") {
       const events: IrStreamEvent[] = [];
-      if (!this.partStarted || this.currentPartId === undefined) {
+      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "text") {
         this.currentPartId = this.session.createPartId();
         this.partStarted = true;
+        this.currentPartType = "text";
         events.push({
           type: "part_start",
           responseId: this.session.responseId,
@@ -305,7 +322,12 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
           part: { type: "text" },
         });
       }
-      const text = typeof chunk.delta === "string" ? chunk.delta : "";
+      const text = chunk.delta;
+      // A present-but-malformed delta fabricates nothing: only a string
+      // carries text, anything else fails closed.
+      if (typeof text !== "string") {
+        return invalidRequest("response.output_text.delta: delta must be a string");
+      }
       events.push({
         type: "text_delta",
         responseId: this.session.responseId,
@@ -313,6 +335,47 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         text,
       });
       return ok(events);
+    }
+
+    if (eventName === "response.refusal.delta") {
+      const events: IrStreamEvent[] = [];
+      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "refusal") {
+        this.currentPartId = this.session.createPartId();
+        this.partStarted = true;
+        this.currentPartType = "refusal";
+        events.push({
+          type: "part_start",
+          responseId: this.session.responseId,
+          partId: this.currentPartId,
+          part: { type: "refusal" },
+        });
+      }
+      this.sawRefusal = true;
+      const text = chunk.delta;
+      // A present-but-malformed refusal delta fabricates nothing: only a
+      // string carries refusal text, anything else fails closed.
+      if (typeof text !== "string") {
+        return invalidRequest("response.refusal.delta: delta must be a string");
+      }
+      events.push({
+        type: "refusal_delta",
+        responseId: this.session.responseId,
+        partId: this.currentPartId,
+        text,
+      });
+      return ok(events);
+    }
+
+    if (eventName === "response.refusal.done") {
+      // A refusal completion without an open refusal part is malformed
+      // provider output; silently absorbing it would hide the violation.
+      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "refusal") {
+        return invalidRequest("response.refusal.done received without an open refusal part");
+      }
+      const partId = this.currentPartId;
+      this.partStarted = false;
+      this.currentPartType = undefined;
+      return ok([{ type: "part_end", responseId: this.session.responseId, partId, partType: "refusal" }]);
     }
 
     if (eventName === "response.output_text.annotation.added") {
@@ -401,11 +464,12 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "response.output_text.done") {
-      if (!this.partStarted || this.currentPartId === undefined) {
-        return ok([]);
+      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "text") {
+        return invalidRequest("response.output_text.done received without an open text part");
       }
       const partId = this.currentPartId;
       this.partStarted = false;
+      this.currentPartType = undefined;
       return ok([
         {
           type: "part_end",
@@ -427,6 +491,9 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       }
       const item = rawItem as Record<string, unknown> | undefined;
       if (item !== undefined && item.type !== undefined && item.type !== "function_call") {
+        if (item.type !== "message") {
+          return unsupportedCapability("unknown-content-item");
+        }
         return ok([]);
       }
       const outputIndex = typeof chunk.output_index === "number" ? chunk.output_index : undefined;
@@ -477,6 +544,9 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       if (item?.type === "function_call") {
         return invalidRequest("output_item.done received for unknown or closed function item");
       }
+      if (item?.type !== undefined && item.type !== "message") {
+        return unsupportedCapability("unknown-content-item");
+      }
       return ok([]);
     }
 
@@ -488,6 +558,9 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       // Defense-in-depth for items announced only in the terminal payload.
       const scanResult = scanTerminalOutput(resp, this.seenFunctionItemIds, this.seenFunctionCallIds);
       if (!scanResult.ok) return scanResult;
+      if (this.sawRefusal && this.startedFunctionPartCount > 0) {
+        return invalidRequest("Responses stream encountered both refusal and tool_calls");
+      }
       this.completed = true;
       const factsResult = captureOutcomeWireFacts(resp, this.outcomeWireOptions, "Responses");
       if (!factsResult.ok) return factsResult;
@@ -498,7 +571,9 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         {
           type: "response_end",
           responseId: this.session.responseId,
-          finish: { reason: this.startedFunctionPartCount > 0 ? "tool_calls" : "stop" },
+          finish: {
+            reason: this.sawRefusal ? "refusal" : this.startedFunctionPartCount > 0 ? "tool_calls" : "stop",
+          },
           ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
         },
       ]);
@@ -513,10 +588,13 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       const scanResult = scanTerminalOutput(resp, this.seenFunctionItemIds, this.seenFunctionCallIds);
       if (!scanResult.ok) return scanResult;
       const details = (resp.incomplete_details ?? {}) as Record<string, unknown>;
-      if (details.reason !== "max_output_tokens") {
-        return unsupportedCapability(
-          details.reason === "content_filter" ? "finish-content-filter" : "finish-other-unknown",
-        );
+      let finishReason: IrFinishReason;
+      if (details.reason === "max_output_tokens") {
+        finishReason = this.startedFunctionPartCount > 0 ? "tool_calls" : "length";
+      } else if (details.reason === "content_filter") {
+        finishReason = "content_filter";
+      } else {
+        return unsupportedCapability("finish-other-unknown");
       }
 
       this.completed = true;
@@ -529,24 +607,45 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         {
           type: "response_end",
           responseId: this.session.responseId,
-          finish: { reason: this.startedFunctionPartCount > 0 ? "tool_calls" : "length" },
+          finish: { reason: finishReason },
           ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
         },
       ]);
     }
 
     if (eventName === "response.failed" || eventName === "error") {
-      const err = (chunk.error ?? (chunk.response as Record<string, unknown>)?.error ?? {}) as Record<string, unknown>;
-      return failure({
-        category: "provider",
-        message: typeof err.message === "string" ? err.message : "Responses provider stream error",
-        code: typeof err.code === "string" ? err.code : undefined,
-        retryable: false,
-      });
+      const err = (chunk.error ?? (chunk.response as Record<string, unknown>)?.error ?? chunk) as Record<
+        string,
+        unknown
+      >;
+      this.completed = true;
+      // Upstream message/code strings are diagnostic-only and bounded; the
+      // full bytes remain in Trace.
+      const message = typeof err.message === "string" ? err.message : "Responses provider stream error";
+      const code = typeof err.code === "string" ? err.code : undefined;
+      const requestId =
+        typeof err.request_id === "string"
+          ? err.request_id
+          : typeof (chunk.response as Record<string, unknown>)?.id === "string"
+            ? ((chunk.response as Record<string, unknown>).id as string)
+            : undefined;
+      return ok([
+        {
+          type: "error",
+          responseId: this.session.responseId,
+          failure: {
+            category: "provider",
+            message: truncateProviderErrorString(message),
+            code: code !== undefined ? truncateProviderErrorString(code) : undefined,
+            retryable: false,
+            ...(requestId !== undefined ? { requestId } : {}),
+          },
+        },
+      ]);
     }
 
-    // Unmapped non-semantic wire event (ignored)
-    return ok([]);
+    // Unmapped wire event fails closed as an unknown stream event
+    return unsupportedCapability("unknown-stream-event");
   }
 
   private findFunctionItem(
@@ -634,6 +733,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
   private readonly session: StreamSession;
   private readonly budget: StreamToolArgumentsBudget;
   private sequenceNumber = 1;
+  private emittedLifecycleOpening = false;
   private outcomeWireOptions: OutcomeWireOptions = {};
   private readonly openFunctionParts = new Map<
     string,
@@ -654,25 +754,31 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
     const frames: SseFrame[] = [];
 
     if (event.type === "response_start") {
-      frames.push({
-        event: "response.created",
-        data: JSON.stringify({
-          type: "response.created",
-          response: { id, status: "in_progress" },
-          sequence_number: this.sequenceNumber++,
-        }),
-      });
-      frames.push({
-        event: "response.in_progress",
-        data: JSON.stringify({
-          type: "response.in_progress",
-          sequence_number: this.sequenceNumber++,
-        }),
-      });
+      this.lifecycleOpeningFrames(id, frames);
       return ok(frames);
     }
 
     if (event.type === "part_start") {
+      if (event.part.type === "refusal") {
+        const msgId = `msg_${event.partId}`;
+        frames.push({
+          event: "response.output_item.added",
+          data: JSON.stringify({
+            type: "response.output_item.added",
+            item: { type: "message", id: msgId },
+            sequence_number: this.sequenceNumber++,
+          }),
+        });
+        frames.push({
+          event: "response.content_part.added",
+          data: JSON.stringify({
+            type: "response.content_part.added",
+            part: { type: "refusal", refusal: "" },
+            sequence_number: this.sequenceNumber++,
+          }),
+        });
+        return ok(frames);
+      }
       if (event.part.type === "function_call") {
         const itemId = `fc_${event.partId}`;
         this.openFunctionParts.set(event.partId, {
@@ -718,6 +824,18 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
       return ok(frames);
     }
 
+    if (event.type === "refusal_delta") {
+      frames.push({
+        event: "response.refusal.delta",
+        data: JSON.stringify({
+          type: "response.refusal.delta",
+          delta: event.text,
+          sequence_number: this.sequenceNumber++,
+        }),
+      });
+      return ok(frames);
+    }
+
     if (event.type === "text_delta") {
       frames.push({
         event: "response.output_text.delta",
@@ -755,6 +873,30 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "part_end") {
+      if (event.partType === "refusal") {
+        frames.push({
+          event: "response.refusal.done",
+          data: JSON.stringify({
+            type: "response.refusal.done",
+            sequence_number: this.sequenceNumber++,
+          }),
+        });
+        frames.push({
+          event: "response.content_part.done",
+          data: JSON.stringify({
+            type: "response.content_part.done",
+            sequence_number: this.sequenceNumber++,
+          }),
+        });
+        frames.push({
+          event: "response.output_item.done",
+          data: JSON.stringify({
+            type: "response.output_item.done",
+            sequence_number: this.sequenceNumber++,
+          }),
+        });
+        return ok(frames);
+      }
       if (event.partType === "function_call") {
         const entry = this.openFunctionParts.get(event.partId);
         if (entry === undefined) {
@@ -827,6 +969,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
       // response.completed — the shared narrowing rule keeps a client stream
       // from ever hanging without a terminator.
       if (responsesFinishStatus(event.finish.reason) === "incomplete") {
+        const incompleteReason = event.finish.reason === "content_filter" ? "content_filter" : "max_output_tokens";
         frames.push({
           event: "response.incomplete",
           data: JSON.stringify({
@@ -834,7 +977,7 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
             response: {
               id,
               status: "incomplete",
-              incomplete_details: { reason: "max_output_tokens" },
+              incomplete_details: { reason: incompleteReason },
               ...responseExtras,
             },
             sequence_number: this.sequenceNumber++,
@@ -858,7 +1001,23 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
     }
 
     if (event.type === "error") {
-      return ok([]);
+      // A provider that fails before opening the response lifecycle must
+      // still yield a client stream that opens the lifecycle it then fails:
+      // the R wire has no legal stream shape whose first frame is `error`.
+      if (!this.emittedLifecycleOpening) {
+        this.lifecycleOpeningFrames(id, frames);
+      }
+      frames.push({
+        event: "error",
+        data: JSON.stringify({
+          type: "error",
+          code: event.failure.code ?? "server_error",
+          message: event.failure.message,
+          param: null,
+          sequence_number: this.sequenceNumber++,
+        }),
+      });
+      return ok(frames);
     }
 
     return unsupportedCapability("unknown-stream-event");
@@ -866,5 +1025,30 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
 
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
     return ok([]);
+  }
+
+  /**
+   * Emits the two lifecycle-opening frames (`response.created`,
+   * `response.in_progress`) that every R client stream must start with. The
+   * `response_start` arm and the first-frame error arm share this helper so an
+   * error-before-start stream opens the same lifecycle shape as a clean one.
+   */
+  private lifecycleOpeningFrames(id: string, frames: SseFrame[]): void {
+    this.emittedLifecycleOpening = true;
+    frames.push({
+      event: "response.created",
+      data: JSON.stringify({
+        type: "response.created",
+        response: { id, status: "in_progress" },
+        sequence_number: this.sequenceNumber++,
+      }),
+    });
+    frames.push({
+      event: "response.in_progress",
+      data: JSON.stringify({
+        type: "response.in_progress",
+        sequence_number: this.sequenceNumber++,
+      }),
+    });
   }
 }

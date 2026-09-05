@@ -1,7 +1,9 @@
 import type { Result } from "../domain/contracts.ts";
 import { isPlainObject } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
+import type { Direction } from "./contracts.ts";
 import type { IrStreamEvent } from "./ir.ts";
+import { directionFacts, refusalFinishCapability } from "./preflight.ts";
 import { invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import { validateUsage } from "./validate.ts";
 /**
@@ -12,6 +14,10 @@ export interface IrStreamStateMachineOptions {
   readonly expectedResponseId?: string;
   /** Expected logical model ID. */
   readonly expectedModel?: string;
+  /** Translation direction if active cross-protocol attempt. */
+  readonly direction?: Direction;
+  /** Whether the direction stays between OpenAI Chat and Responses. */
+  readonly isChatResponses?: boolean;
 }
 
 /**
@@ -25,7 +31,10 @@ export interface IrStreamStateMachineOptions {
  * - Every `part_start` uses the stream `responseId` and an unused `partId`.
  * - Admitted parts include text (`{ type: "text" }`) and function tools (`{ type: "function_call", callId, name }`).
  * - All open parts must be closed before `response_end`.
- * - Clean terminal is `response_end(stop|length|tool_calls)`.
+ * - Clean terminal is `response_end(stop|length|tool_calls)` on directions that
+ *   admit the finish reason; refusal and content-filter terminals are gated by
+ *   the shared refusal/content-filter capability (C/R directions admit them,
+ *   Messages-involving directions reject fail-closed).
  * - `error` is terminal and excludes `response_end`.
  * - No events permitted after terminal state.
  */
@@ -34,15 +43,22 @@ export class IrStreamStateMachine {
   private responseId: string | undefined;
   private readonly expectedResponseId: string | undefined;
   private readonly expectedModel: string | undefined;
+  private readonly direction: Direction | undefined;
+  private readonly isChatResponses: boolean;
 
   private readonly seenPartIds = new Set<string>();
   private readonly seenCallIds = new Set<string>();
   private readonly openParts = new Map<string, { partType: string; callId?: string }>();
   private closedFunctionPartCount = 0;
+  private sawRefusalPart = false;
 
   constructor(options?: IrStreamStateMachineOptions) {
     this.expectedResponseId = options?.expectedResponseId;
     this.expectedModel = options?.expectedModel;
+    this.direction = options?.direction;
+    this.isChatResponses =
+      options?.isChatResponses ??
+      (options?.direction !== undefined ? directionFacts(options.direction).isChatResponses : false);
   }
 
   isTerminal(): boolean {
@@ -118,7 +134,13 @@ export class IrStreamStateMachine {
 
       // Plain-text streaming profile gating
       if (event.part.type === "refusal") {
-        return unsupportedCapability("refusal-content");
+        if (!this.isChatResponses) {
+          return unsupportedCapability("refusal-content");
+        }
+        this.sawRefusalPart = true;
+        this.seenPartIds.add(event.partId);
+        this.openParts.set(event.partId, { partType: "refusal" });
+        return ok(undefined);
       }
       if (event.part.type === "function_call") {
         if (typeof event.part.callId !== "string" || event.part.callId.trim() === "") {
@@ -166,7 +188,20 @@ export class IrStreamStateMachine {
     }
 
     if (event.type === "refusal_delta") {
-      return unsupportedCapability("refusal-stream-delta");
+      if (!this.isChatResponses) {
+        return unsupportedCapability("refusal-stream-delta");
+      }
+      const open = this.openParts.get(event.partId);
+      if (open === undefined) {
+        return invalidRequest(`refusal_delta received for non-open or unknown partId '${event.partId}'`);
+      }
+      if (open.partType !== "refusal") {
+        return invalidRequest(`refusal_delta received for non-refusal partId '${event.partId}'`);
+      }
+      if (typeof event.text !== "string") {
+        return invalidRequest("refusal_delta text must be a string");
+      }
+      return ok(undefined);
     }
 
     if (event.type === "tool_arguments_delta") {
@@ -240,27 +275,44 @@ export class IrStreamStateMachine {
 
       // Finish reason gating
       const reason = event.finish.reason;
+      if (this.sawRefusalPart && reason !== "refusal") {
+        return invalidRequest("response_end saw a refusal part but finish reason is not refusal");
+      }
       if (reason === "tool_calls") {
         if (this.closedFunctionPartCount === 0) {
           return invalidRequest(
             "response_end with tool_calls finish reason requires at least one completed function call part",
           );
         }
-      }
-      if (reason === "refusal") {
-        return unsupportedCapability("refusal-content");
-      }
-      if (reason === "content_filter") {
-        return unsupportedCapability("finish-content-filter");
-      }
-      if (reason === "context_limit") {
+      } else if (reason === "refusal") {
+        if (this.direction !== undefined) {
+          const refusalCapability = refusalFinishCapability(this.direction, this.sawRefusalPart);
+          if (refusalCapability !== undefined) {
+            return unsupportedCapability(refusalCapability);
+          }
+        } else if (!this.sawRefusalPart) {
+          return unsupportedCapability("refusal-terminal-reason");
+        } else if (!this.isChatResponses) {
+          return unsupportedCapability("refusal-content");
+        }
+      } else if (reason === "content_filter") {
+        if (!this.isChatResponses) {
+          return unsupportedCapability("finish-content-filter");
+        }
+      } else if (reason === "context_limit") {
         return unsupportedCapability("finish-context-limit");
       }
-      if (reason === "other") {
+      if (
+        reason !== "stop" &&
+        reason !== "length" &&
+        reason !== "tool_calls" &&
+        reason !== "refusal" &&
+        reason !== "content_filter"
+      ) {
+        // Unreachable through the closed IrFinishReason union today, but an
+        // unknown finish reason must fail closed as an unknown finish, never
+        // as a generic invalid request.
         return unsupportedCapability("finish-other-unknown");
-      }
-      if (reason !== "stop" && reason !== "length" && reason !== "tool_calls") {
-        return invalidRequest(`Unrecognized finish reason '${String(reason)}'`);
       }
 
       if (event.usage !== undefined) {

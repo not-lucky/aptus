@@ -60,6 +60,7 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     readonly body: JsonObject;
   } {
     const isLength = outcome.finish.reason === "length";
+    const isContentFilter = outcome.finish.reason === "content_filter";
     const status = responsesFinishStatus(outcome.finish.reason);
 
     // Never fabricate usage: the IR outcome decides presence, and absence is
@@ -80,20 +81,28 @@ export class ResponsesEgressEncoder implements EgressEncoder {
               role: "assistant",
               content: [{ type: "output_text", text: segment.text, annotations: [] }],
             }
-          : segment.call.type === "function"
+          : segment.type === "refusal"
             ? {
-                type: "function_call",
-                call_id: segment.call.callId,
-                name: segment.call.name,
-                arguments: segment.call.argumentsText,
+                type: "message",
+                id: msgId(),
                 status: "completed",
+                role: "assistant",
+                content: [{ type: "refusal", refusal: segment.text }],
               }
-            : {
-                type: "custom_tool_call",
-                call_id: segment.call.callId,
-                name: segment.call.name,
-                input: segment.call.inputText,
-              },
+            : segment.call.type === "function"
+              ? {
+                  type: "function_call",
+                  call_id: segment.call.callId,
+                  name: segment.call.name,
+                  arguments: segment.call.argumentsText,
+                  status: "completed",
+                }
+              : {
+                  type: "custom_tool_call",
+                  call_id: segment.call.callId,
+                  name: segment.call.name,
+                  input: segment.call.inputText,
+                },
     );
     if (output.length === 0) {
       output.push({
@@ -111,6 +120,7 @@ export class ResponsesEgressEncoder implements EgressEncoder {
       created_at: this.now(),
       status,
       ...(isLength ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+      ...(isContentFilter ? { incomplete_details: { reason: "content_filter" } } : {}),
       model: outcome.model,
       output,
       ...(usage !== undefined ? { usage } : {}),

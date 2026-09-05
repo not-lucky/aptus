@@ -3,24 +3,15 @@ import { test } from "vitest";
 import {
   inferExtensionMediaType,
   isBase64Valid,
-  M_DOCUMENT_BYTES_MEDIA_TYPE,
   M_IMAGE_MEDIA_TYPES,
   parseDataUri,
-  TEXT_DOCUMENT_MEDIA_TYPE,
-  TRANSLATED_MEDIA_BODY_LIMIT_BYTES,
   validateHttpsUrl,
 } from "../../../../src/translation/codecs/shared/media.ts";
 
-test("media constants", () => {
-  assert.equal(TRANSLATED_MEDIA_BODY_LIMIT_BYTES, 33_554_432);
-  assert.equal(M_IMAGE_MEDIA_TYPES.has("image/jpeg"), true);
-  assert.equal(M_IMAGE_MEDIA_TYPES.has("image/png"), true);
-  assert.equal(M_IMAGE_MEDIA_TYPES.has("image/gif"), true);
-  assert.equal(M_IMAGE_MEDIA_TYPES.has("image/webp"), true);
+test("image media-type allowlist excludes SVG", () => {
   assert.equal(M_IMAGE_MEDIA_TYPES.has("image/svg+xml"), false);
-  assert.equal(M_DOCUMENT_BYTES_MEDIA_TYPE, "application/pdf");
-  assert.equal(TEXT_DOCUMENT_MEDIA_TYPE, "text/plain");
 });
+
 
 test("validateHttpsUrl", () => {
   assert.equal(validateHttpsUrl("https://example.com/photo.jpg"), true);

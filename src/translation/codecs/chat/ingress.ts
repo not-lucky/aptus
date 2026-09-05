@@ -228,6 +228,9 @@ export function parseChatRequestBody(
   if (body.functions !== undefined || body.function_call !== undefined) {
     return unsupportedCapability("chat-legacy-functions");
   }
+  if (body.prompt_cache_retention !== undefined) {
+    return unsupportedCapability("openai-prompt-cache-retention");
+  }
   if (body.max_tokens !== undefined) {
     return unsupportedCapability("chat-legacy-max-tokens");
   }
@@ -770,10 +773,15 @@ export class ChatIngressDecoder implements IngressDecoder {
     }
 
     if (message.refusal !== undefined && message.refusal !== null) {
+      // A present-but-malformed refusal fabricates nothing: only a string
+      // carries refusal text, anything else fails closed.
+      if (typeof message.refusal !== "string") {
+        return invalidRequest("Chat response message.refusal must be a string when present");
+      }
       parts.push({
         type: "refusal",
         partId: randomUUID(),
-        text: String(message.refusal),
+        text: message.refusal,
       });
     } else {
       if (typeof message.content === "string") {
@@ -791,18 +799,21 @@ export class ChatIngressDecoder implements IngressDecoder {
       }
     }
 
-    let finishReason: IrFinishReason = "stop";
     const rawReason = choice?.finish_reason;
+    if (rawReason === null || rawReason === undefined) {
+      return invalidRequest("Chat complete response requires a non-null finish_reason");
+    }
+    let finishReason: IrFinishReason;
     if (rawReason === "stop") {
-      finishReason = "stop";
+      finishReason = parts.some((p) => p.type === "refusal") ? "refusal" : "stop";
     } else if (rawReason === "length") {
       finishReason = "length";
     } else if (rawReason === "tool_calls") {
       finishReason = "tool_calls";
     } else if (rawReason === "content_filter") {
       finishReason = "content_filter";
-    } else if (rawReason !== null && rawReason !== undefined) {
-      finishReason = "other";
+    } else {
+      return unsupportedCapability("finish-other-unknown");
     }
 
     // Usage counters plus the cache/reasoning subdivisions (`usage-cache-read`,

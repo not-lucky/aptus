@@ -25,7 +25,7 @@ import {
 } from "./ir.ts";
 import { invalidRequest, ok } from "./result.ts";
 
-const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "content_filter", "context_limit", "other"]);
+const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "content_filter", "context_limit"]);
 
 // Admitted control literals are defined once beside the codec parsers so the
 // decode and validation layers can never drift apart.

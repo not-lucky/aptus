@@ -2104,7 +2104,7 @@ export const MATRIX: readonly MatrixRow[] = [
   {
     id: "error-category-message",
     name: "Error category and message",
-    irSymbol: "`IrFailure.category`/`message`",
+    irSymbol: "`NormalizedFailure.category`/`message`",
     tiers: {
       "openai-chat->openai-responses": "T2",
       "openai-chat->anthropic-messages": "T2",
@@ -2119,7 +2119,7 @@ export const MATRIX: readonly MatrixRow[] = [
   {
     id: "error-http-status",
     name: "Error HTTP status",
-    irSymbol: "`IrFailure.httpStatus`",
+    irSymbol: "`statusFromCategory` exact status map",
     tiers: {
       "openai-chat->openai-responses": "T1",
       "openai-chat->anthropic-messages": "T1",
@@ -2134,7 +2134,7 @@ export const MATRIX: readonly MatrixRow[] = [
   {
     id: "error-request-id",
     name: "Error request ID",
-    irSymbol: "`IrFailure.requestId`",
+    irSymbol: "`NormalizedFailure.requestId`",
     tiers: {
       "openai-chat->openai-responses": "T1",
       "openai-chat->anthropic-messages": "T1",
@@ -2144,12 +2144,12 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T1",
     },
     caveat:
-      "preserved only when observed (M request_id in error bodies and request-id response header; C/R request IDs in headers).",
+      "preserved only when observed (M request_id in error bodies and R error/response ids in error events); request-id response headers are not observed.",
   },
   {
     id: "error-retry-after",
     name: "Error retry-after",
-    irSymbol: "`IrFailure.retryAfterMs`/`retryable`",
+    irSymbol: "`NormalizedFailure.retryAfterSeconds`/`retryable`",
     tiers: {
       "openai-chat->openai-responses": "T1",
       "openai-chat->anthropic-messages": "T1",
@@ -2164,7 +2164,7 @@ export const MATRIX: readonly MatrixRow[] = [
   {
     id: "quota-vs-rate-limit",
     name: "Quota vs rate-limit distinction",
-    irSymbol: "`IrFailure.category` (quota/rate_limit)",
+    irSymbol: "`NormalizedFailure.category` (quota/rate_limit)",
     tiers: {
       "openai-chat->openai-responses": "T2",
       "openai-chat->anthropic-messages": "T2",
@@ -2189,7 +2189,7 @@ export const MATRIX: readonly MatrixRow[] = [
       "anthropic-messages->openai-responses": "T2",
     },
     caveat:
-      "R and M define in-band error events (code mapping T2); C has none → C-origin streams never produce one and C targets cannot express one (T3).",
+      "R and M define in-band error events (code mapping T2); C has none → C-origin streams never produce one and C targets cannot express one (T3). Dispatch count is per-attempt; a pre-client-byte in-band error may retry or fall back per route policy before any client bytes exist.",
   },
   {
     id: "abrupt-stream-close",
@@ -2465,7 +2465,7 @@ export const MATRIX: readonly MatrixRow[] = [
   {
     id: "request-body-size-limit",
     name: "Request body size limit",
-    irSymbol: "`IrFailure.category` (payload_too_large)",
+    irSymbol: "`NormalizedFailure.category` (payload_too_large)",
     tiers: {
       "openai-chat->openai-responses": "T1",
       "openai-chat->anthropic-messages": "T1",

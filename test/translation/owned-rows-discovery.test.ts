@@ -43,10 +43,10 @@ test.concurrent("preflight outcome: non-plain-text outcome discoveries terminate
     parts: [{ type: "text" as const, partId: "p1", text: "Hi" }],
   };
   const cases: ReadonlyArray<readonly [IrOutcome, string, Direction]> = [
-    [{ ...base, finish: { reason: "refusal" } }, "refusal-content", "openai-chat->openai-responses"],
-    [{ ...base, finish: { reason: "content_filter" } }, "finish-content-filter", "openai-chat->openai-responses"],
+    [{ ...base, parts: [{ type: "refusal" as const, partId: "p1", text: "No" }], finish: { reason: "refusal" } }, "refusal-content", "openai-chat->anthropic-messages"],
+    [{ ...base, finish: { reason: "refusal" } }, "refusal-terminal-reason", "openai-chat->anthropic-messages"],
+    [{ ...base, finish: { reason: "content_filter" } }, "finish-content-filter", "openai-chat->anthropic-messages"],
     [{ ...base, finish: { reason: "context_limit" } }, "finish-context-limit", "anthropic-messages->openai-chat"],
-    [{ ...base, finish: { reason: "other" } }, "finish-other-unknown", "openai-chat->openai-responses"],
   ];
   for (const [outcome, capability, direction] of cases) {
     const res = preflightOutcome(outcome, direction);

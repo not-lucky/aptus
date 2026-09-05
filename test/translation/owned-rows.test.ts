@@ -797,12 +797,16 @@ const OWNED_ROW_TIERS: ReadonlyArray<readonly [string, string]> = [
   ["audio-output", "T3,T3,T3,T3,T3,T3"],
   ["audio-streaming", "T3,T3,T3,T3,T3,T3"],
   ["audio-continuation-id", "T3,T3,T3,T3,T3,T3"],
-  ["tool-result-multipart", "T3,T3,T3,T1,T3,T1"],
   ["request-body-size-limit", "T1,T1,T1,T1,T1,T1"],
 ];
 
-test.concurrent("owned rows: each of the 128 rows is single-assigned with the pinned six-direction tier vector", () => {
-  assert.equal(OWNED_ROW_TIERS.length, 128);
+test.concurrent("owned rows: each of the 127 rows is single-assigned with the pinned six-direction tier vector", () => {
+  assert.equal(OWNED_ROW_TIERS.length, 127);
+  const seenIds = new Set<string>();
+  for (const [id] of OWNED_ROW_TIERS) {
+    assert.ok(!seenIds.has(id), `Duplicate owned row: ${id}`);
+    seenIds.add(id);
+  }
   for (const [id, expectedVector] of OWNED_ROW_TIERS) {
     const row = getCapabilityRow(id);
     assert.ok(row !== undefined, `missing matrix row for ${id}`);
@@ -856,6 +860,10 @@ test.concurrent("post-terminal guards: duplicated stream sentinels fail the prov
     responseId: "resp_dupe_m",
     model: "logical-key",
     createPartId: () => "p1",
+  });
+  messages.push({
+    event: "message_delta",
+    data: JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" } }),
   });
   const mStop = messages.push({ event: "message_stop", data: '{"type":"message_stop"}' });
   assert.equal(mStop.ok, true);

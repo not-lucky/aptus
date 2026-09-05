@@ -81,6 +81,12 @@ export class ChatEgressEncoder implements EgressEncoder {
     );
 
     const finishReason = chatFinishReason(outcome.finish.reason);
+    // Preflight rejects every non-C/R refusal before encoding, so a refusal
+    // part reaching this total encoder is unreachable in translated turns; the
+    // fallback coalesces all refusal texts so a hypothetical multi-refusal
+    // outcome loses nothing.
+    const refusalTexts = outcome.parts.flatMap((p) => (p.type === "refusal" ? [p.text ?? ""] : []));
+    const refusalPart = refusalTexts.length > 0 ? { text: refusalTexts.join("") } : undefined;
 
     // Never fabricate usage: Chat may omit it, so the field is present only when
     // the IR outcome actually reports counters (absence is distinct from zero).
@@ -98,9 +104,10 @@ export class ChatEgressEncoder implements EgressEncoder {
           index: 0,
           message: {
             role: "assistant",
-            // Tool-only outcomes carry null content; any text part (even one
+            // Tool-only or refusal outcomes without text carry null content; any text part (even one
             // concatenating to empty) is the scalar content spelling.
-            content: textRuns.length > 0 ? text : toolCalls.length > 0 ? null : "",
+            content: textRuns.length > 0 ? text : refusalPart !== undefined || toolCalls.length > 0 ? null : "",
+            ...(refusalPart !== undefined ? { refusal: refusalPart.text ?? "" } : {}),
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
           },
           finish_reason: finishReason,

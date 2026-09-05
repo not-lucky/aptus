@@ -4,7 +4,7 @@ import { CHAT_TOOL_NAME_REGEX } from "./codecs/shared/controls.ts";
 import { M_IMAGE_MEDIA_TYPES } from "./codecs/shared/media.ts";
 import type { Direction, OutcomeWireOptions, RequestWireOptions } from "./contracts.ts";
 import { unsupportedCapabilityFailure } from "./failures.ts";
-import type { IrFinishReason, IrInputPart, IrOutcome, IrRequest } from "./ir.ts";
+import type { IrInputPart, IrOutcome, IrRequest } from "./ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import {
   validateMessagesObjectRoot,
@@ -64,7 +64,7 @@ function validateMetadataLimits(metadata: Readonly<Record<string, string>>): Res
 }
 
 /** Closed facts for each supported translation direction. */
-interface DirectionFacts {
+export interface DirectionFacts {
   readonly source: Protocol;
   readonly target: Protocol;
   readonly involvesMessages: boolean;
@@ -75,7 +75,17 @@ interface DirectionFacts {
   readonly isSourceMessages: boolean;
 }
 
-function directionFacts(direction: Direction): DirectionFacts {
+/**
+ * Derives the closed set of per-direction facts shared by every
+ * direction-gated capability check. `isChatResponses` is the single spelling
+ * of "this direction stays between OpenAI Chat and Responses"; the stream
+ * state machine and both capability helpers must consume it rather than
+ * recomparing protocol strings inline.
+ *
+ * @param direction - Directed conversion path (source is the client).
+ * @returns The direction's immutable fact set.
+ */
+export function directionFacts(direction: Direction): DirectionFacts {
   const [source, target] = direction.split("->") as [Protocol, Protocol];
   const involvesMessages = source === "anthropic-messages" || target === "anthropic-messages";
   return {
@@ -88,6 +98,36 @@ function directionFacts(direction: Direction): DirectionFacts {
     isChatResponses: !involvesMessages,
     isSourceMessages: source === "anthropic-messages",
   };
+}
+
+/**
+ * Computes the refusal capability rejection for a translated outcome with a
+ * refusal finish reason, or `undefined` when the direction admits it.
+ *
+ * A refusal finish without a refusal part can only originate from a Messages
+ * provider (the sole wire with a refusal stop reason and no refusal content
+ * block), so it reports `refusal-terminal-reason`. Any other refusal crossing
+ * a Messages boundary reports `refusal-content`. C/R directions admit both.
+ * Shared by the complete-path preflight and the stream state machine so the
+ * two paths cannot drift.
+ *
+ * @param direction - Directed protocol conversion path (source is the client,
+ * target is the upstream provider the outcome was decoded from).
+ * @param hasRefusalPart - Whether the outcome carries a refusal part.
+ * @returns Capability ID to reject with, or `undefined` when admitted.
+ */
+export function refusalFinishCapability(
+  direction: Direction,
+  hasRefusalPart: boolean,
+): "refusal-terminal-reason" | "refusal-content" | undefined {
+  if (!hasRefusalPart) {
+    return "refusal-terminal-reason";
+  }
+  const facts = directionFacts(direction);
+  if (!facts.isChatResponses) {
+    return "refusal-content";
+  }
+  return undefined;
 }
 
 /**
@@ -545,13 +585,6 @@ export function normalizeOutcomeWireOptions(
  * @param outcomeWireOptions - Wire-only sidecar captured by the provider ingress.
  * @returns Ok if eligible for client translation; otherwise fail-closed normalized failure.
  */
-const OUTCOME_FINISH_CAPABILITIES: Partial<Record<IrFinishReason, string>> = {
-  refusal: "refusal-content",
-  content_filter: "finish-content-filter",
-  context_limit: "finish-context-limit",
-  other: "finish-other-unknown",
-};
-
 export function preflightOutcome(
   out: IrOutcome,
   direction: Direction,
@@ -563,10 +596,31 @@ export function preflightOutcome(
   if (out.finish.reason === "tool_calls" && !out.parts.some((part) => part.type === "tool_call")) {
     return invalidRequest("Outcome with finish reason 'tool_calls' must contain at least one tool_call part");
   }
-  const finishCapability = OUTCOME_FINISH_CAPABILITIES[out.finish.reason];
-  if (finishCapability !== undefined) return unsupportedCapability(finishCapability);
-
   const facts = directionFacts(direction);
+
+  const hasRefusalPart = out.parts.some((p) => p.type === "refusal");
+  if (hasRefusalPart && out.finish.reason !== "refusal") {
+    return invalidRequest("Outcome carries a refusal part but finish reason is not refusal");
+  }
+  // A provider that emits both a refusal and tool calls in one outcome is
+  // malformed: no target wire can express a message that refuses and calls
+  // tools. The stream decoders enforce the same co-occurrence rule, so the
+  // complete path must reject it here rather than encode a self-inconsistent
+  // client message.
+  if (hasRefusalPart && out.parts.some((p) => p.type === "tool_call")) {
+    return invalidRequest("Outcome carries both a refusal part and tool_call parts");
+  }
+
+  if (out.finish.reason === "content_filter") {
+    if (!facts.isChatResponses) return unsupportedCapability("finish-content-filter");
+  } else if (out.finish.reason === "context_limit") {
+    return unsupportedCapability("finish-context-limit");
+  } else if (out.finish.reason === "refusal") {
+    const refusalCapability = refusalFinishCapability(direction, hasRefusalPart);
+    if (refusalCapability !== undefined) {
+      return unsupportedCapability(refusalCapability);
+    }
+  }
 
   // Response-side sidecar feasibility (shared with the stream pump).
   const wireOptionsFailure = outcomeWireOptionsFailure(facts.source, outcomeWireOptions);
@@ -579,7 +633,9 @@ export function preflightOutcome(
   // Inspect output parts
   for (const part of out.parts) {
     if (part.type === "refusal") {
-      return unsupportedCapability("refusal-content");
+      if (!facts.isChatResponses) {
+        return unsupportedCapability("refusal-content");
+      }
     }
     if (part.type === "tool_call") {
       if (part.call.type === "custom" && clientIsMessages) {

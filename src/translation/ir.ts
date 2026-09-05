@@ -1,3 +1,5 @@
+import type { NormalizedFailure } from "../domain/operations.ts";
+
 // Normative Private Protocol IR — verbatim type algebra definitions
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
 
@@ -161,14 +163,7 @@ export interface IrRequest {
   readonly output?: IrOutputFormat;
 }
 
-export type IrFinishReason =
-  | "stop"
-  | "length"
-  | "tool_calls"
-  | "refusal"
-  | "content_filter"
-  | "context_limit"
-  | "other";
+export type IrFinishReason = "stop" | "length" | "tool_calls" | "refusal" | "content_filter" | "context_limit";
 
 export interface IrFinish {
   readonly reason: IrFinishReason;
@@ -216,20 +211,6 @@ export type IrFailureCategory =
   | "provider"
   | "unsupported_capability"
   | "stream_interrupted";
-
-export interface IrFailure {
-  readonly category: IrFailureCategory;
-  readonly message: string;
-  readonly retryable: boolean;
-  readonly httpStatus?: number;
-  readonly requestId?: string;
-  readonly retryAfterMs?: number;
-  readonly capability?: string;
-}
-
-export type IrCompletedResult =
-  | { readonly ok: true; readonly outcome: IrOutcome }
-  | { readonly ok: false; readonly failure: IrFailure };
 
 export type IrPartDescriptor =
   | { readonly type: "text" }
@@ -290,5 +271,5 @@ export type IrStreamEvent =
   | {
       readonly type: "error";
       readonly responseId: string;
-      readonly failure: IrFailure;
+      readonly failure: NormalizedFailure;
     };

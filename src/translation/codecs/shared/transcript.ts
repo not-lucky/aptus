@@ -483,7 +483,8 @@ export function messagesWireOptionFields(options: RequestWireOptions | undefined
  */
 export type OutcomeSegment =
   | { readonly type: "text"; readonly text: string }
-  | { readonly type: "tool_call"; readonly call: IrToolCall };
+  | { readonly type: "tool_call"; readonly call: IrToolCall }
+  | { readonly type: "refusal"; readonly text: string };
 
 /**
  * Splits IR output parts into ordered segments, coalescing every maximal run
@@ -499,6 +500,14 @@ export function partitionOutcomeParts(parts: readonly IrOutputPart[]): OutcomeSe
       textRun = (textRun ?? "") + part.text;
       continue;
     }
+    if (part.type === "refusal") {
+      if (textRun !== undefined) {
+        segments.push({ type: "text", text: textRun });
+        textRun = undefined;
+      }
+      segments.push({ type: "refusal", text: part.text ?? "" });
+      continue;
+    }
     if (textRun !== undefined) {
       segments.push({ type: "text", text: textRun });
       textRun = undefined;
@@ -511,22 +520,41 @@ export function partitionOutcomeParts(parts: readonly IrOutputPart[]): OutcomeSe
 
 /**
  * Narrows an admitted IR finish reason onto the Chat `finish_reason` wire:
- * token-limit and tool-call finishes keep their own spellings and every other
- * admitted reason is the natural stop. Shared verbatim by the complete egress
- * and the client stream encoder so complete-vs-stream parity is structural.
+ * token-limit, tool-call, and content-filter finishes keep their own
+ * spellings, a refusal narrows to the natural stop (Chat has no refusal
+ * finish value), and `context_limit` throws as a precondition guard.
+ * Shared verbatim by the complete egress and the client stream encoder so
+ * complete-vs-stream parity is structural.
  */
-export function chatFinishReason(reason: IrFinishReason): "length" | "stop" | "tool_calls" {
-  return reason === "length" ? "length" : reason === "tool_calls" ? "tool_calls" : "stop";
+export function chatFinishReason(reason: IrFinishReason): "length" | "stop" | "tool_calls" | "content_filter" {
+  switch (reason) {
+    case "stop":
+    case "refusal":
+      // Chat has no refusal finish value: the refusal text rides in the
+      // message `refusal` field and the finish is the natural stop.
+      return "stop";
+    case "length":
+      return "length";
+    case "tool_calls":
+      return "tool_calls";
+    case "content_filter":
+      return "content_filter";
+    case "context_limit":
+      // Unreachable in admitted directions: preflight rejects
+      // `finish-context-limit` before any Chat egress runs. The throw keeps
+      // an unadmitted value from silently narrowing to "stop".
+      throw new Error(`OpenAI Chat does not support finish reason `);
+  }
 }
 
 /**
  * Narrows an admitted IR finish reason onto the Responses envelope status:
- * token-limit maps to `incomplete` (with `incomplete_details`) and every other
- * admitted reason to `completed`. Shared verbatim by the complete egress and
- * the client stream encoder so complete-vs-stream parity is structural.
+ * token-limit and content-filter map to `incomplete` (with `incomplete_details`)
+ * and every other admitted reason to `completed`. Shared verbatim by the complete
+ * egress and the client stream encoder so complete-vs-stream parity is structural.
  */
 export function responsesFinishStatus(reason: IrFinishReason): "completed" | "incomplete" {
-  return reason === "length" ? "incomplete" : "completed";
+  return reason === "length" || reason === "content_filter" ? "incomplete" : "completed";
 }
 
 /**
@@ -539,9 +567,8 @@ export function responsesFinishStatus(reason: IrFinishReason): "completed" | "in
  */
 export function messagesStopReason(finish: IrFinish): string {
   if (finish.reason === "tool_calls") return "tool_use";
-  return finish.reason === "length"
-    ? "max_tokens"
-    : finish.stopSequence !== undefined && finish.reason === "stop"
-      ? "stop_sequence"
-      : "end_turn";
+  if (finish.reason === "length") return "max_tokens";
+  if (finish.stopSequence !== undefined && finish.reason === "stop") return "stop_sequence";
+  if (finish.reason === "stop") return "end_turn";
+  throw new Error(`Anthropic Messages does not support finish reason '${finish.reason}'`);
 }
