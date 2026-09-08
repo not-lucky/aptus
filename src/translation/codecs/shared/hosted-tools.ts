@@ -1,6 +1,7 @@
 import type { JsonObject } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import { unsupportedCapabilityFailure } from "../../failures.ts";
+import type { MatrixRowId } from "../../matrix.ts";
 
 /**
  * Hosted and provider tool recognition for the six protocol codecs.
@@ -8,7 +9,8 @@ import { unsupportedCapabilityFailure } from "../../failures.ts";
  * Every non-admitted hosted or provider tool capability fails closed with its
  * exact matrix row ID. Recognition is keyed by the documented wire spellings
  * per protocol, so request decode and outcome decode reject with the owning
- * row instead of a generic unknown-structure error.
+ * row instead of a generic unknown-structure error. Map values are
+ * {@link MatrixRowId}s, so a value naming no matrix row fails compilation.
  */
 
 /**
@@ -16,7 +18,7 @@ import { unsupportedCapabilityFailure } from "../../failures.ts";
  * the namespace and programmatic-calling meta-tools. Dated variants map to
  * the same row as their GA spelling.
  */
-export const RESPONSES_HOSTED_TOOL_TYPES: Readonly<Record<string, string>> = {
+export const RESPONSES_HOSTED_TOOL_TYPES: Readonly<Record<string, MatrixRowId>> = {
   web_search: "hosted-web-search",
   web_search_2025_08_26: "hosted-web-search",
   web_search_preview: "hosted-web-search-preview",
@@ -41,7 +43,7 @@ export const RESPONSES_HOSTED_TOOL_TYPES: Readonly<Record<string, string>> = {
  * `computer_call`/`computer_call_output` refine on safety-check fields at the
  * call site; every other entry rejects on type alone.
  */
-export const RESPONSES_HOSTED_OUTPUT_ITEMS: Readonly<Record<string, string>> = {
+export const RESPONSES_HOSTED_OUTPUT_ITEMS: Readonly<Record<string, MatrixRowId>> = {
   file_search_call: "hosted-file-search",
   code_interpreter_call: "hosted-code-execution",
   image_generation_call: "hosted-image-generation",
@@ -68,7 +70,7 @@ export const RESPONSES_HOSTED_OUTPUT_ITEMS: Readonly<Record<string, string>> = {
  * M `tools[]` entry `type` literals that are server tools, keyed by every
  * dated variant documented for the tool family.
  */
-export const MESSAGES_HOSTED_TOOL_TYPES: Readonly<Record<string, string>> = {
+export const MESSAGES_HOSTED_TOOL_TYPES: Readonly<Record<string, MatrixRowId>> = {
   web_search_20250305: "hosted-web-search",
   web_search_20260209: "hosted-web-search",
   web_search_20260318: "hosted-web-search",
@@ -95,7 +97,7 @@ export const MESSAGES_HOSTED_TOOL_TYPES: Readonly<Record<string, string>> = {
  * M `server_tool_use` names and their owning hosted rows. Unknown or missing
  * names fail closed as unknown content at the call site.
  */
-export const MESSAGES_SERVER_TOOL_USE_NAMES: Readonly<Record<string, string>> = {
+export const MESSAGES_SERVER_TOOL_USE_NAMES: Readonly<Record<string, MatrixRowId>> = {
   web_search: "hosted-web-search",
   web_fetch: "hosted-web-fetch",
   code_execution: "hosted-code-execution",
@@ -110,7 +112,7 @@ export const MESSAGES_SERVER_TOOL_USE_NAMES: Readonly<Record<string, string>> = 
  * hosted or provider capabilities. `server_tool_use` is resolved through
  * {@link MESSAGES_SERVER_TOOL_USE_NAMES} instead.
  */
-export const MESSAGES_HOSTED_BLOCK_TYPES: Readonly<Record<string, string>> = {
+export const MESSAGES_HOSTED_BLOCK_TYPES: Readonly<Record<string, MatrixRowId>> = {
   web_search_tool_result: "hosted-web-search",
   web_fetch_tool_result: "hosted-web-fetch",
   code_execution_tool_result: "hosted-code-execution",

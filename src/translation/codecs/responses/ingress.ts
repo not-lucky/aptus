@@ -29,6 +29,7 @@ import type {
   IrToolChoice,
   NonEmpty,
 } from "../../ir.ts";
+import type { MatrixRowId } from "../../matrix.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import {
   CHAT_TOOL_NAME_REGEX,
@@ -93,7 +94,7 @@ const RESPONSES_ALLOWED_CALLERS: ReadonlySet<string> = new Set(["direct", "progr
  * their safety-check fields, and every other entry rejects on type alone.
  * Shared by replayed input items and output items.
  */
-function responsesHostedItemCapability(itemObj: Record<string, unknown>): string | undefined {
+function responsesHostedItemCapability(itemObj: Record<string, unknown>): MatrixRowId | undefined {
   const type = itemObj.type;
   if (typeof type !== "string") return undefined;
   if (type === "web_search_call") {

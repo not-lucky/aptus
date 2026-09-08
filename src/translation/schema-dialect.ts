@@ -11,6 +11,7 @@
 import type { JsonObject, JsonValue, Result } from "../domain/contracts.ts";
 import { isPlainObject } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
+import type { MatrixRowId } from "./matrix.ts";
 import { ok, unsupportedCapability } from "./result.ts";
 
 /** OpenAI strict-mode documented limits (5000 properties, 10 nesting levels, 120k chars, 1000 enum values). */
@@ -116,7 +117,7 @@ function escapePointer(segment: string): string {
  */
 export function validateOpenAiStrictSchema(
   schema: JsonObject,
-  capability = "function-schema-strictness",
+  capability: MatrixRowId = "function-schema-strictness",
 ): Result<void, NormalizedFailure> {
   if (schema.type !== "object") {
     return unsupportedCapability(capability, "/: root type must be object");
@@ -224,7 +225,7 @@ const MESSAGES_OUTPUT_ALLOWED_KEYWORDS: ReadonlyArray<string> = ["type", "proper
  */
 export function validateMessagesOutputSchema(
   schema: JsonObject,
-  capability = "structured-json-schema",
+  capability: MatrixRowId = "structured-json-schema",
 ): Result<void, NormalizedFailure> {
   if (schema.type !== "object") {
     return unsupportedCapability(capability, "/: root type must be object");

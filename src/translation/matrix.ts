@@ -10,7 +10,7 @@ export interface MatrixRow {
   readonly caveat: string;
 }
 
-export const MATRIX: readonly MatrixRow[] = [
+export const MATRIX = [
   {
     id: "logical-model-selection",
     name: "Logical model selection",
@@ -2663,7 +2663,19 @@ export const MATRIX: readonly MatrixRow[] = [
     },
     caveat: "R local_shell legacy variant; native passthrough.",
   },
-] as const;
+] as const satisfies readonly MatrixRow[];
+
+/**
+ * The compile-time union of every capability row ID in {@link MATRIX}.
+ *
+ * This is the translation layer's seam: `unsupportedCapability` accepts only a
+ * {@link MatrixRowId}, so every capability rejection names a row that exists,
+ * and renaming or deleting a row fails compilation at each rejection site
+ * instead of surfacing as a drifted wire string caught by tests. The type is
+ * derived from the table, never spelled out, so the matrix stays the single
+ * place a capability can be declared.
+ */
+export type MatrixRowId = (typeof MATRIX)[number]["id"];
 
 const MATRIX_BY_ID = new Map<string, MatrixRow>(MATRIX.map((row) => [row.id, row]));
 

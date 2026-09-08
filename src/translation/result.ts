@@ -1,6 +1,7 @@
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { invalidRequestFailure, payloadTooLargeFailure, unsupportedCapabilityFailure } from "./failures.ts";
+import type { MatrixRowId } from "./matrix.ts";
 
 /**
  * The single spelling of "produce a {@link Result}" for the translation layer.
@@ -39,8 +40,13 @@ export function payloadTooLarge<T = never>(message: string): Result<T, Normalize
 
 /**
  * Fails with `unsupported_capability` naming its owning matrix row, so routing
- * can skip the candidate and the client sees the exact capability ID.
+ * can skip the candidate and the client sees the exact capability ID. The
+ * capability must be a {@link MatrixRowId} derived from the matrix table: a
+ * typo or a deleted row fails compilation here, not in CI.
  */
-export function unsupportedCapability<T = never>(capability: string, detail?: string): Result<T, NormalizedFailure> {
+export function unsupportedCapability<T = never>(
+  capability: MatrixRowId,
+  detail?: string,
+): Result<T, NormalizedFailure> {
   return failure(unsupportedCapabilityFailure(capability, detail));
 }

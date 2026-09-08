@@ -17,6 +17,7 @@ import {
 import type { Direction } from "../../src/translation/contracts.ts";
 import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
 import type { JsonObject } from "../../src/translation/ir.ts";
+import type { MatrixRowId } from "../../src/translation/matrix.ts";
 import { refusalFinishCapability } from "../../src/translation/preflight.ts";
 import { CONFORMANCE_MANIFEST } from "./matrix-manifest.ts";
 
@@ -333,7 +334,7 @@ test("conformance runner: terminal request rows reject fail-closed in every T3 d
   const coord = createDefaultTranslationCoordinator();
   const manifestById = new Map(CONFORMANCE_MANIFEST.map((row) => [row.id, row]));
   const cases: Array<{
-    rowId: string;
+    rowId: MatrixRowId;
     buildBody: (source: Protocol) => JsonObject;
     expect: (source: Protocol) => { ok: true } | { ok: false; capability?: string };
   }> = [
@@ -410,7 +411,7 @@ test("conformance runner: terminal request rows reject fail-closed in every T3 d
 test("conformance runner: preview tool rows reject with their row from Responses sources", () => {
   const coord = createDefaultTranslationCoordinator();
   const manifestById = new Map(CONFORMANCE_MANIFEST.map((row) => [row.id, row]));
-  const previews: Array<{ rowId: string; tool: JsonObject }> = [
+  const previews: Array<{ rowId: MatrixRowId; tool: JsonObject }> = [
     { rowId: "hosted-web-search-preview", tool: { type: "web_search_preview" } },
     {
       rowId: "hosted-computer-use-preview",

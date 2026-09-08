@@ -1,13 +1,20 @@
 /**
  * Static machine-readable conformance manifest for all 184 capability rows
  * of the Aptus Protocol Translation Matrix.
+ *
+ * The canonical matrix owns each row's identity, name, and tiers; this table
+ * owns only the conformance fields the matrix lacks. Entries are keyed by the
+ * compile-checked `MatrixRowId` union, so a renamed or deleted matrix row
+ * fails compilation here until this delta is updated, and a typo'd key is a
+ * compile error instead of a tier drift caught by tests. The exported
+ * CONFORMANCE_MANIFEST joins the two tables at module load.
  */
 import type { Direction } from "../../src/translation/contracts.ts";
-import type { Tier } from "../../src/translation/matrix.ts";
+import { MATRIX } from "../../src/translation/matrix.ts";
+import type { MatrixRowId, Tier } from "../../src/translation/matrix.ts";
 
-export interface ConformanceManifestRow {
-  readonly id: string;
-  readonly name: string;
+/** Conformance field set each row carries in addition to its matrix row. */
+export interface ConformanceManifestDelta {
   readonly area:
     | "transcript"
     | "streaming"
@@ -17,7 +24,6 @@ export interface ConformanceManifestRow {
     | "structured"
     | "media"
     | "terminal";
-  readonly tiers: Readonly<Record<Direction, Tier>>;
   readonly trigger: "request_field" | "outcome_field" | "stream_event" | "header" | "transport" | "system";
   readonly expectedDispatchCount: Readonly<Record<Direction, 0 | 1>>;
   readonly terminalBehavior: Readonly<
@@ -28,19 +34,20 @@ export interface ConformanceManifestRow {
   >;
 }
 
-export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
-  {
-    id: "logical-model-selection",
-    name: "Logical model selection",
+/** One conformance manifest row: canonical matrix identity plus the delta. */
+export interface ConformanceManifestRow {
+  readonly id: MatrixRowId;
+  readonly name: string;
+  readonly tiers: Readonly<Record<Direction, Tier>>;
+  readonly area: ConformanceManifestDelta["area"];
+  readonly trigger: ConformanceManifestDelta["trigger"];
+  readonly expectedDispatchCount: ConformanceManifestDelta["expectedDispatchCount"];
+  readonly terminalBehavior: ConformanceManifestDelta["terminalBehavior"];
+}
+
+const MANIFEST_DELTAS: Readonly<Record<MatrixRowId, ConformanceManifestDelta>> = {
+  "logical-model-selection": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -59,18 +66,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "single-text-turn",
-    name: "Single user text turn",
+  "single-text-turn": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -89,18 +86,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "multi-turn-text",
-    name: "Multi-turn text transcript",
+  "multi-turn-text": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -119,18 +106,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "assistant-prefill",
-    name: "Assistant prefill",
+  "assistant-prefill": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -149,18 +126,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "system-instruction",
-    name: "System instruction",
+  "system-instruction": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -179,18 +146,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "developer-instruction",
-    name: "Developer instruction",
+  "developer-instruction": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -209,18 +166,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "mixed-instruction-authority",
-    name: "Mixed system/developer authority",
+  "mixed-instruction-authority": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -239,18 +186,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "mid-conversation-instruction",
-    name: "Mid-conversation instruction",
+  "mid-conversation-instruction": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -269,18 +206,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "message-name",
-    name: "Message name attribution",
+  "message-name": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -299,18 +226,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-message-phase",
-    name: "Responses message phase/status",
+  "responses-message-phase": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -329,18 +246,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "anthropic-turn-merging",
-    name: "Anthropic consecutive-turn merging",
+  "anthropic-turn-merging": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -359,18 +266,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "temperature-0-1",
-    name: "Temperature 0–1",
+  "temperature-0-1": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -389,18 +286,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "top-p-0-1",
-    name: "Top-p 0–1",
+  "top-p-0-1": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -419,18 +306,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "text-verbosity",
-    name: "Text verbosity",
+  "text-verbosity": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -449,18 +326,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "chat-predicted-outputs",
-    name: "Chat predicted output",
+  "chat-predicted-outputs": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -479,18 +346,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-max-tool-calls",
-    name: "Responses built-in tool-call limit",
+  "responses-max-tool-calls": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -509,18 +366,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-include",
-    name: "Responses include selectors",
+  "responses-include": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -539,18 +386,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "output-token-limit",
-    name: "Output token limit",
+  "output-token-limit": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -569,18 +406,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "stop-sequence-request",
-    name: "Stop sequence request",
+  "stop-sequence-request": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -599,18 +426,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "matched-stop-sequence",
-    name: "Matched stop sequence echo",
+  "matched-stop-sequence": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -629,18 +446,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "frequency-penalty",
-    name: "Frequency penalty",
+  "frequency-penalty": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -659,18 +466,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "presence-penalty",
-    name: "Presence penalty",
+  "presence-penalty": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -689,18 +486,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "top-k",
-    name: "Top-k sampling",
+  "top-k": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -719,18 +506,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "seed-determinism",
-    name: "Seed determinism",
+  "seed-determinism": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -749,18 +526,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "token-logit-bias",
-    name: "Token logit bias",
+  "token-logit-bias": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -779,18 +546,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "token-logprobs",
-    name: "Token logprobs",
+  "token-logprobs": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -809,18 +566,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "multiple-candidates",
-    name: "Multiple output candidates",
+  "multiple-candidates": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -839,18 +586,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "text-content",
-    name: "Text content",
+  "text-content": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -869,18 +606,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "image-url",
-    name: "Image by URL",
+  "image-url": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -899,18 +626,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "image-inline-bytes",
-    name: "Image by inline bytes",
+  "image-inline-bytes": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -929,18 +646,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "image-detail-auto-low-high",
-    name: "Image detail auto/low/high",
+  "image-detail-auto-low-high": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -959,18 +666,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "image-detail-original",
-    name: "Image detail original",
+  "image-detail-original": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -989,18 +686,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "provider-image-id",
-    name: "Provider image resource ID",
+  "provider-image-id": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1019,18 +706,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "document-url",
-    name: "Document by URL",
+  "document-url": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1049,18 +726,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "document-inline-bytes",
-    name: "Document by inline bytes",
+  "document-inline-bytes": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1079,18 +746,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "document-inline-text",
-    name: "Document by inline text",
+  "document-inline-text": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1109,18 +766,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "gateway-file-reference",
-    name: "Gateway file reference",
+  "gateway-file-reference": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1139,18 +786,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "provider-file-id",
-    name: "Provider file resource ID",
+  "provider-file-id": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1169,18 +806,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "document-context-title",
-    name: "Document context/title",
+  "document-context-title": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T2",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T2",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1199,18 +826,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "structured-json-schema",
-    name: "Structured output JSON schema",
+  "structured-json-schema": {
     area: "structured",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1229,18 +846,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "structured-strict-guarantee",
-    name: "Structured output strict guarantee",
+  "structured-strict-guarantee": {
     area: "structured",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1259,18 +866,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "structured-name-description",
-    name: "Structured output name/description",
+  "structured-name-description": {
     area: "structured",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1289,18 +886,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "legacy-json-object",
-    name: "Legacy JSON-object mode",
+  "legacy-json-object": {
     area: "structured",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1319,18 +906,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "refusal-content",
-    name: "Refusal content",
+  "refusal-content": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1349,18 +926,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "refusal-terminal-reason",
-    name: "Refusal terminal reason",
+  "refusal-terminal-reason": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1379,18 +946,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "refusal-category-explanation",
-    name: "Refusal category/explanation",
+  "refusal-category-explanation": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1409,18 +966,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "url-citation-source",
-    name: "URL citation source identity",
+  "url-citation-source": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1439,18 +986,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "file-document-citation-source",
-    name: "File/document citation source identity",
+  "file-document-citation-source": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1469,18 +1006,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "citation-output-span",
-    name: "Citation output span",
+  "citation-output-span": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1499,18 +1026,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "citation-document-location",
-    name: "Citation document location",
+  "citation-document-location": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1529,18 +1046,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "citation-stream-timing",
-    name: "Citation streaming timing",
+  "citation-stream-timing": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1559,18 +1066,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "audio-input",
-    name: "Audio input",
+  "audio-input": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1589,18 +1086,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "audio-output",
-    name: "Audio output",
+  "audio-output": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1619,18 +1106,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "audio-streaming",
-    name: "Audio streaming",
+  "audio-streaming": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1649,18 +1126,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "audio-continuation-id",
-    name: "Audio continuation ID",
+  "audio-continuation-id": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -1679,18 +1146,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "function-tool-definition",
-    name: "Function tool definition",
+  "function-tool-definition": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1709,18 +1166,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "function-schema-strictness",
-    name: "Function schema strictness",
+  "function-schema-strictness": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1739,18 +1186,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "tool-choice-none-auto-required",
-    name: "Tool choice none/auto/required",
+  "tool-choice-none-auto-required": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1769,18 +1206,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "tool-choice-named",
-    name: "Named tool choice",
+  "tool-choice-named": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1799,18 +1226,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "allowed-tool-subset",
-    name: "Allowed-tool subset control",
+  "allowed-tool-subset": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1829,18 +1246,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "parallel-tool-calls",
-    name: "Parallel tool calls",
+  "parallel-tool-calls": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1859,18 +1266,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "function-call-correlation",
-    name: "Function call correlation",
+  "function-call-correlation": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1889,18 +1286,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "function-arguments-complete",
-    name: "Complete function arguments",
+  "function-arguments-complete": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1919,18 +1306,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "function-arguments-streaming",
-    name: "Streaming function arguments",
+  "function-arguments-streaming": {
     area: "tools-streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1949,18 +1326,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "invalid-function-json",
-    name: "Invalid function JSON handling",
+  "invalid-function-json": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -1979,18 +1346,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "tool-result-text",
-    name: "Tool result text",
+  "tool-result-text": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -2009,18 +1366,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "tool-result-multipart",
-    name: "Multipart tool result",
+  "tool-result-multipart": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2039,18 +1386,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "tool-result-error",
-    name: "Tool result error flag",
+  "tool-result-error": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2069,18 +1406,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "custom-text-tool",
-    name: "Custom text tool",
+  "custom-text-tool": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -2099,18 +1426,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "custom-grammar-tool",
-    name: "Custom grammar tool",
+  "custom-grammar-tool": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -2129,18 +1446,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "custom-tool-streaming",
-    name: "Custom tool streaming deltas",
+  "custom-tool-streaming": {
     area: "tools-streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -2159,18 +1466,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "tool-output-schema",
-    name: "Tool output schema",
+  "tool-output-schema": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2189,18 +1486,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "deferred-tools",
-    name: "Deferred tool loading",
+  "deferred-tools": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2219,18 +1506,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "allowed-callers",
-    name: "Allowed tool callers",
+  "allowed-callers": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2249,18 +1526,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "tool-input-examples",
-    name: "Tool input examples",
+  "tool-input-examples": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2279,18 +1546,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "eager-tool-streaming",
-    name: "Eager tool streaming",
+  "eager-tool-streaming": {
     area: "tools-streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -2309,18 +1566,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "tool-namespaces",
-    name: "Tool namespaces",
+  "tool-namespaces": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2339,18 +1586,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "programmatic-tools",
-    name: "Programmatic tool calling",
+  "programmatic-tools": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2369,18 +1606,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-web-search",
-    name: "Hosted web search tool",
+  "hosted-web-search": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2399,18 +1626,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-web-fetch",
-    name: "Hosted web fetch tool",
+  "hosted-web-fetch": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2429,18 +1646,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-file-search",
-    name: "Hosted file search tool",
+  "hosted-file-search": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2459,18 +1666,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-code-execution",
-    name: "Hosted code execution",
+  "hosted-code-execution": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2489,18 +1686,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-shell",
-    name: "Hosted shell tool",
+  "hosted-shell": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2519,18 +1706,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-text-editor",
-    name: "Hosted text editor tool",
+  "hosted-text-editor": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2549,18 +1726,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-computer-use",
-    name: "Hosted computer use",
+  "hosted-computer-use": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2579,18 +1746,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-image-generation",
-    name: "Hosted image generation",
+  "hosted-image-generation": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2609,18 +1766,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-mcp",
-    name: "Hosted MCP connector",
+  "hosted-mcp": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2639,18 +1786,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-tool-search",
-    name: "Hosted tool search",
+  "hosted-tool-search": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2669,18 +1806,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-memory",
-    name: "Hosted memory tool",
+  "hosted-memory": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2699,18 +1826,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-apply-patch",
-    name: "Hosted apply-patch tool",
+  "hosted-apply-patch": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2729,18 +1846,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "provider-vector-store",
-    name: "Provider vector store resource",
+  "provider-vector-store": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2759,18 +1866,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "provider-container",
-    name: "Provider container resource",
+  "provider-container": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2789,18 +1886,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "provider-uploaded-file",
-    name: "Provider uploaded-file resource",
+  "provider-uploaded-file": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2819,18 +1906,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-tool-safety-checks",
-    name: "Hosted tool safety checks",
+  "hosted-tool-safety-checks": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2849,18 +1926,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-tool-result-encryption",
-    name: "Hosted tool result encryption",
+  "hosted-tool-result-encryption": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2879,18 +1946,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "reasoning-effort-common",
-    name: "Common reasoning effort",
+  "reasoning-effort-common": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -2909,18 +1966,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-reasoning-summary",
-    name: "Responses reasoning summary",
+  "responses-reasoning-summary": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2939,18 +1986,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "anthropic-thinking-display",
-    name: "Anthropic thinking display",
+  "anthropic-thinking-display": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2969,18 +2006,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "reasoning-budget",
-    name: "Reasoning token budget",
+  "reasoning-budget": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -2999,18 +2026,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "reasoning-style-context-mode",
-    name: "Reasoning style/context/mode",
+  "reasoning-style-context-mode": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3029,18 +2046,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "readable-reasoning",
-    name: "Readable reasoning payload",
+  "readable-reasoning": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3059,18 +2066,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "reasoning-signature",
-    name: "Reasoning signature",
+  "reasoning-signature": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3089,18 +2086,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "encrypted-reasoning",
-    name: "Encrypted reasoning",
+  "encrypted-reasoning": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3119,18 +2106,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "redacted-reasoning",
-    name: "Redacted thinking",
+  "redacted-reasoning": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3149,18 +2126,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "stateless-transcript-replay",
-    name: "Stateless transcript replay",
+  "stateless-transcript-replay": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T2",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3179,18 +2146,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "responses-previous-id",
-    name: "Responses previous_response_id",
+  "responses-previous-id": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3209,18 +2166,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-conversation",
-    name: "Responses conversation membership",
+  "responses-conversation": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3239,18 +2186,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-storage",
-    name: "Responses server-side storage",
+  "responses-storage": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3269,18 +2206,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-background",
-    name: "Responses background execution",
+  "responses-background": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3299,18 +2226,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-compaction",
-    name: "Responses context compaction",
+  "responses-compaction": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3329,18 +2246,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-reusable-prompt",
-    name: "Responses reusable prompt",
+  "responses-reusable-prompt": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3359,18 +2266,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-item-reference",
-    name: "Responses item reference",
+  "responses-item-reference": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3389,18 +2286,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "responses-websocket-continuation",
-    name: "Responses WebSocket continuation",
+  "responses-websocket-continuation": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "transport",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3419,18 +2306,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "anthropic-pause-turn",
-    name: "Anthropic pause_turn",
+  "anthropic-pause-turn": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3449,18 +2326,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "anthropic-container-reuse",
-    name: "Anthropic container reuse",
+  "anthropic-container-reuse": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3479,18 +2346,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "prompt-cache-key",
-    name: "Prompt cache key",
+  "prompt-cache-key": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3509,18 +2366,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "prompt-cache-breakpoint",
-    name: "Prompt cache breakpoint",
+  "prompt-cache-breakpoint": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3539,18 +2386,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "prompt-cache-mode",
-    name: "Prompt cache mode",
+  "prompt-cache-mode": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3569,18 +2406,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "prompt-cache-ttl",
-    name: "Prompt cache TTL",
+  "prompt-cache-ttl": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3599,18 +2426,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "cache-billing-semantics",
-    name: "Cache billing semantics",
+  "cache-billing-semantics": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3629,18 +2446,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "request-metadata",
-    name: "Request metadata",
+  "request-metadata": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3659,18 +2466,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "safety-identifier",
-    name: "Safety identifier",
+  "safety-identifier": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3689,18 +2486,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "moderation-policy-result",
-    name: "Moderation policy and result",
+  "moderation-policy-result": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3719,18 +2506,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "service-tier",
-    name: "Service tier",
+  "service-tier": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3749,18 +2526,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "inference-geography",
-    name: "Inference geography",
+  "inference-geography": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3779,18 +2546,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "truncation-policy",
-    name: "Truncation policy",
+  "truncation-policy": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3809,18 +2566,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "response-storage-retention",
-    name: "Response storage retention",
+  "response-storage-retention": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3839,18 +2586,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "beta-version-control",
-    name: "Beta feature gating",
+  "beta-version-control": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -3869,18 +2606,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "single-completed-output",
-    name: "Single completed output",
+  "single-completed-output": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3899,18 +2626,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "ordered-output-parts",
-    name: "Ordered output parts",
+  "ordered-output-parts": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3929,18 +2646,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "response-envelope-synthesis",
-    name: "Response envelope synthesis",
+  "response-envelope-synthesis": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3959,18 +2666,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "finish-natural",
-    name: "Natural finish",
+  "finish-natural": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -3989,18 +2686,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "finish-length",
-    name: "Length finish",
+  "finish-length": {
     area: "transcript",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4019,18 +2706,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "finish-tool-calls",
-    name: "Tool-call finish",
+  "finish-tool-calls": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4049,18 +2726,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "finish-content-filter",
-    name: "Content-filter finish",
+  "finish-content-filter": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4079,18 +2746,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "finish-context-limit",
-    name: "Context-limit finish",
+  "finish-context-limit": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4109,18 +2766,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "finish-other-unknown",
-    name: "Unknown finish values",
+  "finish-other-unknown": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4139,18 +2786,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "usage-input-output-total",
-    name: "Input/output usage totals",
+  "usage-input-output-total": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4169,18 +2806,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "usage-cache-read",
-    name: "Cache-read usage",
+  "usage-cache-read": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4199,18 +2826,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "usage-cache-write",
-    name: "Cache-write usage",
+  "usage-cache-write": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4229,18 +2846,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "usage-reasoning",
-    name: "Reasoning usage",
+  "usage-reasoning": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4259,18 +2866,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "usage-audio",
-    name: "Audio usage",
+  "usage-audio": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4289,18 +2886,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "usage-server-tools",
-    name: "Server-tool usage",
+  "usage-server-tools": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4319,18 +2906,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "usage-absence",
-    name: "Absent usage",
+  "usage-absence": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T2",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4349,18 +2926,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "usage-stream-timing",
-    name: "Usage stream timing",
+  "usage-stream-timing": {
     area: "controls",
-    tiers: {
-      "openai-chat->openai-responses": "T2",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T2",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4379,18 +2946,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "error-category-message",
-    name: "Error category and message",
+  "error-category-message": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T2",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T2",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4409,18 +2966,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "error-http-status",
-    name: "Error HTTP status",
+  "error-http-status": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4439,18 +2986,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "error-request-id",
-    name: "Error request ID",
+  "error-request-id": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4469,18 +3006,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "error-retry-after",
-    name: "Error retry-after",
+  "error-retry-after": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4499,18 +3026,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "quota-vs-rate-limit",
-    name: "Quota vs rate-limit distinction",
+  "quota-vs-rate-limit": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T2",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4529,18 +3046,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "post-header-stream-error",
-    name: "In-band stream error event",
+  "post-header-stream-error": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4559,18 +3066,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "in_band_error",
     },
   },
-  {
-    id: "abrupt-stream-close",
-    name: "Abrupt stream close",
+  "abrupt-stream-close": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "transport",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4589,18 +3086,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "abrupt_close",
     },
   },
-  {
-    id: "semantic-stream-lifecycle",
-    name: "Semantic stream lifecycle",
+  "semantic-stream-lifecycle": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4619,18 +3106,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "text-stream-delta",
-    name: "Text stream deltas",
+  "text-stream-delta": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4649,18 +3126,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "refusal-stream-delta",
-    name: "Refusal stream deltas",
+  "refusal-stream-delta": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4679,18 +3146,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "tool-stream-delta",
-    name: "Tool argument stream deltas",
+  "tool-stream-delta": {
     area: "tools-streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4709,18 +3166,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "citation-stream-event",
-    name: "Citation stream events",
+  "citation-stream-event": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4739,18 +3186,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "stream-final-usage",
-    name: "Stream final usage carrier",
+  "stream-final-usage": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T2",
-      "openai-chat->anthropic-messages": "T2",
-      "openai-responses->openai-chat": "T2",
-      "openai-responses->anthropic-messages": "T2",
-      "anthropic-messages->openai-chat": "T2",
-      "anthropic-messages->openai-responses": "T2",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4769,18 +3206,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "sse-named-events",
-    name: "SSE named events",
+  "sse-named-events": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4799,18 +3226,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "chat-done-sentinel",
-    name: "Chat [DONE] sentinel",
+  "chat-done-sentinel": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4829,18 +3246,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "responses-sequence-number",
-    name: "Responses sequence_number",
+  "responses-sequence-number": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4859,18 +3266,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "messages-ping",
-    name: "Messages ping keepalive",
+  "messages-ping": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4889,18 +3286,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "stream-obfuscation",
-    name: "Stream obfuscation",
+  "stream-obfuscation": {
     area: "streaming",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4919,18 +3306,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "responses-websocket-transport",
-    name: "Responses WebSocket transport",
+  "responses-websocket-transport": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "transport",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -4949,18 +3326,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "authentication-headers",
-    name: "Authentication headers",
+  "authentication-headers": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "header",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -4979,18 +3346,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "organization-project-headers",
-    name: "Organization/project headers",
+  "organization-project-headers": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "header",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5009,18 +3366,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "anthropic-version-header",
-    name: "Anthropic version header",
+  "anthropic-version-header": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "header",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5039,18 +3386,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "beta-header",
-    name: "Beta feature header",
+  "beta-header": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "header",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5069,18 +3406,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "rate-limit-headers",
-    name: "Rate-limit response headers",
+  "rate-limit-headers": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "header",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5099,18 +3426,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "diagnostic-response-headers",
-    name: "Diagnostic response headers",
+  "diagnostic-response-headers": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "header",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5129,18 +3446,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "request-body-size-limit",
-    name: "Request body size limit",
+  "request-body-size-limit": {
     area: "media",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "transport",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5159,18 +3466,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "unknown-request-field",
-    name: "Unknown request field",
+  "unknown-request-field": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5189,18 +3486,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "invalid_request",
     },
   },
-  {
-    id: "unknown-content-item",
-    name: "Unknown content item",
+  "unknown-content-item": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "outcome_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5219,18 +3506,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "unknown-stream-event",
-    name: "Unknown stream event",
+  "unknown-stream-event": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "stream_event",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5249,18 +3526,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "ignorable-wire-metadata",
-    name: "Ignorable wire metadata",
+  "ignorable-wire-metadata": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T1",
-      "openai-chat->anthropic-messages": "T1",
-      "openai-responses->openai-chat": "T1",
-      "openai-responses->anthropic-messages": "T1",
-      "anthropic-messages->openai-chat": "T1",
-      "anthropic-messages->openai-responses": "T1",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5279,18 +3546,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "chat-legacy-functions",
-    name: "Chat legacy functions param",
+  "chat-legacy-functions": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5309,18 +3566,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "chat-legacy-function-role",
-    name: "Chat legacy function role",
+  "chat-legacy-function-role": {
     area: "tools",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5339,18 +3586,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "chat-legacy-max-tokens",
-    name: "Chat legacy max_tokens",
+  "chat-legacy-max-tokens": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5369,18 +3606,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "openai-prompt-cache-retention",
-    name: "OpenAI deprecated cache retention",
+  "openai-prompt-cache-retention": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5399,18 +3626,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "openai-system-fingerprint",
-    name: "OpenAI system fingerprint",
+  "openai-system-fingerprint": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "system",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 1,
@@ -5429,18 +3646,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "complete",
     },
   },
-  {
-    id: "responses-preview-multi-agent",
-    name: "Responses preview multi-agent",
+  "responses-preview-multi-agent": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5459,18 +3666,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-web-search-preview",
-    name: "Deprecated web search preview tool",
+  "hosted-web-search-preview": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5489,18 +3686,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-computer-use-preview",
-    name: "Deprecated computer use preview tool",
+  "hosted-computer-use-preview": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5519,18 +3706,8 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-  {
-    id: "hosted-local-shell-preview",
-    name: "Deprecated local shell tool",
+  "hosted-local-shell-preview": {
     area: "terminal",
-    tiers: {
-      "openai-chat->openai-responses": "T3",
-      "openai-chat->anthropic-messages": "T3",
-      "openai-responses->openai-chat": "T3",
-      "openai-responses->anthropic-messages": "T3",
-      "anthropic-messages->openai-chat": "T3",
-      "anthropic-messages->openai-responses": "T3",
-    },
     trigger: "request_field",
     expectedDispatchCount: {
       "openai-chat->openai-responses": 0,
@@ -5549,4 +3726,17 @@ export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = [
       "anthropic-messages->openai-responses": "unsupported_capability",
     },
   },
-];
+};
+
+export const CONFORMANCE_MANIFEST: readonly ConformanceManifestRow[] = MATRIX.map((row) => {
+  const delta = MANIFEST_DELTAS[row.id];
+  return {
+    id: row.id,
+    name: row.name,
+    tiers: row.tiers,
+    area: delta.area,
+    trigger: delta.trigger,
+    expectedDispatchCount: delta.expectedDispatchCount,
+    terminalBehavior: delta.terminalBehavior,
+  };
+});

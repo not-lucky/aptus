@@ -16,8 +16,9 @@ import { truncateProviderErrorString } from "../../failures.ts";
 import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
-import { parseFunctionArgumentsOnce, responsesReasoningItemFailure } from "../shared/hosted-tools.ts";
+import { responsesReasoningItemFailure } from "../shared/hosted-tools.ts";
 import { responsesTextConfig } from "../shared/output-format.ts";
+import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
 import { responsesToolFields } from "../shared/tool-fields.ts";
 import { buildResponsesInput, responsesFinishStatus, responsesGenerationFields } from "../shared/transcript.ts";
@@ -81,11 +82,7 @@ export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
  * but a terminal payload that includes an unannounced reasoning item must fail
  * closed too instead of silently vanishing behind a success terminator.
  */
-function scanTerminalOutput(
-  resp: Record<string, unknown>,
-  seenFunctionItemIds: ReadonlySet<string>,
-  seenFunctionCallIds: ReadonlySet<string>,
-): Result<void, NormalizedFailure> {
+function scanTerminalOutput(resp: Record<string, unknown>, hasIdentity: (identity: string) => boolean): Result<void, NormalizedFailure> {
   if (!Array.isArray(resp.output)) return ok(undefined);
   for (const item of resp.output) {
     if (!isPlainObject(item)) continue;
@@ -105,8 +102,7 @@ function scanTerminalOutput(
     if (itemObj.type === "function_call") {
       const id = typeof itemObj.id === "string" ? itemObj.id : undefined;
       const callId = typeof itemObj.call_id === "string" ? itemObj.call_id : undefined;
-      const recognized =
-        (id !== undefined && seenFunctionItemIds.has(id)) || (callId !== undefined && seenFunctionCallIds.has(callId));
+      const recognized = (id !== undefined && hasIdentity(id)) || (callId !== undefined && hasIdentity(callId));
       if (!recognized) return invalidRequest("Unannounced function_call in terminal output");
     }
   }
@@ -116,6 +112,11 @@ function scanTerminalOutput(
 /**
  * Decodes an upstream OpenAI Responses SSE stream into semantic IR stream events.
  *
+ * Wire dispatch only: event-name matching, sequence-number ordering, item
+ * validation, and the terminal finish-reason derivation are Responses-specific;
+ * all part shape, call-id/item-id dedup, refusal pairing, argument budget, and
+ * terminal-once bookkeeping is delegated to the shared {@link StreamShapeTracker}.
+ *
  * Provider-owned reasoning output items fail closed at discovery
  * (`encrypted-reasoning` when carrying `encrypted_content`, else
  * `readable-reasoning`). The terminal completion event collapses usage with its
@@ -124,33 +125,12 @@ function scanTerminalOutput(
  */
 export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "openai-responses" as const;
-  private readonly session: StreamSession;
-  private readonly budget: StreamToolArgumentsBudget;
+  private readonly tracker: StreamShapeTracker;
   private lastSequenceNumber = 0;
-  private currentPartId: string | undefined;
-  private currentPartType: "text" | "refusal" | undefined;
-  private partStarted = false;
-  private completed = false;
-  private readonly seenFunctionItemIds = new Set<string>();
-  private readonly seenFunctionCallIds = new Set<string>();
-  private readonly openFunctionItems = new Map<
-    string,
-    {
-      partId: string;
-      callId: string;
-      name: string;
-      outputIndex?: number;
-      arguments: string;
-      deltaCount: number;
-    }
-  >();
-  private startedFunctionPartCount = 0;
   private outcomeWireOptions: OutcomeWireOptions = {};
-  private sawRefusal = false;
 
   constructor(session: StreamSession, maxArgumentBytes?: number) {
-    this.session = session;
-    this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
+    this.tracker = new StreamShapeTracker({ session, maxArgumentBytes, wireLabel: "Responses" });
   }
 
   getOutcomeWireOptions(): OutcomeWireOptions {
@@ -161,9 +141,8 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     // The success terminator already went out on the terminal event; any later
     // event is a misbehaving provider stream and fails closed instead of
     // re-emitting a second terminal event.
-    if (this.completed) {
-      return invalidRequest("Responses stream received an event after the terminal completion event");
-    }
+    const guard = this.tracker.guardFrame();
+    if (!guard.ok) return guard;
 
     if (frame.event === undefined || frame.event.trim() === "") {
       return invalidRequest("Responses stream frame missing required named 'event'");
@@ -198,13 +177,10 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     const eventName = frame.event;
 
     if (eventName === "response.created") {
-      return ok([
-        {
-          type: "response_start",
-          responseId: this.session.responseId,
-          model: this.session.model,
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      const startRes = this.tracker.start(events);
+      if (!startRes.ok) return startRes;
+      return ok(events);
     }
 
     if (eventName === "response.in_progress") {
@@ -240,34 +216,19 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         if (typeof item.name !== "string" || item.name.trim() === "") {
           return invalidRequest("output_item.added function_call name must be a non-empty string");
         }
-        if (this.seenFunctionItemIds.has(item.id) || this.seenFunctionCallIds.has(item.call_id)) {
-          return invalidRequest("output_item.added duplicate function_call id or call_id");
-        }
-        this.seenFunctionItemIds.add(item.id);
-        this.seenFunctionCallIds.add(item.call_id);
+        const claimItemRes = this.tracker.claimIdentity(item.id);
+        if (!claimItemRes.ok) return claimItemRes;
+        const claimCallRes = this.tracker.claimIdentity(item.call_id);
+        if (!claimCallRes.ok) return claimCallRes;
 
-        const partId = this.session.createPartId();
         const outputIndex =
           typeof chunk.output_index === "number" && Number.isSafeInteger(chunk.output_index) && chunk.output_index >= 0
             ? chunk.output_index
             : undefined;
-        this.openFunctionItems.set(item.id, {
-          partId,
-          callId: item.call_id,
-          name: item.name,
-          outputIndex,
-          arguments: "",
-          deltaCount: 0,
-        });
-        this.startedFunctionPartCount++;
-        return ok([
-          {
-            type: "part_start",
-            responseId: this.session.responseId,
-            partId,
-            part: { type: "function_call", callId: item.call_id, name: item.name },
-          },
-        ]);
+        const events: IrStreamEvent[] = [];
+        const openRes = this.tracker.openFunctionPart(events, item.id, item.call_id, item.name, { outputIndex });
+        if (!openRes.ok) return openRes;
+        return ok(events);
       }
       if (item.type !== "message") {
         return unsupportedCapability("unknown-content-item");
@@ -284,98 +245,51 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       if (part.type !== "output_text" && part.type !== "refusal") {
         return unsupportedCapability("unknown-content-item");
       }
-      this.currentPartId = this.session.createPartId();
-      this.partStarted = true;
+      const events: IrStreamEvent[] = [];
       if (part.type === "refusal") {
-        this.currentPartType = "refusal";
-        this.sawRefusal = true;
-        return ok([
-          {
-            type: "part_start",
-            responseId: this.session.responseId,
-            partId: this.currentPartId,
-            part: { type: "refusal" },
-          },
-        ]);
+        this.tracker.openRefusalPart(events, "current", "force-new");
+      } else {
+        this.tracker.openTextPart(events, "current", "force-new");
       }
-      this.currentPartType = "text";
-      return ok([
-        {
-          type: "part_start",
-          responseId: this.session.responseId,
-          partId: this.currentPartId,
-          part: { type: "text" },
-        },
-      ]);
+      return ok(events);
     }
 
     if (eventName === "response.output_text.delta") {
-      const events: IrStreamEvent[] = [];
-      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "text") {
-        this.currentPartId = this.session.createPartId();
-        this.partStarted = true;
-        this.currentPartType = "text";
-        events.push({
-          type: "part_start",
-          responseId: this.session.responseId,
-          partId: this.currentPartId,
-          part: { type: "text" },
-        });
-      }
       const text = chunk.delta;
       // A present-but-malformed delta fabricates nothing: only a string
       // carries text, anything else fails closed.
       if (typeof text !== "string") {
         return invalidRequest("response.output_text.delta: delta must be a string");
       }
-      events.push({
-        type: "text_delta",
-        responseId: this.session.responseId,
-        partId: this.currentPartId,
-        text,
-      });
+      const events: IrStreamEvent[] = [];
+      const textRes = this.tracker.textDelta(events, "current", text, { lazy: true });
+      if (!textRes.ok) return textRes;
       return ok(events);
     }
 
     if (eventName === "response.refusal.delta") {
-      const events: IrStreamEvent[] = [];
-      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "refusal") {
-        this.currentPartId = this.session.createPartId();
-        this.partStarted = true;
-        this.currentPartType = "refusal";
-        events.push({
-          type: "part_start",
-          responseId: this.session.responseId,
-          partId: this.currentPartId,
-          part: { type: "refusal" },
-        });
-      }
-      this.sawRefusal = true;
       const text = chunk.delta;
       // A present-but-malformed refusal delta fabricates nothing: only a
       // string carries refusal text, anything else fails closed.
       if (typeof text !== "string") {
         return invalidRequest("response.refusal.delta: delta must be a string");
       }
-      events.push({
-        type: "refusal_delta",
-        responseId: this.session.responseId,
-        partId: this.currentPartId,
-        text,
-      });
+      const events: IrStreamEvent[] = [];
+      const refusalRes = this.tracker.refusalDelta(events, "current", text);
+      if (!refusalRes.ok) return refusalRes;
       return ok(events);
     }
 
     if (eventName === "response.refusal.done") {
       // A refusal completion without an open refusal part is malformed
       // provider output; silently absorbing it would hide the violation.
-      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "refusal") {
+      if (this.tracker.partTypeOf("current") !== "refusal") {
         return invalidRequest("response.refusal.done received without an open refusal part");
       }
-      const partId = this.currentPartId;
-      this.partStarted = false;
-      this.currentPartType = undefined;
-      return ok([{ type: "part_end", responseId: this.session.responseId, partId, partType: "refusal" }]);
+      const events: IrStreamEvent[] = [];
+      const closeRes = this.tracker.closePart(events, "current", "refusal");
+      if (!closeRes.ok) return closeRes;
+      return ok(events);
     }
 
     if (eventName === "response.output_text.annotation.added") {
@@ -386,19 +300,15 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       if (annot.type === "container_file_citation") {
         return unsupportedCapability("provider-container");
       }
-      if (!this.partStarted || this.currentPartId === undefined) {
+      if (this.tracker.partIdOf("current") === undefined) {
         return invalidRequest("annotation.added received before open output_text part");
       }
       const parsed = parseResponsesAnnotation(annot);
       if (!parsed.ok) return parsed;
-      return ok([
-        {
-          type: "citation",
-          responseId: this.session.responseId,
-          partId: this.currentPartId,
-          citation: parsed.value,
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      const citationRes = this.tracker.citation(events, "current", parsed.value);
+      if (!citationRes.ok) return citationRes;
+      return ok(events);
     }
 
     if (eventName === "response.function_call_arguments.delta") {
@@ -406,27 +316,17 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       const key =
         (typeof chunk.item_id === "string" ? chunk.item_id : undefined) ??
         (typeof chunk.call_id === "string" ? chunk.call_id : undefined);
-      const match = this.findFunctionItem(key, outputIndex);
+      const match = this.tracker.findFunctionPart(key, outputIndex);
       if (match === undefined) {
         return invalidRequest("function_call_arguments.delta received for unknown item");
       }
       if (typeof chunk.delta !== "string") {
         return invalidRequest("function_call_arguments.delta requires string delta");
       }
-      const text = chunk.delta;
-      const claimRes = this.budget.claim(text);
-      if (!claimRes.ok) return claimRes;
-      match.entry.arguments += text;
-      match.entry.deltaCount++;
-      return ok([
-        {
-          type: "tool_arguments_delta",
-          responseId: this.session.responseId,
-          partId: match.entry.partId,
-          callId: match.entry.callId,
-          text,
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      const deltaRes = this.tracker.toolArgumentsDelta(events, match.slot, chunk.delta);
+      if (!deltaRes.ok) return deltaRes;
+      return ok(events);
     }
 
     if (eventName === "response.function_call_arguments.done") {
@@ -434,29 +334,19 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       const key =
         (typeof chunk.item_id === "string" ? chunk.item_id : undefined) ??
         (typeof chunk.call_id === "string" ? chunk.call_id : undefined);
-      const match = this.findFunctionItem(key, outputIndex);
+      const match = this.tracker.findFunctionPart(key, outputIndex);
       if (match === undefined) {
         return invalidRequest("function_call_arguments.done received for unknown item");
       }
       if (chunk.arguments !== undefined && typeof chunk.arguments !== "string") {
         return invalidRequest("function_call_arguments.done arguments must be a string");
       }
-      if (match.entry.deltaCount === 0 && typeof chunk.arguments === "string" && chunk.arguments.length > 0) {
-        const claimRes = this.budget.claim(chunk.arguments);
-        if (!claimRes.ok) return claimRes;
-        match.entry.arguments += chunk.arguments;
-        match.entry.deltaCount++;
-        return ok([
-          {
-            type: "tool_arguments_delta",
-            responseId: this.session.responseId,
-            partId: match.entry.partId,
-            callId: match.entry.callId,
-            text: chunk.arguments,
-          },
-        ]);
+      const events: IrStreamEvent[] = [];
+      if (this.tracker.argumentDeltaCount(match.slot) === 0 && typeof chunk.arguments === "string" && chunk.arguments.length > 0) {
+        const deltaRes = this.tracker.toolArgumentsDelta(events, match.slot, chunk.arguments);
+        if (!deltaRes.ok) return deltaRes;
       }
-      return ok([]);
+      return ok(events);
     }
 
     if (eventName === "response.custom_tool_call_input.delta" || eventName === "response.custom_tool_call_input.done") {
@@ -464,20 +354,13 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "response.output_text.done") {
-      if (!this.partStarted || this.currentPartId === undefined || this.currentPartType !== "text") {
+      if (this.tracker.partTypeOf("current") !== "text") {
         return invalidRequest("response.output_text.done received without an open text part");
       }
-      const partId = this.currentPartId;
-      this.partStarted = false;
-      this.currentPartType = undefined;
-      return ok([
-        {
-          type: "part_end",
-          responseId: this.session.responseId,
-          partId,
-          partType: "text",
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      const closeRes = this.tracker.closePart(events, "current", "text");
+      if (!closeRes.ok) return closeRes;
+      return ok(events);
     }
 
     if (eventName === "response.content_part.done") {
@@ -501,44 +384,27 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         (typeof chunk.item_id === "string" ? chunk.item_id : undefined) ??
         (typeof item?.id === "string" ? item.id : undefined) ??
         (typeof item?.call_id === "string" ? item.call_id : undefined);
-      const match = this.findFunctionItem(key, outputIndex);
+      const match = this.tracker.findFunctionPart(key, outputIndex);
       if (match !== undefined) {
         if (item !== undefined) {
-          if (typeof item.call_id === "string" && item.call_id !== match.entry.callId) {
+          if (typeof item.call_id === "string" && item.call_id !== match.callId) {
             return invalidRequest("output_item.done call_id does not match opened function item");
           }
-          if (typeof item.name === "string" && item.name !== match.entry.name) {
+          if (typeof item.name === "string" && item.name !== match.name) {
             return invalidRequest("output_item.done name does not match opened function item");
           }
         }
         const events: IrStreamEvent[] = [];
         if (
-          match.entry.deltaCount === 0 &&
+          this.tracker.argumentDeltaCount(match.slot) === 0 &&
           typeof item?.arguments === "string" &&
-          item.arguments.length > 0 &&
-          match.entry.arguments.length === 0
+          item.arguments.length > 0
         ) {
-          const claimRes = this.budget.claim(item.arguments);
-          if (!claimRes.ok) return claimRes;
-          match.entry.arguments += item.arguments;
-          match.entry.deltaCount++;
-          events.push({
-            type: "tool_arguments_delta",
-            responseId: this.session.responseId,
-            partId: match.entry.partId,
-            callId: match.entry.callId,
-            text: item.arguments,
-          });
+          const deltaRes = this.tracker.toolArgumentsDelta(events, match.slot, item.arguments);
+          if (!deltaRes.ok) return deltaRes;
         }
-        const parsed = parseFunctionArgumentsOnce(match.entry.arguments);
-        this.openFunctionItems.delete(match.key);
-        events.push({
-          type: "part_end",
-          responseId: this.session.responseId,
-          partId: match.entry.partId,
-          partType: "function_call",
-          ...(parsed !== undefined ? { arguments: parsed } : {}),
-        });
+        const closeRes = this.tracker.closePart(events, match.slot, "function_call");
+        if (!closeRes.ok) return closeRes;
         return ok(events);
       }
       if (item?.type === "function_call") {
@@ -556,27 +422,30 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       }
       const resp = (chunk.response ?? {}) as Record<string, unknown>;
       // Defense-in-depth for items announced only in the terminal payload.
-      const scanResult = scanTerminalOutput(resp, this.seenFunctionItemIds, this.seenFunctionCallIds);
+      const scanResult = scanTerminalOutput(resp, (identity) => this.tracker.hasIdentity(identity));
       if (!scanResult.ok) return scanResult;
-      if (this.sawRefusal && this.startedFunctionPartCount > 0) {
+      if (this.tracker.sawRefusal() && this.tracker.startedFunctionPartCount() > 0) {
         return invalidRequest("Responses stream encountered both refusal and tool_calls");
       }
-      this.completed = true;
+      this.tracker.markTerminal();
       const factsResult = captureOutcomeWireFacts(resp, this.outcomeWireOptions, "Responses");
       if (!factsResult.ok) return factsResult;
       this.outcomeWireOptions = factsResult.value;
       const usageResult = parseResponsesUsage(resp.usage);
       if (!usageResult.ok) return usageResult;
-      return ok([
+      const events: IrStreamEvent[] = [];
+      this.tracker.responseEnd(
+        events,
         {
-          type: "response_end",
-          responseId: this.session.responseId,
-          finish: {
-            reason: this.sawRefusal ? "refusal" : this.startedFunctionPartCount > 0 ? "tool_calls" : "stop",
-          },
-          ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
+          reason: this.tracker.sawRefusal()
+            ? "refusal"
+            : this.tracker.startedFunctionPartCount() > 0
+              ? "tool_calls"
+              : "stop",
         },
-      ]);
+        usageResult.value,
+      );
+      return ok(events);
     }
 
     if (eventName === "response.incomplete") {
@@ -585,32 +454,27 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
       }
       const resp = (chunk.response ?? {}) as Record<string, unknown>;
       // Defense-in-depth for items announced only in the terminal payload.
-      const scanResult = scanTerminalOutput(resp, this.seenFunctionItemIds, this.seenFunctionCallIds);
+      const scanResult = scanTerminalOutput(resp, (identity) => this.tracker.hasIdentity(identity));
       if (!scanResult.ok) return scanResult;
       const details = (resp.incomplete_details ?? {}) as Record<string, unknown>;
       let finishReason: IrFinishReason;
       if (details.reason === "max_output_tokens") {
-        finishReason = this.startedFunctionPartCount > 0 ? "tool_calls" : "length";
+        finishReason = this.tracker.startedFunctionPartCount() > 0 ? "tool_calls" : "length";
       } else if (details.reason === "content_filter") {
         finishReason = "content_filter";
       } else {
         return unsupportedCapability("finish-other-unknown");
       }
 
-      this.completed = true;
+      this.tracker.markTerminal();
       const factsResult = captureOutcomeWireFacts(resp, this.outcomeWireOptions, "Responses");
       if (!factsResult.ok) return factsResult;
       this.outcomeWireOptions = factsResult.value;
       const usageResult = parseResponsesUsage(resp.usage);
       if (!usageResult.ok) return usageResult;
-      return ok([
-        {
-          type: "response_end",
-          responseId: this.session.responseId,
-          finish: { reason: finishReason },
-          ...(usageResult.value !== undefined ? { usage: usageResult.value } : {}),
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      this.tracker.responseEnd(events, { reason: finishReason }, usageResult.value);
+      return ok(events);
     }
 
     if (eventName === "response.failed" || eventName === "error") {
@@ -618,7 +482,7 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         string,
         unknown
       >;
-      this.completed = true;
+      this.tracker.markTerminal();
       // Upstream message/code strings are diagnostic-only and bounded; the
       // full bytes remain in Trace.
       const message = typeof err.message === "string" ? err.message : "Responses provider stream error";
@@ -629,88 +493,23 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
           : typeof (chunk.response as Record<string, unknown>)?.id === "string"
             ? ((chunk.response as Record<string, unknown>).id as string)
             : undefined;
-      return ok([
-        {
-          type: "error",
-          responseId: this.session.responseId,
-          failure: {
-            category: "provider",
-            message: truncateProviderErrorString(message),
-            code: code !== undefined ? truncateProviderErrorString(code) : undefined,
-            retryable: false,
-            ...(requestId !== undefined ? { requestId } : {}),
-          },
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      this.tracker.error(events, {
+        category: "provider",
+        message: truncateProviderErrorString(message),
+        code: code !== undefined ? truncateProviderErrorString(code) : undefined,
+        retryable: false,
+        ...(requestId !== undefined ? { requestId } : {}),
+      });
+      return ok(events);
     }
 
     // Unmapped wire event fails closed as an unknown stream event
     return unsupportedCapability("unknown-stream-event");
   }
 
-  private findFunctionItem(
-    key: string | undefined,
-    outputIndex?: number,
-  ):
-    | {
-        entry: {
-          partId: string;
-          callId: string;
-          name: string;
-          outputIndex?: number;
-          arguments: string;
-          deltaCount: number;
-        };
-        key: string;
-      }
-    | undefined {
-    if (key !== undefined) {
-      let match:
-        | {
-            entry: {
-              partId: string;
-              callId: string;
-              name: string;
-              outputIndex?: number;
-              arguments: string;
-              deltaCount: number;
-            };
-            key: string;
-          }
-        | undefined;
-      const direct = this.openFunctionItems.get(key);
-      if (direct !== undefined) {
-        match = { entry: direct, key };
-      } else {
-        for (const [k, v] of this.openFunctionItems) {
-          if (v.callId === key || v.partId === key) {
-            match = { entry: v, key: k };
-            break;
-          }
-        }
-      }
-      if (match === undefined) return undefined;
-      if (
-        outputIndex !== undefined &&
-        match.entry.outputIndex !== undefined &&
-        match.entry.outputIndex !== outputIndex
-      ) {
-        return undefined;
-      }
-      return match;
-    }
-    if (outputIndex !== undefined) {
-      for (const [k, v] of this.openFunctionItems) {
-        if (v.outputIndex === outputIndex) {
-          return { entry: v, key: k };
-        }
-      }
-    }
-    return undefined;
-  }
-
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
-    if (!this.completed) {
+    if (!this.tracker.isTerminal()) {
       return failure({
         category: "stream_interrupted",
         message: "Responses stream ended unexpectedly before completion event",

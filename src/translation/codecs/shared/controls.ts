@@ -9,6 +9,7 @@ import {
   VERBOSITY_VALUES,
   type Verbosity,
 } from "../../ir.ts";
+import type { MatrixRowId } from "../../matrix.ts";
 import { invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 
 /**
@@ -132,7 +133,7 @@ export function firstUnknownKey(obj: Record<string, unknown>, allowed: readonly 
 export function parseUnitIntervalControl(
   field: string,
   value: unknown,
-  capabilityId: string,
+  capabilityId: MatrixRowId,
 ): Result<number | undefined, NormalizedFailure> {
   if (value === undefined) return ok(undefined);
   const parsed = asFiniteNumber(value);

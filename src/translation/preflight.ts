@@ -5,6 +5,7 @@ import { M_IMAGE_MEDIA_TYPES } from "./codecs/shared/media.ts";
 import type { Direction, OutcomeWireOptions, RequestWireOptions } from "./contracts.ts";
 import { unsupportedCapabilityFailure } from "./failures.ts";
 import type { IrInputPart, IrOutcome, IrRequest } from "./ir.ts";
+import type { MatrixRowId } from "./matrix.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import {
   validateMessagesObjectRoot,
@@ -219,7 +220,7 @@ function preflightGenerationControls(req: IrRequest, facts: DirectionFacts): Res
  * dispatch: the decoder has no direction, so every per-row T1/T2/T3 rule for a
  * captured field is enforced here.
  */
-const MESSAGES_FORBIDDEN_REQUEST_OPTIONS: ReadonlyArray<readonly [keyof RequestWireOptions, string]> = [
+const MESSAGES_FORBIDDEN_REQUEST_OPTIONS: ReadonlyArray<readonly [keyof RequestWireOptions, MatrixRowId]> = [
   ["store", "responses-storage"],
   ["promptCacheKey", "prompt-cache-key"],
   ["promptCacheMode", "prompt-cache-mode"],

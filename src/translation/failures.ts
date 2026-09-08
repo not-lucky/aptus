@@ -1,4 +1,5 @@
 import type { NormalizedFailure } from "../domain/operations.ts";
+import type { MatrixRowId } from "./matrix.ts";
 
 /**
  * Maximum characters copied from a single upstream error message or
@@ -41,11 +42,12 @@ export function parseRetryAfterHeaderSeconds(rawRetry?: string): number | undefi
  * This translation-local helper avoids importing `src/routing/failures.ts`
  * to maintain strict layer isolation and prevent dependency cycles.
  *
- * @param capabilityId - Canonical capability identifier from the matrix.
+ * @param capabilityId - Owning matrix row ID; the compile-checked
+ * {@link MatrixRowId} union guarantees the named row exists.
  * @param message - Optional human-readable message.
  * @returns Normalized domain failure with category `unsupported_capability`.
  */
-export function unsupportedCapabilityFailure(capabilityId: string, message?: string): NormalizedFailure {
+export function unsupportedCapabilityFailure(capabilityId: MatrixRowId, message?: string): NormalizedFailure {
   return {
     category: "unsupported_capability",
     message: message ?? `unsupported translation capability: ${capabilityId}`,

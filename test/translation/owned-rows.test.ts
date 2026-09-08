@@ -1,7 +1,9 @@
 /**
- * Matrix tier pinning for every owned capability row, plus the transcript
+ * Behavioral row tests for every owned capability row, plus the transcript
  * structure, outcome envelope, and stream lifecycle rows shared by all six
- * translation directions.
+ * translation directions. Tier data is not restated here: the matrix is the
+ * single tier table, and every capability ID a rejection site names is
+ * compile-checked against it.
  */
 import assert from "node:assert/strict";
 import { test } from "vitest";
@@ -15,10 +17,8 @@ import { MessagesProviderStreamDecoder } from "../../src/translation/codecs/mess
 import { ResponsesEgressEncoder } from "../../src/translation/codecs/responses/egress.ts";
 import { ResponsesIngressDecoder } from "../../src/translation/codecs/responses/ingress.ts";
 import { ResponsesProviderStreamDecoder } from "../../src/translation/codecs/responses/stream.ts";
-import type { Direction } from "../../src/translation/contracts.ts";
 import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
 import type { IrRequest } from "../../src/translation/ir.ts";
-import { getCapabilityRow } from "../../src/translation/matrix.ts";
 import { preflightRequest } from "../../src/translation/preflight.ts";
 import { ALL_DIRECTIONS, sourceBodyFor, translateRequest } from "./owned-rows-helpers.ts";
 
@@ -650,171 +650,6 @@ test.concurrent("row stream-obfuscation: request decoder accepts include_obfusca
   }
 });
 
-// =====================================================================
-// Owned rows — matrix ownership (single assignment, tier vectors)
-// =====================================================================
-
-/** Pinned direction/tier vectors for every owned capability row, in [C→R, C→M, R→C, R→M, M→C, M→R] order. */
-const OWNED_ROW_TIERS: ReadonlyArray<readonly [string, string]> = [
-  // Generation controls
-  ["temperature-0-1", "T1,T1,T1,T1,T1,T1"],
-  ["top-p-0-1", "T1,T1,T1,T1,T1,T1"],
-  ["text-verbosity", "T1,T3,T1,T3,T3,T3"],
-  ["output-token-limit", "T1,T1,T1,T1,T1,T1"],
-  ["stop-sequence-request", "T3,T1,T3,T3,T2,T3"],
-  ["matched-stop-sequence", "T3,T2,T3,T2,T2,T2"],
-  ["reasoning-effort-common", "T1,T3,T1,T3,T3,T3"],
-  // Admitted wire-only mappings
-  ["responses-storage", "T1,T3,T1,T3,T3,T3"],
-  ["prompt-cache-key", "T1,T3,T1,T3,T3,T3"],
-  ["prompt-cache-mode", "T1,T3,T1,T3,T3,T3"],
-  ["prompt-cache-ttl", "T1,T3,T1,T3,T3,T3"],
-  ["prompt-cache-breakpoint", "T1,T2,T1,T2,T2,T2"],
-  ["request-metadata", "T1,T2,T1,T2,T2,T2"],
-  ["safety-identifier", "T1,T3,T1,T3,T3,T3"],
-  ["moderation-policy-result", "T1,T3,T1,T3,T3,T3"],
-  ["service-tier", "T1,T2,T1,T2,T2,T2"],
-  // Usage accounting
-  ["usage-input-output-total", "T1,T1,T1,T1,T1,T1"],
-  ["usage-cache-read", "T1,T1,T1,T1,T1,T1"],
-  ["usage-cache-write", "T1,T1,T1,T1,T1,T1"],
-  ["usage-reasoning", "T1,T1,T1,T1,T1,T1"],
-  ["usage-absence", "T2,T2,T1,T1,T1,T1"],
-  ["usage-stream-timing", "T2,T2,T2,T2,T2,T2"],
-  // Native-only rejections (T3 all directions)
-  ["responses-previous-id", "T3,T3,T3,T3,T3,T3"],
-  ["responses-conversation", "T3,T3,T3,T3,T3,T3"],
-  ["responses-background", "T3,T3,T3,T3,T3,T3"],
-  ["responses-compaction", "T3,T3,T3,T3,T3,T3"],
-  ["responses-reusable-prompt", "T3,T3,T3,T3,T3,T3"],
-  ["responses-item-reference", "T3,T3,T3,T3,T3,T3"],
-  ["responses-websocket-continuation", "T3,T3,T3,T3,T3,T3"],
-  ["anthropic-pause-turn", "T3,T3,T3,T3,T3,T3"],
-  ["anthropic-container-reuse", "T3,T3,T3,T3,T3,T3"],
-  ["cache-billing-semantics", "T3,T3,T3,T3,T3,T3"],
-  ["inference-geography", "T3,T3,T3,T3,T3,T3"],
-  ["truncation-policy", "T3,T3,T3,T3,T3,T3"],
-  ["response-storage-retention", "T3,T3,T3,T3,T3,T3"],
-  ["beta-version-control", "T3,T3,T3,T3,T3,T3"],
-  ["frequency-penalty", "T3,T3,T3,T3,T3,T3"],
-  ["presence-penalty", "T3,T3,T3,T3,T3,T3"],
-  ["top-k", "T3,T3,T3,T3,T3,T3"],
-  ["seed-determinism", "T3,T3,T3,T3,T3,T3"],
-  ["token-logit-bias", "T3,T3,T3,T3,T3,T3"],
-  ["token-logprobs", "T3,T3,T3,T3,T3,T3"],
-  ["chat-predicted-outputs", "T3,T3,T3,T3,T3,T3"],
-  ["responses-max-tool-calls", "T3,T3,T3,T3,T3,T3"],
-  ["responses-include", "T3,T3,T3,T3,T3,T3"],
-  ["responses-reasoning-summary", "T3,T3,T3,T3,T3,T3"],
-  ["anthropic-thinking-display", "T3,T3,T3,T3,T3,T3"],
-  ["reasoning-budget", "T3,T3,T3,T3,T3,T3"],
-  ["reasoning-style-context-mode", "T3,T3,T3,T3,T3,T3"],
-  ["readable-reasoning", "T3,T3,T3,T3,T3,T3"],
-  ["reasoning-signature", "T3,T3,T3,T3,T3,T3"],
-  ["encrypted-reasoning", "T3,T3,T3,T3,T3,T3"],
-  ["redacted-reasoning", "T3,T3,T3,T3,T3,T3"],
-  // Client tool loop
-  ["function-tool-definition", "T1,T2,T1,T2,T1,T1"],
-  ["function-schema-strictness", "T1,T2,T1,T2,T2,T2"],
-  ["tool-choice-none-auto-required", "T1,T2,T1,T2,T2,T2"],
-  ["tool-choice-named", "T1,T1,T1,T1,T1,T1"],
-  ["allowed-tool-subset", "T1,T3,T1,T3,T3,T3"],
-  ["parallel-tool-calls", "T1,T2,T1,T2,T2,T2"],
-  ["function-call-correlation", "T1,T1,T1,T1,T1,T1"],
-  ["function-arguments-complete", "T1,T1,T1,T1,T1,T1"],
-  ["function-arguments-streaming", "T1,T2,T1,T2,T1,T1"],
-  ["tool-stream-delta", "T1,T2,T1,T2,T1,T1"],
-  ["invalid-function-json", "T1,T3,T1,T3,T1,T1"],
-  ["tool-result-text", "T1,T1,T1,T1,T1,T1"],
-  ["tool-result-multipart", "T3,T3,T3,T1,T3,T1"],
-  ["tool-result-error", "T3,T3,T3,T3,T3,T3"],
-  ["custom-text-tool", "T1,T3,T1,T3,T3,T3"],
-  ["custom-grammar-tool", "T1,T3,T1,T3,T3,T3"],
-  ["custom-tool-streaming", "T3,T3,T3,T3,T3,T3"],
-  ["tool-output-schema", "T3,T3,T3,T3,T3,T3"],
-  ["deferred-tools", "T3,T3,T3,T3,T3,T3"],
-  ["allowed-callers", "T3,T3,T3,T2,T3,T2"],
-  ["tool-input-examples", "T3,T3,T3,T3,T3,T3"],
-  ["eager-tool-streaming", "T3,T3,T3,T3,T3,T3"],
-  ["tool-namespaces", "T3,T3,T3,T3,T3,T3"],
-  ["programmatic-tools", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-web-search", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-web-fetch", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-file-search", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-code-execution", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-shell", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-text-editor", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-computer-use", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-image-generation", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-mcp", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-memory", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-apply-patch", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-tool-search", "T3,T3,T3,T3,T3,T3"],
-  ["provider-vector-store", "T3,T3,T3,T3,T3,T3"],
-  ["provider-container", "T3,T3,T3,T3,T3,T3"],
-  ["provider-uploaded-file", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-tool-result-encryption", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-tool-safety-checks", "T3,T3,T3,T3,T3,T3"],
-  ["finish-tool-calls", "T1,T1,T1,T1,T1,T1"],
-  ["usage-server-tools", "T3,T3,T3,T3,T3,T3"],
-  ["chat-legacy-functions", "T3,T3,T3,T3,T3,T3"],
-  ["chat-legacy-function-role", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-web-search-preview", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-computer-use-preview", "T3,T3,T3,T3,T3,T3"],
-  ["hosted-local-shell-preview", "T3,T3,T3,T3,T3,T3"],
-  // Structured output
-  ["structured-json-schema", "T1,T2,T1,T2,T2,T2"],
-  ["structured-strict-guarantee", "T1,T3,T1,T3,T3,T3"],
-  ["structured-name-description", "T1,T2,T1,T2,T2,T2"],
-  ["legacy-json-object", "T1,T3,T1,T3,T3,T3"],
-  // Media, documents, citations (Task 16)
-  ["image-url", "T1,T1,T1,T1,T1,T1"],
-  ["image-inline-bytes", "T1,T2,T1,T2,T1,T1"],
-  ["image-detail-auto-low-high", "T1,T3,T1,T3,T3,T3"],
-  ["image-detail-original", "T3,T3,T3,T3,T3,T3"],
-  ["provider-image-id", "T1,T3,T1,T3,T3,T3"],
-  ["document-url", "T3,T3,T3,T1,T3,T1"],
-  ["document-inline-bytes", "T1,T2,T1,T2,T2,T2"],
-  ["document-inline-text", "T3,T3,T3,T2,T3,T2"],
-  // Tier/behavior exception: the gateway_file IR type fails closed in every
-  // direction (no resolver or file store exists until a documented file
-  // lifecycle lands), so the row's T1/T2 cells are recorded but unrealized.
-  ["gateway-file-reference", "T1,T2,T1,T2,T1,T2"],
-  ["provider-file-id", "T1,T3,T1,T3,T3,T3"],
-  ["document-context-title", "T2,T2,T2,T2,T2,T2"],
-  ["url-citation-source", "T3,T3,T3,T3,T3,T3"],
-  ["file-document-citation-source", "T3,T3,T3,T3,T3,T3"],
-  ["citation-output-span", "T3,T3,T3,T3,T3,T3"],
-  ["citation-document-location", "T3,T3,T3,T3,T3,T3"],
-  // Tier/behavior exception: every client stream encoder rejects citation
-  // events, because no current R↔M case preserves citation source without
-  // locator reconstruction (protocol-ir.md streaming rules: R annotations and
-  // M citations_delta carry incompatible offset/quote requirements). The
-  // unrealized T2 cells await a documented timing-only semantics.
-  ["citation-stream-timing", "T3,T3,T3,T2,T3,T2"],
-  ["citation-stream-event", "T3,T3,T3,T2,T3,T2"],
-  ["audio-input", "T3,T3,T3,T3,T3,T3"],
-  ["audio-output", "T3,T3,T3,T3,T3,T3"],
-  ["audio-streaming", "T3,T3,T3,T3,T3,T3"],
-  ["audio-continuation-id", "T3,T3,T3,T3,T3,T3"],
-  ["request-body-size-limit", "T1,T1,T1,T1,T1,T1"],
-];
-
-test.concurrent("owned rows: each of the 127 rows is single-assigned with the pinned six-direction tier vector", () => {
-  assert.equal(OWNED_ROW_TIERS.length, 127);
-  const seenIds = new Set<string>();
-  for (const [id] of OWNED_ROW_TIERS) {
-    assert.ok(!seenIds.has(id), `Duplicate owned row: ${id}`);
-    seenIds.add(id);
-  }
-  for (const [id, expectedVector] of OWNED_ROW_TIERS) {
-    const row = getCapabilityRow(id);
-    assert.ok(row !== undefined, `missing matrix row for ${id}`);
-    const actualVector = ALL_DIRECTIONS.map(([s, t]) => row.tiers[`${s}->${t}` as Direction]).join(",");
-    assert.equal(actualVector, expectedVector, `tier vector mismatch for ${id}`);
-  }
-});
-
 test.concurrent("post-terminal guards: duplicated stream sentinels fail the provider decoder instead of re-terminating", () => {
   const chat = new ChatProviderStreamDecoder({
     responseId: "resp_dupe_c",
@@ -875,7 +710,8 @@ test.concurrent("post-terminal guards: duplicated stream sentinels fail the prov
   assert.equal(lateStop.ok, false);
   if (!lateStop.ok) {
     assert.equal(lateStop.error.capability, undefined);
-    assert.match(lateStop.error.message, /Messages stream received an event after message_stop/);
+    // The terminal-once guard is owned by the shared StreamShapeTracker.
+    assert.match(lateStop.error.message, /Messages stream received an event after the terminal event/);
   }
 });
 

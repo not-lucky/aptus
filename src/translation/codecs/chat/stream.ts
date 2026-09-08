@@ -17,9 +17,8 @@ import type { IrFinishReason, IrRequest, IrStreamEvent, IrUsage } from "../../ir
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
 import { firstUnknownKey } from "../shared/controls.ts";
-import { parseFunctionArgumentsOnce } from "../shared/hosted-tools.ts";
 import { chatOutputFormatFields } from "../shared/output-format.ts";
-import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
+import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { chatToolFields } from "../shared/tool-fields.ts";
 import { buildChatMessages, chatFinishReason, chatGenerationFields } from "../shared/transcript.ts";
 import { chatUsageBody, parseChatUsage } from "../shared/usage.ts";
@@ -110,6 +109,11 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
 /**
  * Decodes an upstream OpenAI Chat SSE stream into semantic IR stream events.
  *
+ * Wire dispatch only: chunk validation, the in-band error shape, sidecar
+ * capture, and the finish-reason mapping are Chat-specific; all part shape,
+ * call-id dedup, refusal pairing, argument budget, and terminal-once
+ * bookkeeping is delegated to the shared {@link StreamShapeTracker}.
+ *
  * The final usage chunk collapses into `response_end.usage` with its
  * cache/reasoning subdivisions (`usage-stream-timing`). The service-tier echo
  * and moderation result are documented optional fields on every chunk and are
@@ -117,25 +121,13 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
  */
 export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "openai-chat" as const;
-  private readonly session: StreamSession;
-  private readonly budget: StreamToolArgumentsBudget;
-  private responseStartEmitted = false;
-  private openTextPartId: string | undefined;
-  private openRefusalPartId: string | undefined;
-  private sawRefusal = false;
-  private readonly seenCallIds = new Set<string>();
-  private readonly openToolParts = new Map<
-    number,
-    { partId: string; callId: string; name: string; arguments: string }
-  >();
-  private sawDone = false;
+  private readonly tracker: StreamShapeTracker;
   private finishReason: IrFinishReason | undefined;
   private pendingUsage: IrUsage | undefined;
   private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(session: StreamSession, maxArgumentBytes?: number) {
-    this.session = session;
-    this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
+    this.tracker = new StreamShapeTracker({ session, maxArgumentBytes, wireLabel: "Chat" });
   }
 
   getOutcomeWireOptions(): OutcomeWireOptions {
@@ -146,23 +138,17 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
     // The success terminator already went out on [DONE]; any later frame is a
     // misbehaving provider stream and fails closed instead of re-emitting a
     // second terminal event.
-    if (this.sawDone) {
-      return invalidRequest("Chat stream received frame after the [DONE] sentinel");
-    }
+    const guard = this.tracker.guardFrame();
+    if (!guard.ok) return guard;
 
     const trimmedData = frame.data.trim();
     if (trimmedData === "[DONE]") {
-      this.sawDone = true;
-      const events: IrStreamEvent[] = [];
+      this.tracker.markTerminal();
+      const doneEvents: IrStreamEvent[] = [];
       if (this.finishReason !== undefined) {
-        events.push({
-          type: "response_end",
-          responseId: this.session.responseId,
-          finish: { reason: this.finishReason },
-          ...(this.pendingUsage !== undefined ? { usage: this.pendingUsage } : {}),
-        });
+        this.tracker.responseEnd(doneEvents, { reason: this.finishReason }, this.pendingUsage);
       }
-      return ok(events);
+      return ok(doneEvents);
     }
 
     let rawChunk: unknown;
@@ -238,14 +224,7 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
       return unsupportedCapability("multiple-candidates");
     }
 
-    if (!this.responseStartEmitted) {
-      events.push({
-        type: "response_start",
-        responseId: this.session.responseId,
-        model: this.session.model,
-      });
-      this.responseStartEmitted = true;
-    }
+    this.tracker.ensureStarted(events);
 
     const rawDelta = choice.delta;
     if (rawDelta !== undefined && rawDelta !== null) {
@@ -276,7 +255,8 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
             return invalidRequest("delta.tool_calls type must be 'function' when present");
           }
 
-          const existing = this.openToolParts.get(toolCall.index);
+          const slot = `tool:${toolCall.index}`;
+          const existing = this.tracker.openFunctionPartInfo(slot);
           if (existing !== undefined) {
             if (typeof toolCall.id === "string" && toolCall.id !== existing.callId) {
               return invalidRequest("delta.tool_calls id cannot change on existing index");
@@ -296,25 +276,19 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
               return invalidRequest("delta.tool_calls name cannot change on existing index");
             }
             if (typeof fnObj?.arguments === "string" && fnObj.arguments.length > 0) {
-              const claimRes = this.budget.claim(fnObj.arguments);
-              if (!claimRes.ok) return claimRes;
-              existing.arguments += fnObj.arguments;
-              events.push({
-                type: "tool_arguments_delta",
-                responseId: this.session.responseId,
-                partId: existing.partId,
-                callId: existing.callId,
-                text: fnObj.arguments,
-              });
+              const deltaRes = this.tracker.toolArgumentsDelta(
+                events,
+                slot,
+                fnObj.arguments,
+                typeof toolCall.id === "string" ? toolCall.id : undefined,
+              );
+              if (!deltaRes.ok) return deltaRes;
             } else if (fnObj?.arguments !== undefined && typeof fnObj.arguments !== "string") {
               return invalidRequest("delta.tool_calls function.arguments must be a string");
             }
           } else {
             if (typeof toolCall.id !== "string" || toolCall.id.trim() === "") {
               return invalidRequest("tool_calls id must be a non-empty string");
-            }
-            if (this.seenCallIds.has(toolCall.id)) {
-              return invalidRequest(`Duplicate tool_call id '${toolCall.id}'`);
             }
             const rawFnObj = toolCall.function;
             if (!isPlainObject(rawFnObj)) {
@@ -328,27 +302,13 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
             if (typeof fnObj?.name !== "string" || fnObj.name.trim() === "") {
               return invalidRequest("tool_calls function.name must be a non-empty string");
             }
-            this.seenCallIds.add(toolCall.id);
-            const partId = this.session.createPartId();
-            const tool = { partId, callId: toolCall.id, name: fnObj.name, arguments: "" };
-            this.openToolParts.set(toolCall.index, tool);
-            events.push({
-              type: "part_start",
-              responseId: this.session.responseId,
-              partId,
-              part: { type: "function_call", callId: toolCall.id, name: fnObj.name },
+            const openRes = this.tracker.openFunctionPart(events, slot, toolCall.id, fnObj.name, {
+              dedupCallId: true,
             });
+            if (!openRes.ok) return openRes;
             if (typeof fnObj.arguments === "string" && fnObj.arguments.length > 0) {
-              const claimRes = this.budget.claim(fnObj.arguments);
-              if (!claimRes.ok) return claimRes;
-              tool.arguments += fnObj.arguments;
-              events.push({
-                type: "tool_arguments_delta",
-                responseId: this.session.responseId,
-                partId,
-                callId: toolCall.id,
-                text: fnObj.arguments,
-              });
+              const deltaRes = this.tracker.toolArgumentsDelta(events, slot, fnObj.arguments);
+              if (!deltaRes.ok) return deltaRes;
             } else if (fnObj.arguments !== undefined && typeof fnObj.arguments !== "string") {
               return invalidRequest("tool_calls function.arguments must be a string");
             }
@@ -361,23 +321,8 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
         if (typeof delta.refusal !== "string") {
           return invalidRequest("delta.refusal must be a string when present");
         }
-        this.sawRefusal = true;
-        if (this.openRefusalPartId === undefined) {
-          const partId = this.session.createPartId();
-          this.openRefusalPartId = partId;
-          events.push({
-            type: "part_start",
-            responseId: this.session.responseId,
-            partId,
-            part: { type: "refusal" },
-          });
-        }
-        events.push({
-          type: "refusal_delta",
-          responseId: this.session.responseId,
-          partId: this.openRefusalPartId,
-          text: delta.refusal,
-        });
+        const refusalRes = this.tracker.refusalDelta(events, "refusal", delta.refusal);
+        if (!refusalRes.ok) return refusalRes;
       }
 
       if (delta.content !== undefined && delta.content !== null) {
@@ -385,26 +330,21 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
           return invalidRequest("delta.content must be a string when present");
         }
         if (delta.content.length > 0) {
-          const partId = this.openTextPartId ?? this.startTextPart(events);
-          events.push({
-            type: "text_delta",
-            responseId: this.session.responseId,
-            partId,
-            text: delta.content,
-          });
+          const textRes = this.tracker.textDelta(events, "text", delta.content, { lazy: true });
+          if (!textRes.ok) return textRes;
         }
-      } else if (delta.role === "assistant" && this.openTextPartId === undefined) {
-        this.startTextPart(events);
+      } else if (delta.role === "assistant" && this.tracker.partIdOf("text") === undefined) {
+        this.tracker.openTextPart(events, "text", "reuse-typed");
       }
     }
 
     if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
       if (choice.finish_reason === "stop") {
-        this.finishReason = this.sawRefusal ? "refusal" : "stop";
+        this.finishReason = this.tracker.sawRefusal() ? "refusal" : "stop";
       } else if (choice.finish_reason === "length") {
         this.finishReason = "length";
       } else if (choice.finish_reason === "tool_calls") {
-        if (this.sawRefusal) {
+        if (this.tracker.sawRefusal()) {
           return invalidRequest("Chat stream encountered both refusal and tool_calls");
         }
         this.finishReason = "tool_calls";
@@ -414,54 +354,24 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
         return unsupportedCapability("finish-other-unknown");
       }
 
-      if (this.openTextPartId !== undefined) {
-        events.push({
-          type: "part_end",
-          responseId: this.session.responseId,
-          partId: this.openTextPartId,
-          partType: "text",
-        });
-        this.openTextPartId = undefined;
+      const textPartId = this.tracker.partIdOf("text");
+      if (textPartId !== undefined) {
+        const closeRes = this.tracker.closePart(events, "text", "text");
+        if (!closeRes.ok) return closeRes;
       }
-      if (this.openRefusalPartId !== undefined) {
-        events.push({
-          type: "part_end",
-          responseId: this.session.responseId,
-          partId: this.openRefusalPartId,
-          partType: "refusal",
-        });
-        this.openRefusalPartId = undefined;
+      const refusalPartId = this.tracker.partIdOf("refusal");
+      if (refusalPartId !== undefined) {
+        const closeRes = this.tracker.closePart(events, "refusal", "refusal");
+        if (!closeRes.ok) return closeRes;
       }
-      for (const tool of this.openToolParts.values()) {
-        const parsed = parseFunctionArgumentsOnce(tool.arguments);
-        events.push({
-          type: "part_end",
-          responseId: this.session.responseId,
-          partId: tool.partId,
-          partType: "function_call",
-          ...(parsed !== undefined ? { arguments: parsed } : {}),
-        });
-      }
-      this.openToolParts.clear();
+      this.tracker.closeAllFunctionParts(events);
     }
 
     return ok(events);
   }
 
-  private startTextPart(events: IrStreamEvent[]): string {
-    const partId = this.session.createPartId();
-    this.openTextPartId = partId;
-    events.push({
-      type: "part_start",
-      responseId: this.session.responseId,
-      partId,
-      part: { type: "text" },
-    });
-    return partId;
-  }
-
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
-    if (!this.sawDone) {
+    if (!this.tracker.isTerminal()) {
       return failure({
         category: "stream_interrupted",
         message: "Chat stream ended unexpectedly before receiving [DONE] sentinel",

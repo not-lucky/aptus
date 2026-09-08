@@ -16,8 +16,8 @@ import { truncateProviderErrorString } from "../../failures.ts";
 import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
-import { parseFunctionArgumentsOnce } from "../shared/hosted-tools.ts";
 import { buildMessagesRequestBody } from "../shared/messages-request.ts";
+import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
 import { messagesStopReason } from "../shared/transcript.ts";
 import {
@@ -78,6 +78,11 @@ export class MessagesStreamRequestEncoder implements StreamRequestEncoder {
 /**
  * Decodes an upstream Anthropic Messages SSE stream into semantic IR stream events.
  *
+ * Wire dispatch only: event-name matching, block validation, stop-reason
+ * mapping, and cumulative usage accounting are Messages-specific; all part
+ * shape, block-index dedup, argument budget, and terminal-once bookkeeping is
+ * delegated to the shared {@link StreamShapeTracker} keyed by block index.
+ *
  * Provider-owned reasoning blocks fail closed at discovery. The matched stop
  * sequence reported on `message_delta` is captured into
  * `response_end.finish.stopSequence` (echoed only by the M client encoder), and
@@ -85,23 +90,14 @@ export class MessagesStreamRequestEncoder implements StreamRequestEncoder {
  */
 export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "anthropic-messages" as const;
-  private readonly session: StreamSession;
-  private readonly budget: StreamToolArgumentsBudget;
-  private readonly partIndexMap = new Map<number, string>();
-  private readonly openToolBlocks = new Map<
-    number,
-    { partId: string; callId: string; name: string; arguments: string }
-  >();
-  private readonly seenIndices = new Set<number>();
+  private readonly tracker: StreamShapeTracker;
   private readonly usageState: MessagesUsageAccumulator = { sawUsage: false };
   private recordedFinish: IrFinishReason | undefined;
   private recordedStopSequence: string | undefined;
-  private sawMessageStop = false;
   private outcomeWireOptions: OutcomeWireOptions = {};
 
   constructor(session: StreamSession, maxArgumentBytes?: number) {
-    this.session = session;
-    this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
+    this.tracker = new StreamShapeTracker({ session, maxArgumentBytes, wireLabel: "Messages" });
   }
 
   getOutcomeWireOptions(): OutcomeWireOptions {
@@ -112,9 +108,8 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     // The success terminator already went out on message_stop; any later frame
     // is a misbehaving provider stream and fails closed instead of re-emitting
     // a second terminal event.
-    if (this.sawMessageStop) {
-      return invalidRequest("Messages stream received an event after message_stop");
-    }
+    const guard = this.tracker.guardFrame();
+    if (!guard.ok) return guard;
 
     if (frame.event === undefined || frame.event.trim() === "") {
       return invalidRequest("Messages stream frame missing named 'event'");
@@ -157,28 +152,24 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         }
       }
 
-      return ok([
-        {
-          type: "response_start",
-          responseId: this.session.responseId,
-          model: this.session.model,
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      const startRes = this.tracker.start(events);
+      if (!startRes.ok) return startRes;
+      return ok(events);
     }
 
     if (eventName === "content_block_start") {
       const indexRes = parseContentBlockIndex(chunk);
       if (!indexRes.ok) return indexRes;
       const index = indexRes.value;
-      if (this.seenIndices.has(index)) {
-        return invalidRequest(`Messages stream content_block index '${index}' reused`);
-      }
-      this.seenIndices.add(index);
+      const claimRes = this.tracker.claimIdentity(`block:${index}`);
+      if (!claimRes.ok) return claimRes;
       const rawBlock = chunk.content_block;
       if (!isPlainObject(rawBlock)) {
         return invalidRequest("content_block_start requires content_block object");
       }
       const block = rawBlock as Record<string, unknown>;
+      const slot = `block:${index}`;
 
       // Provider-owned reasoning blocks fail closed at discovery.
       if (block?.type === "thinking") {
@@ -199,17 +190,10 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         if (block.input !== undefined && !isPlainObject(block.input)) {
           return invalidRequest("tool_use input must be an object");
         }
-        const partId = this.session.createPartId();
-        this.openToolBlocks.set(index, { partId, callId: block.id, name: block.name, arguments: "" });
-        this.partIndexMap.set(index, partId);
-        return ok([
-          {
-            type: "part_start",
-            responseId: this.session.responseId,
-            partId,
-            part: { type: "function_call", callId: block.id, name: block.name },
-          },
-        ]);
+        const events: IrStreamEvent[] = [];
+        const openRes = this.tracker.openFunctionPart(events, slot, block.id, block.name);
+        if (!openRes.ok) return openRes;
+        return ok(events);
       }
       if (block?.type === "server_tool_use") return failure(messagesServerToolUseFailure(block));
       const hosted = messagesHostedBlockFailure(block);
@@ -221,17 +205,9 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         return unsupportedCapability("reasoning-signature");
       }
 
-      const partId = this.session.createPartId();
-      this.partIndexMap.set(index, partId);
-
-      return ok([
-        {
-          type: "part_start",
-          responseId: this.session.responseId,
-          partId,
-          part: { type: "text" },
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      this.tracker.openTextPart(events, slot, "force-new");
+      return ok(events);
     }
 
     if (eventName === "content_block_delta") {
@@ -243,31 +219,15 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         return invalidRequest("content_block_delta requires delta object");
       }
       const delta = rawDelta as Record<string, unknown>;
+      const slot = `block:${index}`;
+      const events: IrStreamEvent[] = [];
       if (delta?.type === "input_json_delta") {
-        const tool = this.openToolBlocks.get(index);
-        if (tool === undefined) {
-          return invalidRequest("input_json_delta received for unknown or non-tool index");
-        }
         if (typeof delta.partial_json !== "string") {
           return invalidRequest("input_json_delta partial_json must be a string");
         }
-        const claimRes = this.budget.claim(delta.partial_json);
-        if (!claimRes.ok) return claimRes;
-        tool.arguments += delta.partial_json;
-        return ok([
-          {
-            type: "tool_arguments_delta",
-            responseId: this.session.responseId,
-            partId: tool.partId,
-            callId: tool.callId,
-            text: delta.partial_json,
-          },
-        ]);
-      }
-
-      const partId = this.partIndexMap.get(index);
-      if (partId === undefined) {
-        return invalidRequest(`content_block_delta received for unknown index '${index}'`);
+        const deltaRes = this.tracker.toolArgumentsDelta(events, slot, delta.partial_json);
+        if (!deltaRes.ok) return deltaRes;
+        return ok(events);
       }
 
       if (delta?.type === "citations_delta") {
@@ -275,16 +235,14 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         if (!cit || typeof cit !== "object") {
           return invalidRequest("citations_delta missing citation object");
         }
+        if (this.tracker.partIdOf(slot) === undefined) {
+          return invalidRequest(`content_block_delta received for unknown index '${index}'`);
+        }
         const parsed = parseMessagesCitation(cit);
         if (!parsed.ok) return parsed;
-        return ok([
-          {
-            type: "citation",
-            responseId: this.session.responseId,
-            partId,
-            citation: parsed.value,
-          },
-        ]);
+        const citationRes = this.tracker.citation(events, slot, parsed.value);
+        if (!citationRes.ok) return citationRes;
+        return ok(events);
       }
 
       if (delta?.type !== "text_delta") {
@@ -294,51 +252,24 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
       if (typeof delta.text !== "string") {
         return invalidRequest("text_delta: delta.text must be a string");
       }
-      const text = delta.text;
-      return ok([
-        {
-          type: "text_delta",
-          responseId: this.session.responseId,
-          partId,
-          text,
-        },
-      ]);
+      const textRes = this.tracker.textDelta(events, slot, delta.text);
+      if (!textRes.ok) return textRes;
+      return ok(events);
     }
 
     if (eventName === "content_block_stop") {
       const indexRes = parseContentBlockIndex(chunk);
       if (!indexRes.ok) return indexRes;
       const index = indexRes.value;
-      const tool = this.openToolBlocks.get(index);
-      if (tool !== undefined) {
-        const parsed = parseFunctionArgumentsOnce(tool.arguments);
-        this.openToolBlocks.delete(index);
-        this.partIndexMap.delete(index);
-        return ok([
-          {
-            type: "part_end",
-            responseId: this.session.responseId,
-            partId: tool.partId,
-            partType: "function_call",
-            ...(parsed !== undefined ? { arguments: parsed } : {}),
-          },
-        ]);
-      }
-
-      const partId = this.partIndexMap.get(index);
-      if (partId === undefined) {
+      const slot = `block:${index}`;
+      const partType = this.tracker.partTypeOf(slot);
+      if (partType === undefined) {
         return invalidRequest(`content_block_stop received for unknown index '${index}'`);
       }
-
-      this.partIndexMap.delete(index);
-      return ok([
-        {
-          type: "part_end",
-          responseId: this.session.responseId,
-          partId,
-          partType: "text",
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      const closeRes = this.tracker.closePart(events, slot, partType);
+      if (!closeRes.ok) return closeRes;
+      return ok(events);
     }
 
     if (eventName === "message_delta") {
@@ -399,7 +330,7 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     }
 
     if (eventName === "message_stop") {
-      this.sawMessageStop = true;
+      this.tracker.markTerminal();
       // Presence parity with the complete path: once any usage record was seen,
       // both billing totals must have been reported. Collapsing a partial record
       // would fabricate zero totals, violating absence-vs-zero non-fabrication.
@@ -413,22 +344,21 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
         return invalidRequest("message_stop received without a terminal stop_reason");
       }
       const usage = collapseMessagesUsage(this.usageState);
-      return ok([
+      const events: IrStreamEvent[] = [];
+      this.tracker.responseEnd(
+        events,
         {
-          type: "response_end",
-          responseId: this.session.responseId,
-          finish: {
-            reason: this.recordedFinish,
-            ...(this.recordedStopSequence !== undefined ? { stopSequence: this.recordedStopSequence } : {}),
-          },
-          ...(usage !== undefined ? { usage } : {}),
+          reason: this.recordedFinish,
+          ...(this.recordedStopSequence !== undefined ? { stopSequence: this.recordedStopSequence } : {}),
         },
-      ]);
+        usage,
+      );
+      return ok(events);
     }
 
     if (eventName === "error") {
       const err = (chunk.error ?? {}) as Record<string, unknown>;
-      this.sawMessageStop = true;
+      this.tracker.markTerminal();
       // Upstream message/type strings are diagnostic-only and bounded; the
       // full bytes remain in Trace.
       const message = typeof err.message === "string" ? err.message : "Messages provider stream error";
@@ -439,26 +369,22 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
           : typeof chunk.request_id === "string"
             ? (chunk.request_id as string)
             : undefined;
-      return ok([
-        {
-          type: "error",
-          responseId: this.session.responseId,
-          failure: {
-            category: "provider",
-            message: truncateProviderErrorString(message),
-            code: code !== undefined ? truncateProviderErrorString(code) : undefined,
-            retryable: false,
-            ...(requestId !== undefined ? { requestId } : {}),
-          },
-        },
-      ]);
+      const events: IrStreamEvent[] = [];
+      this.tracker.error(events, {
+        category: "provider",
+        message: truncateProviderErrorString(message),
+        code: code !== undefined ? truncateProviderErrorString(code) : undefined,
+        retryable: false,
+        ...(requestId !== undefined ? { requestId } : {}),
+      });
+      return ok(events);
     }
 
     return unsupportedCapability("unknown-stream-event");
   }
 
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
-    if (!this.sawMessageStop) {
+    if (!this.tracker.isTerminal()) {
       return failure({
         category: "stream_interrupted",
         message: "Messages stream ended unexpectedly before message_stop",
