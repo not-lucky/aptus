@@ -1,28 +1,10 @@
-import type {
-  AttemptObservation,
-  GatewayRequest,
-  GatewayResult,
-  JsonValue,
-  ProviderResponse,
-} from "../domain/contracts.ts";
+import type { AttemptObservation, GatewayRequest, GatewayResult, ProviderResponse } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { Direction, TranslationCoordinator } from "../translation/contracts.ts";
-import { createSseDecoder, createSseEncoder } from "../translation/sse.ts";
-import { TranslatedStreamPump } from "../translation/stream-pump.ts";
-import { createIrStreamStateMachine } from "../translation/stream-state.ts";
-import {
-  type AttemptContext,
-  acquireLease,
-  classifyAbortReason,
-  finishAttempt,
-  parseJsonBytes,
-  recordCancellation,
-} from "./attempt.ts";
+import { type AttemptContext, dispatchOneAttempt, finishAttempt } from "./attempt.ts";
 import type { CandidateDescriptor } from "./candidates.ts";
-import { dispatchFailure, failureJson } from "./failures.ts";
-import { relayTranslatedStream } from "./translated-stream-relay.ts";
-
-const utf8Encoder = new TextEncoder();
+import { createTranslatedPreparer } from "./translated-preparer.ts";
+import { bootstrapTranslatedStream, relayTranslatedStream } from "./translated-stream-relay.ts";
 
 /**
  * Outcome of one cross-protocol streaming attempt.
@@ -48,9 +30,16 @@ export type TranslatedStreamAttemptOutcome =
 /**
  * Executes a streaming translated attempt with pre-header bootstrap decoding.
  *
- * Pre-dispatch decode/validation/preflight failures return with zero lease and zero dispatch.
- * Early decode/frame errors before client headers are emitted are treated as dispatch failures,
- * permitting normal candidate retry and fallback.
+ * Dispatch mechanics (lease, dispatch, classify) are owned by the shared
+ * `dispatchOneAttempt` core; pump plus sink creation and the pre-header loop
+ * are owned by the relay module's `bootstrapTranslatedStream`. This module
+ * only binds the translation ticket to a session and settles the single key
+ * observation.
+ *
+ * Pre-dispatch decode/validation/preflight failures return with zero lease and
+ * zero dispatch. Early decode/frame errors before client headers are emitted
+ * are treated as dispatch failures, permitting normal candidate retry and
+ * fallback.
  */
 export async function executeTranslatedStreamAttempt(
   candidate: CandidateDescriptor,
@@ -58,166 +47,16 @@ export async function executeTranslatedStreamAttempt(
   ctx: AttemptContext,
   translation: TranslationCoordinator,
 ): Promise<TranslatedStreamAttemptOutcome> {
-  // 1. Request translation (decode -> validate -> preflight -> encode) BEFORE any key lease
-  const targetDefaultMaxTokens = candidate.model.defaults?.max_tokens;
-  const translated = translation.translateStreamRequest({
-    sourceProtocol: request.protocol,
-    targetProtocol: candidate.provider.protocol,
-    sourceBody: request.body,
-    logicalModel: request.canonicalPublicName,
-    targetModel: candidate.model.upstreamModel,
-    targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
-  });
-
-  if (!translated.ok) {
-    await ctx.trace.recordJson("ir_request", {
-      ok: false,
-      failure: failureJson(translated.error),
-    });
-    await ctx.trace.recordJson("translation_failure", failureJson(translated.error));
-    return { kind: "prepare_failed", failure: translated.error };
-  }
-
-  await ctx.trace.recordJson("ir_request", {
-    ok: true,
-    ir: translated.value.irRequest as unknown as JsonValue,
-  });
-  await ctx.trace.recordJson("translation_egress", { ok: true });
-
-  if (request.signal.aborted) {
-    const reason = classifyAbortReason(request.signal);
-    if (reason === "timeout") {
-      return { kind: "deadline_exceeded" };
-    }
-    await recordCancellation(ctx, request, "routing", reason);
-    return { kind: "cancelled", phase: "routing" };
-  }
-
-  // 2. Key acquisition
-  const acquired = await acquireLease(candidate, request, ctx);
-  if (acquired.kind !== "lease") {
-    if (acquired.kind === "unavailable") return { kind: "key_unavailable" };
-    if (acquired.kind === "deadline") return { kind: "deadline_exceeded" };
-    return { kind: "cancelled", phase: acquired.phase };
-  }
-  const lease = acquired.lease;
-  const attemptNumber = ctx.nextAttemptNumber();
-
-  await ctx.trace.recordJson("key_selection", {
-    provider: candidate.provider.name,
-    strategy: candidate.provider.keyStrategy,
-    keyName: lease.keyName,
-  });
-  ctx.observer.keySelected({
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    provider: candidate.provider.name,
-    keyName: lease.keyName,
-    strategy: candidate.provider.keyStrategy,
-  });
-
-  // 3. Prepare translated provider request with stream: true
-  const prepared = translation.prepareTranslatedProviderRequest({
-    providerName: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-    baseUrl: candidate.provider.baseUrl,
-    clientHeaders: request.headers,
-    providerHeaders: candidate.provider.headers,
-    providerSecret: lease.secret,
-    body: translated.value.body,
-    deadlineMs: ctx.deadlineMs,
-    streamIdleMs: ctx.streamIdleMs,
-    stream: true,
-  });
-
-  await ctx.trace.recordJson("provider_request", {
-    provider: prepared.provider,
-    protocol: prepared.protocol,
-    url: prepared.url,
-    headers: prepared.headers,
-    body: parseJsonBytes(prepared.body),
-  });
-
-  ctx.observer.attemptStarted({
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    candidateIndex: candidate.index,
-    provider: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-    stream: true,
-  });
-  ctx.observer.observe({
-    type: "attempt_started",
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    candidateIndex: candidate.index,
-    provider: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-  });
-
-  // 4. Dispatch with cancellation awareness
   const dispatchStarted = ctx.clock.nowMonotonicMs();
-  let response: ProviderResponse;
-  try {
-    response = await ctx.dispatcher.dispatch(prepared, request.signal);
-  } catch (error) {
-    const durationMs = ctx.clock.nowMonotonicMs() - dispatchStarted;
-    if (request.signal.aborted) {
-      const reason = classifyAbortReason(request.signal);
-      if (reason === "timeout") {
-        finishAttempt(
-          ctx,
-          request,
-          candidate,
-          lease,
-          attemptNumber,
-          { result: "timeout", beforeClientBytes: true },
-          undefined,
-          durationMs,
-          false,
-        );
-        return { kind: "deadline_exceeded" };
-      }
-      finishAttempt(
-        ctx,
-        request,
-        candidate,
-        lease,
-        attemptNumber,
-        { result: "client_cancelled", beforeClientBytes: true },
-        undefined,
-        durationMs,
-        false,
-      );
-      await recordCancellation(ctx, request, "dispatch", reason);
-      return { kind: "cancelled", phase: "dispatch" };
-    }
-    const failure = dispatchFailure(error);
-    finishAttempt(
-      ctx,
-      request,
-      candidate,
-      lease,
-      attemptNumber,
-      { result: failure.category, beforeClientBytes: true },
-      undefined,
-      durationMs,
-      false,
-    );
-    return { kind: "dispatch_failed", failure };
+
+  const dispatched = await dispatchOneAttempt(candidate, request, ctx, createTranslatedPreparer(translation, true));
+
+  if (dispatched.kind !== "dispatched") {
+    return dispatched;
   }
+  const { response, observation, lease, attemptNumber, dispatchDurationMs } = dispatched;
 
-  const dispatchDurationMs = ctx.clock.nowMonotonicMs() - dispatchStarted;
-
-  await ctx.trace.recordJson("provider_response_head", {
-    status: response.status,
-    headers: response.headers,
-    finalUrl: response.finalUrl,
-  });
-
-  const observation = ctx.adapters[candidate.provider.protocol].classify(response, ctx.clock.nowWall().getTime());
-
-  // Non-2xx response head follows normal retry/fallback policy (decided by Gateway)
+  // Non-2xx response head follows normal retry/fallback policy (decided by Gateway).
   if (observation.result !== "success") {
     const cooldownMs = finishAttempt(
       ctx,
@@ -230,167 +69,37 @@ export async function executeTranslatedStreamAttempt(
       dispatchDurationMs,
       false,
     );
-    return {
-      kind: "response",
-      response,
-      observation,
-      cooldownMs,
-      attemptNumber,
-    };
+    return { kind: "response", response, observation, cooldownMs, attemptNumber };
   }
 
-  // 5. 2xx success: Bootstrap stream decoding before committing client headers
-  const sessionBundle = translation.createStreamSession({
-    sourceProtocol: request.protocol,
-    targetProtocol: candidate.provider.protocol,
-    logicalModel: request.canonicalPublicName,
-    sourceWireOptions: translated.value.sourceWireOptions,
-  });
+  // 2xx success: bind the ticket carried in the dispatched payload to a
+  // session, then hand pump ownership to the relay module for pre-header
+  // bootstrap.
+  const sessionBundle = translation.createTicketSession(dispatched.pre);
 
-  const sseDecoder = createSseDecoder();
-  const sseEncoder = createSseEncoder();
-  const stateMachine = createIrStreamStateMachine({
-    expectedResponseId: sessionBundle.session.responseId,
-    expectedModel: sessionBundle.session.model,
+  const bootstrap = await bootstrapTranslatedStream({
+    trace: ctx.trace,
+    response,
+    sessionBundle,
     direction: `${request.protocol}->${candidate.provider.protocol}` as Direction,
   });
-
-  const providerSink = ctx.trace.openBytes("provider_stream");
-  const irEventsSink = ctx.trace.openBytes("ir_events");
-
-  const pump = new TranslatedStreamPump(
-    sseDecoder,
-    sseEncoder,
-    sessionBundle.providerDecoder,
-    stateMachine,
-    sessionBundle.clientEncoder,
-    (evt) => {
-      void irEventsSink.append(utf8Encoder.encode(`${JSON.stringify(evt)}\n`));
-    },
-  );
-
-  const discardTraceSinks = async (): Promise<void> => {
-    await providerSink.discard().catch(() => undefined);
-    await irEventsSink.discard().catch(() => undefined);
-  };
-
-  const reader = response.body.getReader();
-  const initialClientChunks: Uint8Array[] = [];
-  let isInitialComplete = false;
-
-  while (initialClientChunks.length === 0 && !isInitialComplete) {
-    let chunkResult: { done: boolean; value?: Uint8Array };
-    try {
-      chunkResult = await reader.read();
-    } catch (readErr) {
-      await discardTraceSinks();
-      const failure = dispatchFailure(readErr);
-      finishAttempt(
-        ctx,
-        request,
-        candidate,
-        lease,
-        attemptNumber,
-        { result: failure.category, beforeClientBytes: true },
-        response.status,
-        dispatchDurationMs,
-        false,
-      );
-      return { kind: "dispatch_failed", failure };
-    }
-
-    if (chunkResult.done) {
-      isInitialComplete = true;
-
-      const finishResult = pump.finish();
-      if (!finishResult.ok) {
-        await discardTraceSinks();
-        finishAttempt(
-          ctx,
-          request,
-          candidate,
-          lease,
-          attemptNumber,
-          { result: finishResult.error.category, beforeClientBytes: true },
-          response.status,
-          dispatchDurationMs,
-          false,
-        );
-        return { kind: "dispatch_failed", failure: finishResult.error };
-      }
-      initialClientChunks.push(...finishResult.value);
-
-      const pumpFailure = pump.getFailure();
-      // Zero-prior-bytes split: headers are not sent yet, so an in-band
-      // failure here returns dispatch_failed (retryable across candidates).
-      // Once client bytes exist the relay owns the stream and the same failure
-      // closes it post-headers instead.
-      if (pumpFailure !== undefined && initialClientChunks.length === 0) {
-        await discardTraceSinks();
-        finishAttempt(
-          ctx,
-          request,
-          candidate,
-          lease,
-          attemptNumber,
-          { result: pumpFailure.category, beforeClientBytes: true },
-          response.status,
-          dispatchDurationMs,
-          false,
-        );
-        return { kind: "dispatch_failed", failure: pumpFailure };
-      }
-
-      if (!pump.isTerminal()) {
-        await discardTraceSinks();
-        const failure = {
-          category: "stream_interrupted" as const,
-          message: "Upstream stream ended abruptly before reaching a terminal state",
-          retryable: false,
-        };
-        finishAttempt(
-          ctx,
-          request,
-          candidate,
-          lease,
-          attemptNumber,
-          { result: "stream_interrupted", beforeClientBytes: true },
-          response.status,
-          dispatchDurationMs,
-          false,
-        );
-        return { kind: "dispatch_failed", failure };
-      }
-
-      break;
-    }
-
-    // Chunk received from provider
-    if (chunkResult.value !== undefined && chunkResult.value.length > 0) {
-      void providerSink.append(chunkResult.value);
-
-      const pushResult = pump.pushBytes(chunkResult.value);
-      if (!pushResult.ok) {
-        await discardTraceSinks();
-        await reader.cancel().catch(() => undefined);
-        finishAttempt(
-          ctx,
-          request,
-          candidate,
-          lease,
-          attemptNumber,
-          { result: pushResult.error.category, beforeClientBytes: true },
-          response.status,
-          dispatchDurationMs,
-          false,
-        );
-        return { kind: "dispatch_failed", failure: pushResult.error };
-      }
-      initialClientChunks.push(...pushResult.value);
-    }
+  if (bootstrap.kind === "failure") {
+    finishAttempt(
+      ctx,
+      request,
+      candidate,
+      lease,
+      attemptNumber,
+      { result: bootstrap.failure.category, beforeClientBytes: true },
+      response.status,
+      dispatchDurationMs,
+      false,
+    );
+    return { kind: "dispatch_failed", failure: bootstrap.failure };
   }
 
-  // 6. Bootstrap succeeded: construct streaming relay and transfer ownership
+  // Bootstrap succeeded: single success observation, then transfer byte
+  // ownership to the relay.
   finishAttempt(
     ctx,
     request,
@@ -414,16 +123,13 @@ export async function executeTranslatedStreamAttempt(
     canonicalName: request.canonicalPublicName,
     pricing: candidate.model.pricing ?? null,
     requestSignal: request.signal,
-    reader,
-    pump,
-    providerSink,
-    irEventsSink,
-    initialClientChunks,
-    isInitialComplete,
+    reader: bootstrap.reader,
+    pump: bootstrap.pump,
+    providerSink: bootstrap.providerSink,
+    irEventsSink: bootstrap.irEventsSink,
+    initialClientChunks: bootstrap.initialClientChunks,
+    isInitialComplete: bootstrap.isInitialComplete,
   });
 
-  return {
-    kind: "stream_ready",
-    result: relayResult,
-  };
+  return { kind: "stream_ready", result: relayResult };
 }

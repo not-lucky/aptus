@@ -255,11 +255,17 @@ test.concurrent("process: stalled response head times out with no retry and a 50
     const caseName = "dispatch-timeout";
     const cli = await startRoutesCli(primary, backup, caseName, {
       "    candidates: [gpt-main, claude-main]": "    candidates: [gpt-main]",
-      "  requestDeadlineMs: 600000": "  requestDeadlineMs: 250",
+      // Generous deadline margin: admission (trace-start fsync, ingress,
+      // resolution) must win the race to dispatch before the deadline fires.
+      // Under full-suite parallel load that pre-dispatch window can stall for
+      // hundreds of milliseconds, flaking a tight budget with a legitimate
+      // 504-at-zero-dispatches. The head delay preserves the ~20x ratio so the
+      // stall scenario itself is unchanged.
+      "  requestDeadlineMs: 600000": "  requestDeadlineMs: 1000",
     });
     try {
       // The origin accepts the request but never sends a head within the deadline.
-      primary.enqueue({ status: 200, mode: "held-open", headDelayMs: 5000 });
+      primary.enqueue({ status: 200, mode: "held-open", headDelayMs: 20000 });
 
       const res = await chatRequest(cli.clientPort, caseName);
       assert.equal(res.status, 504);

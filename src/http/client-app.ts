@@ -11,28 +11,22 @@ import type {
   TerminalCoordinator,
   TraceRecorder,
 } from "../domain/contracts.ts";
-import type { ErrorEncoder, NormalizedFailure, TraceTerminal } from "../domain/operations.ts";
+import type { ErrorEncoder, TraceTerminal } from "../domain/operations.ts";
 import { type AptusRequestId, createRequestId } from "../domain/request-id.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import type { Redactor } from "../observability/trace/redaction.ts";
-import { failureJson, notFoundFailure, statusFromCategory } from "../routing/failures.ts";
-import { authorizePublicName, createNameIndex, type NameIndex } from "../routing/resolution.ts";
+import { timeoutFailure } from "../routing/failures.ts";
+import { createNameIndex, type NameIndex } from "../routing/resolution.ts";
 import { type Clock, systemClock } from "../routing/timing.ts";
+import { raceWithAbort } from "./abort-race.ts";
 import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.ts";
+import { admitCreateRequest, type ClientEndpoint } from "./admission-request.ts";
 import { type AuthPurpose, authenticateClient } from "./auth.ts";
 import { authorizedCatalogEntries } from "./catalog.ts";
-import { createTerminalCoordinator } from "./coordinator.ts";
-import {
-  encodeInternalFailure,
-  encodeUnidentifiedFailure,
-  encodeUnidentifiedInternalFailure,
-  filterResponseHeaders,
-} from "./error-encoder.ts";
-import { admitJsonObject } from "./ingress.ts";
+import { encodeInternalFailure, encodeUnidentifiedInternalFailure, filterResponseHeaders } from "./error-encoder.ts";
 import type { RequestCancellationRegistry } from "./request-cancellation.ts";
 
-/** Bounded client endpoint identifiers for metrics observation. */
-export type ClientEndpoint = "chat_completions" | "responses" | "messages" | "models";
+export type { ClientEndpoint };
 
 /** Lifecycle outcome of a client request for telemetry. */
 export type ClientOutcome = "complete" | "failed" | "cancelled";
@@ -151,6 +145,10 @@ function mountCreate(
 
 /**
  * Constructs the request lifecycle handler for create endpoints.
+ *
+ * Thin Express mounting over the deep admission module: admission decides
+ * (ready request or already-encoded failure), the gateway dispatches, and this
+ * controller owns only transport wiring plus the single post-gateway finalize.
  */
 function createController(
   options: ClientAppOptions,
@@ -196,208 +194,81 @@ function createController(
     };
 
     try {
-      // 1. Client authentication: Validate Bearer token or x-api-key before reading body or taking lease.
-      const authentication = authenticateClient(
-        request.headers,
-        options.config.auth.clientKeys,
-        authPurpose,
-        request.rawHeaders,
-      );
-      if (authentication === undefined) {
-        writeEncoded(response, encodeUnidentifiedFailure(protocol, authenticationFailure()));
-        return;
-      }
-
-      // 2. Concurrency lease: Reject with 429 if maxInFlight limit is exceeded.
-      release = limiter.tryAcquire();
-      if (release === undefined) {
-        writeEncoded(response, encodeUnidentifiedFailure(protocol, rateLimitFailure()));
-        return;
-      }
-
-      aptusRequestId = createRequestId();
-      startedMs = clock.nowMonotonicMs();
-
       deadline = setTimeout(() => {
         deadlineExpired = true;
         perRequest.abort("timeout");
       }, options.config.server.requestDeadlineMs);
 
-      // Start Trace session
-      const trace = await options.traceRecorder.start({
-        aptusRequestId,
-        startedAtLocal: formatTraceDirectoryTimestamp(clock.nowWall()),
-        configRevision: options.revision,
-        sourceProtocol: protocol,
-      });
-
-      // Create request-scoped terminal coordinator
-      coordinator = createTerminalCoordinator({
-        aptusRequestId,
-        endpointProtocol: protocol,
-        startedMs,
-        trace,
-        observer: options.observer,
-        clock,
-        redactor: options.redactor,
-      });
-
-      unregisterCancellation = options.cancellations?.register(perRequest, coordinator.finalized);
-
-      // 3. Ingress admission: Stream body, enforce byte limits, validate UTF-8 & duplicate-free JSON.
-      const admissionRace = await raceWithAbort(
-        admitJsonObject(
-          request as IncomingMessage,
-          options.config.server.bodyLimitBytes,
-          options.config.server.trustedProxyCidrs,
-        ),
-        signal,
+      // Deep admission: auth, limits, parse, resolve — ready request or encoded failure.
+      const admitted = await admitCreateRequest(
+        {
+          headers: request.headers,
+          rawHeaders: request.rawHeaders,
+          message: request as IncomingMessage,
+        },
+        {
+          config: options.config,
+          revision: options.revision,
+          adapters: options.adapters,
+          errorEncoder: options.errorEncoder,
+          traceRecorder: options.traceRecorder,
+          observer: options.observer,
+          clock,
+          limiter,
+          nameIndex,
+          modelsByName,
+          protocol,
+          endpoint,
+          label,
+          authPurpose,
+          signal,
+          isTimeout,
+          getCancellationBy,
+        },
+        options.config.auth.clientKeys,
       );
 
-      if (admissionRace.aborted || signal.aborted) {
-        const timeout = isTimeout();
-        if (timeout && !response.headersSent) {
-          writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
-          coordinator.markClientFirstByte();
+      release = admitted.release;
+      startedMs = admitted.startedMs;
+      streamRequested = admitted.stream;
+      aptusRequestId = admitted.aptusRequestId;
+
+      if (!admitted.ok) {
+        coordinator = admitted.coordinator;
+        if (coordinator !== undefined) {
+          unregisterCancellation = options.cancellations?.register(perRequest, coordinator.finalized);
+        }
+        if (admitted.write && admitted.encoded !== undefined) {
+          writeEncoded(response, admitted.encoded);
         } else if (!response.destroyed) {
           response.destroy();
         }
-        const by = getCancellationBy();
-        if (!timeout) {
-          options.observer.cancelled({ aptusRequestId, phase: "admission", by });
-          await trace.recordJson("cancellation", { phase: "admission", by });
+        if (coordinator !== undefined && admitted.finalizeFact !== undefined) {
+          await coordinator.finalize({
+            ...admitted.finalizeFact,
+            durationMs: clock.nowMonotonicMs() - admitted.startedMs,
+          });
+          await coordinator.finalized;
         }
-        const terminal = timeout
-          ? ({ kind: "failed", failure: timeoutFailure() } as const)
-          : ({ kind: "cancelled", by } as const);
-        await coordinator.finalize({
-          terminal,
-          outcomeCategory: timeout ? "failed" : "cancelled",
-          status: timeout ? 504 : 499,
-          attempts: coordinator.getAttempts(),
-          stream: false,
-          durationMs: clock.nowMonotonicMs() - startedMs,
-          canonicalPublicName: "unknown",
-        });
-        await coordinator.finalized;
         return;
       }
 
-      const admission = admissionRace.value;
-      if (!admission.ok) {
-        const failure = { ...admission.failure, retryable: false };
-        writeEncoded(response, encodeUnidentifiedFailure(protocol, failure));
-        // Close the already-started Trace session so rejected bodies do not
-        // leak manifest-only directories that retention can never age-evict.
-        await coordinator.finalize({
-          terminal: { kind: "failed", failure },
-          outcomeCategory: "failed",
-          status: statusFromCategory(failure.category, protocol),
-          attempts: coordinator.getAttempts(),
-          stream: false,
-          durationMs: clock.nowMonotonicMs() - startedMs,
-          canonicalPublicName: "unknown",
-        });
-        await coordinator.finalized;
-        return;
-      }
+      coordinator = admitted.coordinator;
+      canonicalPublicName = admitted.canonicalPublicName;
+      const trace = admitted.trace;
+      const requestId = admitted.aptusRequestId;
+      unregisterCancellation = options.cancellations?.register(perRequest, coordinator.finalized);
 
-      streamRequested = admission.body.stream === true;
-
-      // 4. Request admission telemetry & trace ingress
-      options.observer.requestIngress({
-        aptusRequestId,
-        endpointProtocol: protocol,
-        endpoint: label,
-        stream: streamRequested,
-      });
-      coordinator.markIngress(streamRequested);
-      options.observer.observe({
-        type: "request_ingress",
-        aptusRequestId,
-        sourceProtocol: protocol,
-        stream: streamRequested,
-      });
-      await trace.recordJson("client_request", { headers: admission.headers, body: admission.body });
-
-      const scheme = authentication.kind === "api-key" ? "x-api-key" : "bearer";
-      await trace.recordJson("authentication", { scheme, clientKeyName: authentication.name });
-      options.observer.authResult({ aptusRequestId, scheme, result: "ok" });
-
-      // 5. Model extraction & resolution
-      const publicNameResult = options.adapters[protocol].readPublicModel(admission.body);
-      if (!publicNameResult.ok) {
-        await trace.recordJson("resolution", { failure: failureJson(publicNameResult.error) });
-        writeEncoded(
-          response,
-          options.errorEncoder.encode({ protocol, aptusRequestId, failure: publicNameResult.error }),
-        );
-        coordinator.markClientFirstByte();
-        await coordinator.finalize({
-          terminal: { kind: "failed", failure: publicNameResult.error },
-          outcomeCategory: "failed",
-          status: 400,
-          attempts: coordinator.getAttempts(),
-          stream: streamRequested,
-          durationMs: clock.nowMonotonicMs() - startedMs,
-          canonicalPublicName: "unknown",
-          emitCompleted: false,
-        });
-        await coordinator.finalized;
-        return;
-      }
-
-      canonicalPublicName = authorizePublicName(nameIndex, authentication.name, publicNameResult.value);
-      if (canonicalPublicName === undefined) {
-        const failure = notFoundFailure();
-        await trace.recordJson("resolution", { requested: publicNameResult.value });
-        writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure }));
-        coordinator.markClientFirstByte();
-        await coordinator.finalize({
-          terminal: { kind: "failed", failure },
-          outcomeCategory: "failed",
-          status: 404,
-          attempts: coordinator.getAttempts(),
-          stream: streamRequested,
-          durationMs: clock.nowMonotonicMs() - startedMs,
-          canonicalPublicName: "unknown",
-          emitCompleted: false,
-        });
-        await coordinator.finalized;
-        return;
-      }
-
-      const resolutionKind = modelsByName.has(canonicalPublicName) ? "model" : "route";
-      await trace.recordJson("resolution", {
-        publicName: publicNameResult.value,
-        canonicalPublicName,
-        kind: resolutionKind,
-      });
-      options.observer.nameResolved({ aptusRequestId, canonicalPublicName, kind: resolutionKind });
-
-      // 6. Gateway execution
-      const gatewayResult = await raceWithAbort(
-        options.gateway.execute({
-          aptusRequestId,
-          protocol,
-          endpoint,
-          headers: admission.headers,
-          body: admission.body,
-          clientKeyName: authentication.name,
-          signal,
-          canonicalPublicName,
-          resolutionKind,
-          stream: streamRequested,
-          coordinator,
-          trace,
-        }),
-        signal,
-      );
+      // Gateway execution (pure dispatch; admission already settled).
+      const gatewayResult = await raceWithAbort(options.gateway.execute(admitted.gatewayRequest), signal);
 
       if (gatewayResult.aborted || signal.aborted) {
         const timeout = isTimeout();
         if (timeout && !response.headersSent) {
-          writeEncoded(response, options.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }));
+          writeEncoded(
+            response,
+            options.errorEncoder.encode({ protocol, aptusRequestId: requestId, failure: timeoutFailure() }),
+          );
           coordinator.markClientFirstByte();
         } else if (!response.destroyed) {
           response.destroy();
@@ -419,12 +290,12 @@ function createController(
         return;
       }
 
-      // 7. Response serialization and delivery
+      // Response serialization and delivery (single post-gateway finalize).
       const delivery = await writeGatewayResult(
         response,
         gatewayResult.value,
         protocol,
-        aptusRequestId,
+        requestId,
         options.errorEncoder,
         signal,
         coordinator,
@@ -448,7 +319,7 @@ function createController(
       const timeout = isTimeout();
       const by = getCancellationBy();
       if (delivery === "aborted" && !timeout && gatewayResult.value.kind === "complete") {
-        options.observer.cancelled({ aptusRequestId, phase: "relay", by });
+        options.observer.cancelled({ aptusRequestId: requestId, phase: "relay", by });
         await trace.recordJson("cancellation", { phase: "relay", by });
       }
       const terminal: TraceTerminal =
@@ -545,56 +416,8 @@ function catalogController(
   };
 }
 
-function authenticationFailure(): NormalizedFailure {
+function authenticationFailure(): import("../domain/operations.ts").NormalizedFailure {
   return { category: "authentication", message: "invalid authentication credentials", retryable: false };
-}
-
-function rateLimitFailure(): NormalizedFailure {
-  return { category: "rate_limit", message: "too many requests", retryable: false };
-}
-
-function timeoutFailure(): NormalizedFailure {
-  return { category: "timeout", message: "request deadline exceeded", retryable: false };
-}
-
-type AbortRace<T> = { readonly aborted: true } | { readonly aborted: false; readonly value: T };
-
-/**
- * Races an async operation against an AbortSignal, returning an `{ aborted: true }` tag if aborted.
- */
-function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<AbortRace<T>> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const onAbort = (): void => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      resolve({ aborted: true });
-    };
-    if (signal.aborted) {
-      void operation.then(
-        () => undefined,
-        () => undefined,
-      );
-      resolve({ aborted: true });
-      return;
-    }
-    signal.addEventListener("abort", onAbort, { once: true });
-    void operation.then(
-      (value) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        resolve({ aborted: false, value });
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
 }
 
 /**
@@ -743,20 +566,4 @@ function writeEncoded(
   encoded: { readonly status: number; readonly headers: HeaderMap; readonly body: Uint8Array },
 ): void {
   if (!response.headersSent) response.status(encoded.status).set(encoded.headers).end(encoded.body);
-}
-
-/**
- * Formats a local timestamp into the trace directory prefix:
- * `YYYY-MM-DDTHH-mm-ss.SSS±HHMM` (colons are avoided for filesystem safety).
- */
-function formatTraceDirectoryTimestamp(date: Date): string {
-  const pad = (value: number, width = 2): string => String(value).padStart(width, "0");
-  const offsetMinutes = -date.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? "+" : "-";
-  const absolute = Math.abs(offsetMinutes);
-  return (
-    `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}` +
-    `${sign}${pad(Math.floor(absolute / 60))}${pad(absolute % 60)}`
-  );
 }

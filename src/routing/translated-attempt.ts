@@ -11,17 +11,12 @@ import type {
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { Redactor } from "../observability/trace/redaction.ts";
 import type { TranslateCompleteOutcomeResult, TranslationCoordinator } from "../translation/contracts.ts";
-import {
-  type AttemptContext,
-  acquireLease,
-  classifyAbortReason,
-  finishAttempt,
-  parseJsonBytes,
-  recordCancellation,
-} from "./attempt.ts";
+import { targetDefaultMaxTokensFrom } from "../translation/coordinator.ts";
+import { type AttemptContext, dispatchOneAttempt, finishAttempt } from "./attempt.ts";
 import type { CandidateDescriptor } from "./candidates.ts";
 import { dispatchFailure, failureJson, unavailableFailure } from "./failures.ts";
 import { spoolResponseBody } from "./spool.ts";
+import { createTranslatedPreparer } from "./translated-preparer.ts";
 
 const utf8Decoder = new TextDecoder();
 
@@ -67,165 +62,15 @@ export async function executeTranslatedAttempt(
   ctx: AttemptContext,
   translation: TranslationCoordinator,
 ): Promise<TranslatedAttemptOutcome> {
-  // 1. Request translation (decode -> validate -> preflight -> encode) BEFORE any key lease
-  const targetDefaultMaxTokens = candidate.model.defaults?.max_tokens;
-  const translated = translation.translateCompleteRequest({
-    sourceProtocol: request.protocol,
-    targetProtocol: candidate.provider.protocol,
-    sourceBody: request.body,
-    logicalModel: request.canonicalPublicName,
-    targetModel: candidate.model.upstreamModel,
-    targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
-  });
+  const dispatched = await dispatchOneAttempt(candidate, request, ctx, createTranslatedPreparer(translation, false));
 
-  if (!translated.ok) {
-    await ctx.trace.recordJson("ir_request", {
-      ok: false,
-      failure: failureJson(translated.error),
-    });
-    await ctx.trace.recordJson("translation_failure", failureJson(translated.error));
-    return { kind: "prepare_failed", failure: translated.error };
+  if (dispatched.kind !== "dispatched") {
+    return dispatched;
   }
+  const { response, observation, lease, attemptNumber, dispatchDurationMs } = dispatched;
 
-  await ctx.trace.recordJson("ir_request", {
-    ok: true,
-    ir: translated.value.irRequest as unknown as JsonValue,
-  });
-  await ctx.trace.recordJson("translation_egress", { ok: true });
-
-  if (request.signal.aborted) {
-    const reason = classifyAbortReason(request.signal);
-    if (reason === "timeout") {
-      return { kind: "deadline_exceeded" };
-    }
-    await recordCancellation(ctx, request, "routing", reason);
-    return { kind: "cancelled", phase: "routing" };
-  }
-
-  // 2. Key acquisition
-  const acquired = await acquireLease(candidate, request, ctx);
-  if (acquired.kind !== "lease") {
-    if (acquired.kind === "unavailable") return { kind: "key_unavailable" };
-    if (acquired.kind === "deadline") return { kind: "deadline_exceeded" };
-    return { kind: "cancelled", phase: acquired.phase };
-  }
-  const lease = acquired.lease;
-  const attemptNumber = ctx.nextAttemptNumber();
-
-  await ctx.trace.recordJson("key_selection", {
-    provider: candidate.provider.name,
-    strategy: candidate.provider.keyStrategy,
-    keyName: lease.keyName,
-  });
-  ctx.observer.keySelected({
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    provider: candidate.provider.name,
-    keyName: lease.keyName,
-    strategy: candidate.provider.keyStrategy,
-  });
-
-  // 3. Prepare translated provider request
-  const prepared = translation.prepareTranslatedProviderRequest({
-    providerName: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-    baseUrl: candidate.provider.baseUrl,
-    clientHeaders: request.headers,
-    providerHeaders: candidate.provider.headers,
-    providerSecret: lease.secret,
-    body: translated.value.body,
-    deadlineMs: ctx.deadlineMs,
-    streamIdleMs: ctx.streamIdleMs,
-  });
-
-  await ctx.trace.recordJson("provider_request", {
-    provider: prepared.provider,
-    protocol: prepared.protocol,
-    url: prepared.url,
-    headers: prepared.headers,
-    body: parseJsonBytes(prepared.body),
-  });
-
-  ctx.observer.attemptStarted({
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    candidateIndex: candidate.index,
-    provider: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-    stream: false,
-  });
-  ctx.observer.observe({
-    type: "attempt_started",
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    candidateIndex: candidate.index,
-    provider: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-  });
-
-  // 4. Dispatch
-  const dispatchStarted = ctx.clock.nowMonotonicMs();
-  let response: ProviderResponse;
-  try {
-    response = await ctx.dispatcher.dispatch(prepared, request.signal);
-  } catch (error) {
-    const durationMs = ctx.clock.nowMonotonicMs() - dispatchStarted;
-    if (request.signal.aborted) {
-      const reason = classifyAbortReason(request.signal);
-      if (reason === "timeout") {
-        finishAttempt(
-          ctx,
-          request,
-          candidate,
-          lease,
-          attemptNumber,
-          { result: "timeout", beforeClientBytes: true },
-          undefined,
-          durationMs,
-          false,
-        );
-        return { kind: "deadline_exceeded" };
-      }
-      finishAttempt(
-        ctx,
-        request,
-        candidate,
-        lease,
-        attemptNumber,
-        { result: "client_cancelled", beforeClientBytes: true },
-        undefined,
-        durationMs,
-        false,
-      );
-      await recordCancellation(ctx, request, "dispatch", reason);
-      return { kind: "cancelled", phase: "dispatch" };
-    }
-    const failure = dispatchFailure(error);
-    finishAttempt(
-      ctx,
-      request,
-      candidate,
-      lease,
-      attemptNumber,
-      { result: failure.category, beforeClientBytes: true },
-      undefined,
-      durationMs,
-      false,
-    );
-    return { kind: "dispatch_failed", failure };
-  }
-
-  const dispatchDurationMs = ctx.clock.nowMonotonicMs() - dispatchStarted;
-
-  await ctx.trace.recordJson("provider_response_head", {
-    status: response.status,
-    headers: response.headers,
-    finalUrl: response.finalUrl,
-  });
-
-  const observation = ctx.adapters[candidate.provider.protocol].classify(response, ctx.clock.nowWall().getTime());
-
-  // Non-2xx response head follows normal retry/fallback policy (decided by Gateway)
+  // Non-2xx response head follows normal retry/fallback policy (decided by Gateway).
+  // Single key observation with the head category.
   if (observation.result !== "success") {
     const cooldownMs = finishAttempt(
       ctx,
@@ -238,16 +83,10 @@ export async function executeTranslatedAttempt(
       dispatchDurationMs,
       false,
     );
-    return {
-      kind: "response",
-      response,
-      observation,
-      cooldownMs,
-      attemptNumber,
-    };
+    return { kind: "response", response, observation, cooldownMs, attemptNumber };
   }
 
-  // 5. 2xx success: spool body and translate outcome
+  // 2xx success: spool body and translate outcome (single observation below).
   let body: OwnedBody;
   try {
     body = await spoolResponseBody(response.body);
@@ -390,24 +229,15 @@ export async function executeTranslatedDryRun(
   translation: TranslationCoordinator,
   redactor: Redactor,
 ): Promise<TranslatedDryRunOutcome> {
-  const targetDefaultMaxTokens = candidate.model.defaults?.max_tokens;
-  const translated = request.stream
-    ? translation.translateStreamRequest({
-        sourceProtocol: request.protocol,
-        targetProtocol: candidate.provider.protocol,
-        sourceBody: request.body,
-        logicalModel: request.canonicalPublicName,
-        targetModel: candidate.model.upstreamModel,
-        targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
-      })
-    : translation.translateCompleteRequest({
-        sourceProtocol: request.protocol,
-        targetProtocol: candidate.provider.protocol,
-        sourceBody: request.body,
-        logicalModel: request.canonicalPublicName,
-        targetModel: candidate.model.upstreamModel,
-        targetDefaultMaxTokens: typeof targetDefaultMaxTokens === "number" ? targetDefaultMaxTokens : undefined,
-      });
+  const translated = translation.translateRequest({
+    sourceProtocol: request.protocol,
+    targetProtocol: candidate.provider.protocol,
+    sourceBody: request.body,
+    logicalModel: request.canonicalPublicName,
+    targetModel: candidate.model.upstreamModel,
+    stream: request.stream,
+    targetDefaultMaxTokens: targetDefaultMaxTokensFrom(candidate.model.defaults),
+  });
 
   if (!translated.ok) {
     await request.trace.recordJson("ir_request", {
@@ -435,17 +265,14 @@ export async function executeTranslatedDryRun(
     strategy: candidate.provider.keyStrategy,
   });
 
-  const prepared = translation.prepareTranslatedProviderRequest({
+  const prepared = translation.prepareTicketRequest(translated.value, {
     providerName: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
     baseUrl: candidate.provider.baseUrl,
     clientHeaders: request.headers,
     providerHeaders: candidate.provider.headers,
     providerSecret: preview.secret,
-    body: translated.value.body,
     deadlineMs: ctx.deadlineMs,
     streamIdleMs: ctx.streamIdleMs,
-    stream: request.stream,
   });
 
   const redactedHeaders = redactor.redactHeaders(prepared.headers);

@@ -278,6 +278,64 @@ export interface TranslationCodecs {
 }
 
 /**
+ * Input arguments for the unified request translation entry point.
+ *
+ * A single `stream` selector replaces the former complete/stream variant
+ * split, so calling the wrong variant for the admitted `request.stream`
+ * becomes unrepresentable. `targetDefaultMaxTokens` carries the candidate
+ * model default for `anthropic-messages` targets (which must inject
+ * `max_tokens`); it is ignored for other targets.
+ */
+export interface TranslateRequestInput {
+  readonly sourceProtocol: Protocol;
+  readonly targetProtocol: Protocol;
+  readonly sourceBody: JsonObject;
+  readonly logicalModel: string;
+  readonly targetModel: string;
+  readonly stream: boolean;
+  readonly targetDefaultMaxTokens?: number;
+}
+
+/**
+ * Opaque ticket proving a request passed decode, validate, preflight, encode,
+ * and target finalization in order.
+ *
+ * Callers cannot fabricate a body, mismatch the `stream` flag, swap protocols,
+ * or drop `sourceWireOptions`: `prepareTicketRequest` and
+ * `createTicketSession` only accept this ticket — never raw bodies.
+ *
+ * The string brand keeps construction cast-free: only the coordinator builds
+ * tickets, and callers holding a ticket can neither forge one by accident nor
+ * bypass the ordered pipeline.
+ */
+export interface TranslatedTicket {
+  readonly __brand: "TranslatedTicket";
+  readonly sourceProtocol: Protocol;
+  readonly targetProtocol: Protocol;
+  readonly logicalModel: string;
+  readonly targetModel: string;
+  readonly stream: boolean;
+  readonly body: JsonObject;
+  readonly irRequest: IrRequest;
+  readonly sourceWireOptions: StreamWireOptions;
+}
+
+/**
+ * Network-only inputs for preparing a ticketed provider request.
+ * Body, stream flag, and target protocol come from the ticket itself.
+ */
+export interface PrepareTicketRequestInput {
+  /** Configured provider name for metrics and traces. */
+  readonly providerName: string;
+  readonly baseUrl: string;
+  readonly clientHeaders: HeaderMap;
+  readonly providerHeaders: HeaderMap;
+  readonly providerSecret: string;
+  readonly deadlineMs: number;
+  readonly streamIdleMs: number;
+}
+
+/**
  * Input arguments for translating an admitted cross-protocol complete request.
  */
 export interface TranslateCompleteInput {
@@ -381,8 +439,32 @@ export interface StreamSessionBundle {
 /**
  * Bundled translation coordinator providing request translation, outcome translation,
  * streaming session management, and outbound provider request preparation.
+ *
+ * Deep module: `translateRequest` owns the full decode, validate, preflight,
+ * encode, and target-finalize order behind one seam. Codecs stay pure adapters
+ * behind it. Ticketed `prepareTicketRequest` / `createTicketSession` make
+ * skipped checks unrepresentable: only a ticket from `translateRequest` can be
+ * prepared or bound to a stream session.
  */
 export interface TranslationCoordinator {
+  /**
+   * Unified request translation: decodes, validates, preflights, encodes, and
+   * finalizes one admitted request for either delivery mode.
+   */
+  translateRequest(input: TranslateRequestInput): Result<TranslatedTicket, NormalizedFailure>;
+  /**
+   * Prepares a ticketed outbound provider request. The body, stream flag, and
+   * target protocol are taken from the ticket — callers supply only network facts.
+   */
+  prepareTicketRequest(ticket: TranslatedTicket, input: PrepareTicketRequestInput): PreparedProviderRequest;
+  /**
+   * Binds a streaming ticket to a stream session. Requires a streaming ticket;
+   * the ticket's sidecar is threaded to the client encoder by construction.
+   */
+  createTicketSession(
+    ticket: TranslatedTicket,
+    input?: { readonly responseId?: string; readonly createPartId?: () => string },
+  ): StreamSessionBundle;
   translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure>;
   translateCompleteOutcome(
     input: TranslateCompleteOutcomeInput,

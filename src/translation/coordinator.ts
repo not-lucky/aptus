@@ -5,6 +5,7 @@ import { TRANSLATED_MEDIA_BODY_LIMIT_BYTES } from "./codecs/shared/media.ts";
 import type {
   CreateStreamSessionInput,
   Direction,
+  PrepareTicketRequestInput,
   PrepareTranslatedRequestInput,
   StreamSession,
   StreamSessionBundle,
@@ -12,6 +13,8 @@ import type {
   TranslateCompleteOutcomeInput,
   TranslateCompleteOutcomeResult,
   TranslateCompleteRequestResult,
+  TranslatedTicket,
+  TranslateRequestInput,
   TranslateStreamRequestInput,
   TranslateStreamRequestResult,
   TranslationCodecs,
@@ -63,6 +66,19 @@ function finalizeMessagesRequestBody(
 }
 
 /**
+ * Extracts the numeric `max_tokens` model default, if configured.
+ *
+ * Centralizes the `typeof === "number"` guard previously copy-pasted across
+ * every translated path, so callers pass model defaults through one spelling.
+ */
+export function targetDefaultMaxTokensFrom(
+  defaults: { readonly max_tokens?: unknown } | undefined,
+): number | undefined {
+  const value = defaults?.max_tokens;
+  return typeof value === "number" ? value : undefined;
+}
+
+/**
  * Creates the pure, side-effect-free cross-protocol translation coordinator.
  *
  * Coordinates request decoding (IR + wire-options sidecar), IR validation,
@@ -74,110 +90,207 @@ function finalizeMessagesRequestBody(
  * @returns A {@link TranslationCoordinator} bundle.
  */
 export function createTranslationCoordinator(codecs: TranslationCodecs): TranslationCoordinator {
-  return {
-    translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure> {
-      const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
-      const decoder = codecs.ingress[input.sourceProtocol];
-      const encoder = codecs.egress[input.targetProtocol];
+  const runComplete = (
+    input: TranslateCompleteInput,
+  ): Result<{ body: TranslateCompleteRequestResult["body"]; irRequest: IrRequest }, NormalizedFailure> => {
+    const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
+    const decoder = codecs.ingress[input.sourceProtocol];
+    const encoder = codecs.egress[input.targetProtocol];
 
-      // 1. Decode source request into IR plus the wire-only sidecar
-      const decodeResult = decoder.decodeRequest(input.sourceBody);
-      if (!decodeResult.ok) {
-        return decodeResult;
-      }
+    // 1. Decode source request into IR plus the wire-only sidecar
+    const decodeResult = decoder.decodeRequest(input.sourceBody);
+    if (!decodeResult.ok) {
+      return decodeResult;
+    }
 
-      // Rebuild with canonical logical model name
-      const irRequest: IrRequest = {
-        ...decodeResult.value.irRequest,
-        model: input.logicalModel,
-      };
+    // Rebuild with canonical logical model name
+    const irRequest: IrRequest = {
+      ...decodeResult.value.irRequest,
+      model: input.logicalModel,
+    };
 
-      // 2. Validate IR request invariants and sidecar mutual exclusion
-      const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
-      if (!validateResult.ok) {
-        return validateResult;
-      }
+    // 2. Validate IR request invariants and sidecar mutual exclusion
+    const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
+    if (!validateResult.ok) {
+      return validateResult;
+    }
 
-      // 3. Preflight capability feasibility, including per-direction sidecar rows
-      const preflightResult = preflightRequest(irRequest, direction, decodeResult.value.requestWireOptions);
-      if (!preflightResult.ok) {
-        return preflightResult;
-      }
+    // 3. Preflight capability feasibility, including per-direction sidecar rows
+    const preflightResult = preflightRequest(irRequest, direction, decodeResult.value.requestWireOptions);
+    if (!preflightResult.ok) {
+      return preflightResult;
+    }
 
-      // 4. Encode to target provider request body, projecting the sidecar
-      const encodedBody = encoder.encodeRequest(irRequest, input.targetModel, decodeResult.value.requestWireOptions);
+    // 4. Encode to target provider request body, projecting the sidecar
+    const encodedBody = encoder.encodeRequest(irRequest, input.targetModel, decodeResult.value.requestWireOptions);
 
-      // 5. Anthropic Messages target: inject the resolved required max_tokens
-      //    (caller limit first, configured model default as fallback).
-      if (input.targetProtocol === "anthropic-messages") {
-        const finalize = finalizeMessagesRequestBody(
-          encodedBody as Record<string, unknown>,
-          irRequest,
-          input.targetDefaultMaxTokens,
-        );
-        if (!finalize.ok) return finalize;
-      }
-
-      return ok({
-        body: encodedBody,
+    // 5. Anthropic Messages target: inject the resolved required max_tokens
+    //    (caller limit first, configured model default as fallback).
+    if (input.targetProtocol === "anthropic-messages") {
+      const finalize = finalizeMessagesRequestBody(
+        encodedBody as Record<string, unknown>,
         irRequest,
+        input.targetDefaultMaxTokens,
+      );
+      if (!finalize.ok) return finalize;
+    }
+
+    return ok({ body: encodedBody, irRequest });
+  };
+
+  const runStream = (input: TranslateStreamRequestInput): Result<TranslateStreamRequestResult, NormalizedFailure> => {
+    const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
+    const streamDecoder = codecs.streamRequestDecoders[input.sourceProtocol];
+    const streamEncoder = codecs.streamRequestEncoders[input.targetProtocol];
+
+    // 1. Decode source stream request into IR and both wire-option sets
+    const decodeResult = streamDecoder.decodeRequest(input.sourceBody);
+    if (!decodeResult.ok) {
+      return decodeResult;
+    }
+
+    // Rebuild with canonical logical model name
+    const irRequest: IrRequest = {
+      ...decodeResult.value.irRequest,
+      model: input.logicalModel,
+    };
+
+    // 2. Validate IR request invariants
+    const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
+    if (!validateResult.ok) {
+      return validateResult;
+    }
+
+    // 3. Preflight stream capability feasibility, including sidecar rows
+    const preflightResult = preflightStreamRequest(irRequest, direction, decodeResult.value.requestWireOptions);
+    if (!preflightResult.ok) {
+      return preflightResult;
+    }
+
+    // 4. Encode to target provider stream request body, projecting the sidecar
+    const encodedBody = streamEncoder.encodeRequest(
+      irRequest,
+      input.targetModel,
+      decodeResult.value.sourceWireOptions,
+      decodeResult.value.requestWireOptions,
+    );
+
+    // 5. Anthropic Messages target: inject the resolved required max_tokens
+    if (input.targetProtocol === "anthropic-messages") {
+      const finalize = finalizeMessagesRequestBody(
+        encodedBody as Record<string, unknown>,
+        irRequest,
+        input.targetDefaultMaxTokens,
+      );
+      if (!finalize.ok) return finalize;
+    }
+
+    return ok({
+      body: encodedBody,
+      irRequest,
+      sourceWireOptions: decodeResult.value.sourceWireOptions,
+    });
+  };
+
+  const buildTicket = (input: TranslateRequestInput): Result<TranslatedTicket, NormalizedFailure> => {
+    if (input.stream) {
+      const result = runStream({
+        sourceProtocol: input.sourceProtocol,
+        targetProtocol: input.targetProtocol,
+        sourceBody: input.sourceBody,
+        logicalModel: input.logicalModel,
+        targetModel: input.targetModel,
+        targetDefaultMaxTokens: input.targetDefaultMaxTokens,
       });
+      if (!result.ok) return result;
+      return ok({
+        __brand: "TranslatedTicket",
+        sourceProtocol: input.sourceProtocol,
+        targetProtocol: input.targetProtocol,
+        logicalModel: input.logicalModel,
+        targetModel: input.targetModel,
+        stream: true,
+        body: result.value.body,
+        irRequest: result.value.irRequest,
+        sourceWireOptions: result.value.sourceWireOptions,
+      });
+    }
+    const result = runComplete({
+      sourceProtocol: input.sourceProtocol,
+      targetProtocol: input.targetProtocol,
+      sourceBody: input.sourceBody,
+      logicalModel: input.logicalModel,
+      targetModel: input.targetModel,
+      targetDefaultMaxTokens: input.targetDefaultMaxTokens,
+    });
+    if (!result.ok) return result;
+    return ok({
+      __brand: "TranslatedTicket",
+      sourceProtocol: input.sourceProtocol,
+      targetProtocol: input.targetProtocol,
+      logicalModel: input.logicalModel,
+      targetModel: input.targetModel,
+      stream: false,
+      body: result.value.body,
+      irRequest: result.value.irRequest,
+      sourceWireOptions: {},
+    });
+  };
+
+  const buildSession = (
+    ticket: TranslatedTicket,
+    responseId: string | undefined,
+    createPartId: (() => string) | undefined,
+  ): StreamSessionBundle => {
+    if (!ticket.stream) {
+      throw new Error("internal fault: complete ticket cannot back a stream session");
+    }
+    const resolvedResponseId = responseId ?? randomUUID();
+    const resolvedCreatePartId = createPartId ?? (() => randomUUID().replace(/-/g, "").slice(0, 16));
+    const session: StreamSession = {
+      responseId: resolvedResponseId,
+      model: ticket.logicalModel,
+      createPartId: resolvedCreatePartId,
+    };
+
+    const providerDecoder = codecs.createProviderStreamDecoder(ticket.targetProtocol, session);
+    const clientEncoder = codecs.createClientStreamEncoder(ticket.sourceProtocol, session, ticket.sourceWireOptions);
+
+    return { session, providerDecoder, clientEncoder };
+  };
+
+  return {
+    translateRequest(input: TranslateRequestInput): Result<TranslatedTicket, NormalizedFailure> {
+      return buildTicket(input);
+    },
+
+    prepareTicketRequest(ticket: TranslatedTicket, input: PrepareTicketRequestInput) {
+      return prepareTranslatedProviderRequest({
+        providerName: input.providerName,
+        targetProtocol: ticket.targetProtocol,
+        baseUrl: input.baseUrl,
+        clientHeaders: input.clientHeaders,
+        providerHeaders: input.providerHeaders,
+        providerSecret: input.providerSecret,
+        body: ticket.body,
+        deadlineMs: input.deadlineMs,
+        streamIdleMs: input.streamIdleMs,
+        stream: ticket.stream,
+      });
+    },
+
+    createTicketSession(ticket, input) {
+      return buildSession(ticket, input?.responseId, input?.createPartId);
+    },
+
+    translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure> {
+      return runComplete(input);
     },
 
     translateStreamRequest(
       input: TranslateStreamRequestInput,
     ): Result<TranslateStreamRequestResult, NormalizedFailure> {
-      const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
-      const streamDecoder = codecs.streamRequestDecoders[input.sourceProtocol];
-      const streamEncoder = codecs.streamRequestEncoders[input.targetProtocol];
-
-      // 1. Decode source stream request into IR and both wire-option sets
-      const decodeResult = streamDecoder.decodeRequest(input.sourceBody);
-      if (!decodeResult.ok) {
-        return decodeResult;
-      }
-
-      // Rebuild with canonical logical model name
-      const irRequest: IrRequest = {
-        ...decodeResult.value.irRequest,
-        model: input.logicalModel,
-      };
-
-      // 2. Validate IR request invariants
-      const validateResult = validateIrRequest(irRequest, decodeResult.value.requestWireOptions);
-      if (!validateResult.ok) {
-        return validateResult;
-      }
-
-      // 3. Preflight stream capability feasibility, including sidecar rows
-      const preflightResult = preflightStreamRequest(irRequest, direction, decodeResult.value.requestWireOptions);
-      if (!preflightResult.ok) {
-        return preflightResult;
-      }
-
-      // 4. Encode to target provider stream request body, projecting the sidecar
-      const encodedBody = streamEncoder.encodeRequest(
-        irRequest,
-        input.targetModel,
-        decodeResult.value.sourceWireOptions,
-        decodeResult.value.requestWireOptions,
-      );
-
-      // 5. Anthropic Messages target: inject the resolved required max_tokens
-      if (input.targetProtocol === "anthropic-messages") {
-        const finalize = finalizeMessagesRequestBody(
-          encodedBody as Record<string, unknown>,
-          irRequest,
-          input.targetDefaultMaxTokens,
-        );
-        if (!finalize.ok) return finalize;
-      }
-
-      return ok({
-        body: encodedBody,
-        irRequest,
-        sourceWireOptions: decodeResult.value.sourceWireOptions,
-      });
+      return runStream(input);
     },
 
     createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle {

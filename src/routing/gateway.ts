@@ -1,6 +1,5 @@
 import type { AptusConfig, ModelConfig, RouteConfig } from "../config/types.ts";
 import type {
-  AttemptObservation,
   DryRunProviderRequest,
   DryRunResult,
   Gateway,
@@ -8,7 +7,6 @@ import type {
   GatewayResult,
   JsonObject,
   JsonValue,
-  OwnedBody,
   Protocol,
   ProtocolAdapter,
   ProviderDispatcher,
@@ -19,20 +17,13 @@ import type { GatewayObservability } from "../observability/lifecycle-observer.t
 import { createRedactor, type Redactor } from "../observability/trace/redaction.ts";
 import type { TranslationCoordinator } from "../translation/contracts.ts";
 import { type AttemptContext, classifyAbortReason, executeAttempt } from "./attempt.ts";
+import { type RunnerShared, runCandidate } from "./candidate-runner.ts";
 import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
-import {
-  failureFromObservation,
-  interruptedFailure,
-  statusFromCategory,
-  timeoutFailure,
-  unavailableFailure,
-  unsupportedCapabilityFailure,
-} from "./failures.ts";
+import { statusFromCategory, unavailableFailure, unsupportedCapabilityFailure } from "./failures.ts";
 import { createKeyPool } from "./key-pool.ts";
-import { type RelayContext, relayComplete, relayStream, relayTranslatedComplete } from "./relay.ts";
+import type { RelayContext } from "./relay.ts";
 import { createNameIndex, type NameIndex } from "./resolution.ts";
-import { shouldFallback, shouldRetry } from "./retry-policy.ts";
-import { spoolResponseBody } from "./spool.ts";
+import { shouldFallback } from "./retry-policy.ts";
 import {
   type Clock,
   type RandomSource,
@@ -514,65 +505,19 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       return { kind: "cancelled", by };
     };
 
-    const handleResponseFailure = async (
-      candidate: CandidateDescriptor,
-      candidateIndex: number,
-      candidateAttemptCount: number,
-      response: { body: { cancel(): Promise<unknown> } },
-      observation: AttemptObservation,
-      attemptNumber: number,
-      cooldownMs?: number,
-    ): Promise<
-      | "retry"
-      | { readonly kind: "fallback"; readonly failure: NormalizedFailure }
-      | { readonly kind: "terminal"; readonly failure: NormalizedFailure }
-    > => {
-      const category = observation.result as IrFailureCategory;
-      const canRetry = shouldRetry({
-        status: observation.status,
-        category,
-        beforeClientBytes: observation.beforeClientBytes,
-        candidateAttemptCount,
-        retryOn: candidate.retryOn,
-      });
-
-      if (canRetry) {
-        await response.body.cancel().catch(() => undefined);
-        const delayMs = cooldownMs ?? 0;
-        await request.trace.recordJson("retry", {
-          attemptNumber,
-          provider: candidate.provider.name,
-          category,
-          delayMs,
-        });
-        deps.observer.retryScheduled({
-          aptusRequestId,
-          attemptNumber,
-          provider: candidate.provider.name,
-          targetProtocol: candidate.provider.protocol,
-          category,
-          delayMs,
-        });
-        deps.observer.observe({
-          type: "retry_scheduled",
-          aptusRequestId,
-          attemptNumber,
-          delayMs,
-          category,
-        });
-        return "retry";
-      }
-
-      const failure = failureFromObservation(observation);
-      if (await tryFallback(candidate, candidateIndex, category)) {
-        await response.body.cancel().catch(() => undefined);
-        return { kind: "fallback", failure };
-      }
-      await response.body.cancel().catch(() => undefined);
-      return { kind: "terminal", failure };
+    const runnerShared: RunnerShared = {
+      request,
+      observer: deps.observer,
+      clock,
+      started,
+      relayContextFor,
+      terminalFailure,
+      handleCancellation,
+      emitCandidateSkip,
+      tryFallback,
     };
 
-    candidateLoop: for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+    for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
       const candidate = candidates[candidateIndex];
       if (candidate === undefined) continue; // Protocol preflight check / Translation branch
       if (candidate.provider.protocol !== request.protocol) {
@@ -590,112 +535,23 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
           publicName: request.canonicalPublicName,
         });
 
-        let candidateAttemptCount = 0;
-
-        if (request.stream) {
-          while (true) {
-            const outcome = await executeTranslatedStreamAttempt(candidate, request, attemptContext, translation);
-
-            if (outcome.kind === "cancelled") {
-              return handleCancellation(true, candidate.provider.protocol, candidate.provider.name);
-            }
-            if (outcome.kind === "deadline_exceeded") {
-              return terminalFailure(timeoutFailure(), candidate);
-            }
-            if (outcome.kind === "prepare_failed") {
-              if (outcome.failure.category === "unsupported_capability") {
-                await emitCandidateSkip(candidate, outcome.failure);
-                lastCandidateFailure = outcome.failure;
-                continue candidateLoop;
+        const translatedResult = await runCandidate(
+          candidate,
+          candidateIndex,
+          runnerShared,
+          request.stream
+            ? {
+                kind: "translated-stream",
+                execute: () => executeTranslatedStreamAttempt(candidate, request, attemptContext, translation),
               }
-              return terminalFailure(outcome.failure, candidate);
-            }
-            if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
-              const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
-              lastCandidateFailure = failure;
-              if (await tryFallback(candidate, candidateIndex, failure.category)) {
-                continue candidateLoop;
-              }
-              return terminalFailure(failure, candidate);
-            }
-
-            if (outcome.kind === "response") {
-              candidateAttemptCount++;
-              const decision = await handleResponseFailure(
-                candidate,
-                candidateIndex,
-                candidateAttemptCount,
-                outcome.response,
-                outcome.observation,
-                outcome.attemptNumber,
-                outcome.cooldownMs,
-              );
-              if (decision === "retry") continue;
-              lastCandidateFailure = decision.failure;
-              if (decision.kind === "fallback") continue candidateLoop;
-              return terminalFailure(decision.failure, candidate);
-            }
-
-            if (outcome.kind === "stream_ready") {
-              return outcome.result;
-            }
-          }
-        } else {
-          while (true) {
-            const outcome = await executeTranslatedAttempt(candidate, request, attemptContext, translation);
-
-            if (outcome.kind === "cancelled") {
-              return handleCancellation(false, candidate.provider.protocol, candidate.provider.name);
-            }
-            if (outcome.kind === "deadline_exceeded") {
-              return terminalFailure(timeoutFailure(), candidate);
-            }
-            if (outcome.kind === "prepare_failed") {
-              if (outcome.failure.category === "unsupported_capability") {
-                await emitCandidateSkip(candidate, outcome.failure);
-                lastCandidateFailure = outcome.failure;
-                continue candidateLoop;
-              }
-              // A request-level translation failure (e.g. malformed payload) is
-              // not a candidate incompatibility: no other candidate can serve it.
-              return terminalFailure(outcome.failure, candidate);
-            }
-            if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
-              const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
-              lastCandidateFailure = failure;
-              if (await tryFallback(candidate, candidateIndex, failure.category)) {
-                continue candidateLoop;
-              }
-              return terminalFailure(failure, candidate);
-            }
-
-            if (outcome.kind === "response") {
-              candidateAttemptCount++;
-              const decision = await handleResponseFailure(
-                candidate,
-                candidateIndex,
-                candidateAttemptCount,
-                outcome.response,
-                outcome.observation,
-                outcome.attemptNumber,
-                outcome.cooldownMs,
-              );
-              if (decision === "retry") continue;
-              lastCandidateFailure = decision.failure;
-              if (decision.kind === "fallback") continue candidateLoop;
-              return terminalFailure(decision.failure, candidate);
-            }
-
-            if (outcome.kind === "translated_response") {
-              return relayTranslatedComplete(
-                outcome.response,
-                outcome.body,
-                outcome.outcome,
-                relayContextFor(candidate, outcome.attemptNumber),
-              );
-            }
-          }
-        }
+            : {
+                kind: "translated-complete",
+                execute: () => executeTranslatedAttempt(candidate, request, attemptContext, translation),
+              },
+        );
+        if (translatedResult.kind === "returned") return translatedResult.result;
+        lastCandidateFailure = translatedResult.failure;
+        continue;
       }
 
       await request.trace.recordJson("preflight", {
@@ -704,117 +560,12 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         protocol: candidate.provider.protocol,
       });
 
-      let candidateAttemptCount = 0;
-
-      while (true) {
-        const outcome = await executeAttempt(candidate, request, attemptContext);
-
-        if (outcome.kind === "cancelled") {
-          return handleCancellation(request.stream, candidate.provider.protocol, candidate.provider.name);
-        }
-        if (outcome.kind === "deadline_exceeded") {
-          return terminalFailure(timeoutFailure(), candidate);
-        }
-        if (outcome.kind === "prepare_failed") {
-          return terminalFailure(outcome.failure, candidate);
-        }
-        if (outcome.kind === "key_unavailable" || outcome.kind === "dispatch_failed") {
-          const failure = outcome.kind === "key_unavailable" ? unavailableFailure() : outcome.failure;
-          lastCandidateFailure = failure;
-          if (await tryFallback(candidate, candidateIndex, failure.category)) {
-            continue candidateLoop;
-          }
-          return terminalFailure(failure, candidate);
-        }
-
-        // Response head arrived
-        candidateAttemptCount++;
-        const { response, observation, cooldownMs } = outcome;
-
-        if (observation.result === "success" && outcome.streamRequested) {
-          return relayStream(response, relayContextFor(candidate, outcome.attemptNumber));
-        }
-
-        if (observation.result !== "success") {
-          const category = observation.result as IrFailureCategory;
-          const canRetry = shouldRetry({
-            status: observation.status,
-            category,
-            beforeClientBytes: observation.beforeClientBytes,
-            candidateAttemptCount,
-            retryOn: candidate.retryOn,
-          });
-
-          if (canRetry) {
-            await response.body.cancel().catch(() => undefined);
-            const delayMs = cooldownMs ?? 0;
-            await request.trace.recordJson("retry", {
-              attemptNumber: outcome.attemptNumber,
-              provider: candidate.provider.name,
-              category,
-              delayMs,
-            });
-            deps.observer.retryScheduled({
-              aptusRequestId,
-              attemptNumber: outcome.attemptNumber,
-              provider: candidate.provider.name,
-              targetProtocol: candidate.provider.protocol,
-              category,
-              delayMs,
-            });
-            deps.observer.observe({
-              type: "retry_scheduled",
-              aptusRequestId,
-              attemptNumber: outcome.attemptNumber,
-              delayMs,
-              category,
-            });
-            continue;
-          }
-
-          lastCandidateFailure = failureFromObservation(observation);
-          if (await tryFallback(candidate, candidateIndex, category)) {
-            await response.body.cancel().catch(() => undefined);
-            continue candidateLoop;
-          }
-        }
-
-        // Read full body for relay
-        let body: OwnedBody;
-        try {
-          body = await spoolResponseBody(response.body);
-        } catch {
-          if (request.signal.aborted) {
-            const durationMs = clock.nowMonotonicMs() - started;
-            const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
-            await request.trace.recordJson("cancellation", { phase: "relay", by });
-            deps.observer.cancelled({ aptusRequestId, phase: "relay", by });
-            await request.coordinator.finalize({
-              terminal: { kind: "cancelled", by },
-              outcomeCategory: "cancelled",
-              status: 499,
-              attempts: attemptNumber,
-              stream: request.stream,
-              durationMs,
-              targetProtocol: candidate.provider.protocol,
-              provider: candidate.provider.name,
-              canonicalPublicName: request.canonicalPublicName,
-            });
-            return { kind: "cancelled", by };
-          }
-          if (observation.result === "success") {
-            const failure = interruptedFailure();
-            lastCandidateFailure = failure;
-            if (await tryFallback(candidate, candidateIndex, failure.category)) {
-              continue candidateLoop;
-            }
-            return terminalFailure(failure, candidate);
-          }
-          return terminalFailure(interruptedFailure(), candidate);
-        }
-
-        return relayComplete(response, body, observation, relayContextFor(candidate, outcome.attemptNumber));
-      }
+      const nativeResult = await runCandidate(candidate, candidateIndex, runnerShared, {
+        kind: "native",
+        execute: () => executeAttempt(candidate, request, attemptContext),
+      });
+      if (nativeResult.kind === "returned") return nativeResult.result;
+      lastCandidateFailure = nativeResult.failure;
     }
 
     return terminalFailure(lastCandidateFailure ?? unsupportedCapabilityFailure(request.protocol));

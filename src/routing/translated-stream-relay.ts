@@ -1,11 +1,149 @@
-import type { GatewayResult, HeaderMap, Protocol, TerminalCoordinator, TraceByteSink } from "../domain/contracts.ts";
+import type {
+  GatewayResult,
+  HeaderMap,
+  Protocol,
+  ProviderResponse,
+  TerminalCoordinator,
+  TraceByteSink,
+  TraceSession,
+} from "../domain/contracts.ts";
 import type { NormalizedFailure, TraceTerminal } from "../domain/operations.ts";
 import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
-import type { ResponseOwnership } from "../translation/sse.ts";
-import type { TranslatedStreamPump } from "../translation/stream-pump.ts";
+import type { Direction, StreamSessionBundle } from "../translation/contracts.ts";
+import { createSseDecoder, createSseEncoder, type ResponseOwnership } from "../translation/sse.ts";
+import { TranslatedStreamPump } from "../translation/stream-pump.ts";
+import { createIrStreamStateMachine } from "../translation/stream-state.ts";
 import { classifyAbortReason } from "./attempt.ts";
-import { interruptedFailure, statusFromCategory, timeoutFailure } from "./failures.ts";
+import { dispatchFailure, interruptedFailure, statusFromCategory, timeoutFailure } from "./failures.ts";
 import type { Clock } from "./timing.ts";
+
+const utf8Encoder = new TextEncoder();
+
+/**
+ * Input for bootstrapping a translated stream before client headers commit.
+ *
+ * The relay module owns pump plus sink creation and the pre-header read loop
+ * wholly behind its seam; the attempt module retains key-lease observation
+ * and only consumes the ready pump/reader or the pre-header failure.
+ */
+export interface TranslatedStreamBootstrapInput {
+  readonly trace: TraceSession;
+  readonly response: ProviderResponse;
+  readonly sessionBundle: StreamSessionBundle;
+  readonly direction: Direction;
+}
+
+export type TranslatedStreamBootstrap =
+  | { readonly kind: "failure"; readonly failure: NormalizedFailure }
+  | {
+      readonly kind: "ready";
+      readonly reader: ReadableStreamDefaultReader<Uint8Array>;
+      readonly pump: TranslatedStreamPump;
+      readonly providerSink: TraceByteSink;
+      readonly irEventsSink: TraceByteSink;
+      readonly initialClientChunks: Uint8Array[];
+      readonly isInitialComplete: boolean;
+    };
+
+/**
+ * Creates the stream pump and trace sinks and reads until the first client
+ * chunk (or terminal) without committing client headers.
+ *
+ * Zero-byte failures return `failure` for the caller to observe before client
+ * bytes (retryable across candidates). Success transfers pump/reader/sink
+ * ownership to `relayTranslatedStream`.
+ */
+export async function bootstrapTranslatedStream(
+  input: TranslatedStreamBootstrapInput,
+): Promise<TranslatedStreamBootstrap> {
+  const sseDecoder = createSseDecoder();
+  const sseEncoder = createSseEncoder();
+  const stateMachine = createIrStreamStateMachine({
+    expectedResponseId: input.sessionBundle.session.responseId,
+    expectedModel: input.sessionBundle.session.model,
+    direction: input.direction,
+  });
+
+  const providerSink = input.trace.openBytes("provider_stream");
+  const irEventsSink = input.trace.openBytes("ir_events");
+
+  const pump = new TranslatedStreamPump(
+    sseDecoder,
+    sseEncoder,
+    input.sessionBundle.providerDecoder,
+    stateMachine,
+    input.sessionBundle.clientEncoder,
+    (evt) => {
+      void irEventsSink.append(utf8Encoder.encode(`${JSON.stringify(evt)}\n`));
+    },
+  );
+
+  const discardTraceSinks = async (): Promise<void> => {
+    await providerSink.discard().catch(() => undefined);
+    await irEventsSink.discard().catch(() => undefined);
+  };
+
+  const reader = input.response.body.getReader();
+  const initialClientChunks: Uint8Array[] = [];
+  let isInitialComplete = false;
+
+  while (initialClientChunks.length === 0 && !isInitialComplete) {
+    let chunkResult: { done: boolean; value?: Uint8Array };
+    try {
+      chunkResult = await reader.read();
+    } catch (readErr) {
+      await discardTraceSinks();
+      return { kind: "failure", failure: dispatchFailure(readErr) };
+    }
+
+    if (chunkResult.done) {
+      isInitialComplete = true;
+
+      const finishResult = pump.finish();
+      if (!finishResult.ok) {
+        await discardTraceSinks();
+        return { kind: "failure", failure: finishResult.error };
+      }
+      initialClientChunks.push(...finishResult.value);
+
+      const pumpFailure = pump.getFailure();
+      // Zero-prior-bytes split: headers are not sent yet, so an in-band
+      // failure here stays pre-header (retryable across candidates).
+      // Once client bytes exist the relay owns the stream instead.
+      if (pumpFailure !== undefined && initialClientChunks.length === 0) {
+        await discardTraceSinks();
+        return { kind: "failure", failure: pumpFailure };
+      }
+
+      if (!pump.isTerminal()) {
+        await discardTraceSinks();
+        return {
+          kind: "failure",
+          failure: {
+            category: "stream_interrupted",
+            message: "Upstream stream ended abruptly before reaching a terminal state",
+            retryable: false,
+          },
+        };
+      }
+      break;
+    }
+
+    if (chunkResult.value !== undefined && chunkResult.value.length > 0) {
+      void providerSink.append(chunkResult.value);
+
+      const pushResult = pump.pushBytes(chunkResult.value);
+      if (!pushResult.ok) {
+        await discardTraceSinks();
+        await reader.cancel().catch(() => undefined);
+        return { kind: "failure", failure: pushResult.error };
+      }
+      initialClientChunks.push(...pushResult.value);
+    }
+  }
+
+  return { kind: "ready", reader, pump, providerSink, irEventsSink, initialClientChunks, isInitialComplete };
+}
 
 /**
  * Context dependencies for relaying a translated stream.

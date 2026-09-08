@@ -3,10 +3,12 @@ import type {
   GatewayRequest,
   JsonValue,
   KeyLease,
+  PreparedProviderRequest,
   Protocol,
   ProtocolAdapter,
   ProviderDispatcher,
   ProviderResponse,
+  Result,
   TraceSession,
 } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
@@ -20,17 +22,20 @@ const utf8Decoder = new TextDecoder();
 /**
  * The outcome of one candidate attempt, consumed by the Gateway's policy loop.
  *
- * Every kind except `"response"` is a candidate-level terminal condition
- * (client cancellation, deadline expiry, preparation failure, key exhaustion,
- * or a transport dispatch failure); the Gateway decides retry, fallback, and
- * the client-facing terminal for each.
+ * `AttemptHeadOutcome` holds the candidate-level terminal conditions shared by
+ * every path (client cancellation, deadline expiry, preparation failure, key
+ * exhaustion, or transport dispatch failure); success shapes differ per path
+ * and are unioned separately.
  */
-export type AttemptOutcome =
+export type AttemptHeadOutcome =
   | { readonly kind: "key_unavailable" }
   | { readonly kind: "deadline_exceeded" }
   | { readonly kind: "cancelled"; readonly phase: "routing" | "wait" | "dispatch" }
   | { readonly kind: "prepare_failed"; readonly failure: NormalizedFailure }
-  | { readonly kind: "dispatch_failed"; readonly failure: NormalizedFailure }
+  | { readonly kind: "dispatch_failed"; readonly failure: NormalizedFailure };
+
+export type AttemptOutcome =
+  | AttemptHeadOutcome
   | {
       readonly kind: "response";
       readonly response: ProviderResponse;
@@ -71,23 +76,96 @@ export function classifyAbortReason(signal: AbortSignal): "timeout" | "shutdown"
 }
 
 /**
- * Executes exactly one attempt on a candidate: key acquisition (rotating to an
- * available key, waiting out cooldowns inside the deadline), native request
- * preparation, dispatch, response-head classification, and key observation.
+ * Per-path request preparation adapter behind the unified attempt seam.
  *
- * The executor owns the mechanical trace stages and telemetry of an attempt;
- * it never decides retry or fallback.
- *
- * @param candidate - The candidate being attempted.
- * @param request - The admitted client request.
- * @param ctx - Execution dependencies and the attempt-number allocator.
- * @returns The {@link AttemptOutcome} for the Gateway's policy loop.
+ * The unified attempt core owns lease, dispatch, classify, and bookkeeping
+ * once; each adapter supplies only path-specific preparation. Native prepares
+ * via `prepareNative`, translated paths via the coordinator ticket.
  */
-export async function executeAttempt(
+export interface AttemptPreparer<Pre> {
+  /**
+   * Runs before any key lease (translate for cross-protocol paths, no-op for
+   * native). Records its own `ir_request` traces; a failure returns with zero
+   * lease and zero dispatch.
+   */
+  prepareBeforeLease(
+    candidate: CandidateDescriptor,
+    request: GatewayRequest,
+    ctx: AttemptContext,
+  ): Promise<Result<Pre, NormalizedFailure>>;
+  /**
+   * Builds the dispatchable provider request from the leased key and the
+   * pre-lease product. A failure is recorded as `prepare_failed`.
+   */
+  buildRequest(
+    candidate: CandidateDescriptor,
+    request: GatewayRequest,
+    ctx: AttemptContext,
+    lease: KeyLease,
+    pre: Pre,
+  ): Result<PreparedProviderRequest, NormalizedFailure>;
+  /**
+   * Classifies the response head with the path's owning adapter
+   * (`request.protocol` for native, target protocol for translated).
+   */
+  classify(
+    candidate: CandidateDescriptor,
+    request: GatewayRequest,
+    ctx: AttemptContext,
+    response: ProviderResponse,
+  ): AttemptObservation;
+  /**
+   * When true, the core records the native `mutation` trace (defaults,
+   * extraBody, overrides, upstreamModel). Translated paths leave this false:
+   * they apply no native mutations and historically emit no such stage, so
+   * emitting one would shift trace numbering.
+   */
+  readonly traceNativeMutation?: boolean;
+}
+
+/**
+ * Result of dispatching one attempt head without key observation.
+ *
+ * The core owns lease, dispatch, and classify mechanics; the caller owns the
+ * single `finishAttempt` observation so translated paths can settle with the
+ * post-success (spooled outcome / bootstrap) category instead of the raw head.
+ * The dispatched variant carries the preparer product (e.g. the translation
+ * ticket) so callers need no closure capture to continue post-success work.
+ */
+export type DispatchedAttempt<Pre> =
+  | AttemptHeadOutcome
+  | {
+      readonly kind: "dispatched";
+      readonly response: ProviderResponse;
+      readonly observation: AttemptObservation;
+      readonly lease: KeyLease;
+      readonly attemptNumber: number;
+      readonly dispatchDurationMs: number;
+      readonly stream: boolean;
+      readonly pre: Pre;
+    };
+
+/**
+ * Dispatches one attempt head: pre-lease preparation, lease, build, dispatch,
+ * and classify — without key observation.
+ *
+ * Single owner of pairing faults: abort checks, key selection telemetry,
+ * `provider_request` / `provider_response_head` traces, attempt numbering,
+ * and dispatch error mapping live here once. Callers perform exactly one
+ * `finishAttempt` with the final (possibly post-success) observation.
+ */
+export async function dispatchOneAttempt<Pre>(
   candidate: CandidateDescriptor,
   request: GatewayRequest,
   ctx: AttemptContext,
-): Promise<AttemptOutcome> {
+  preparer: AttemptPreparer<Pre>,
+): Promise<DispatchedAttempt<Pre>> {
+  const preResult = await preparer.prepareBeforeLease(candidate, request, ctx);
+  if (!preResult.ok) {
+    return { kind: "prepare_failed", failure: preResult.error };
+  }
+  const pre = preResult.value;
+
   if (request.signal.aborted) {
     const reason = classifyAbortReason(request.signal);
     if (reason === "timeout") {
@@ -104,7 +182,6 @@ export async function executeAttempt(
     return { kind: "cancelled", phase: acquired.phase };
   }
   const lease = acquired.lease;
-
   const attemptNumber = ctx.nextAttemptNumber();
 
   await ctx.trace.recordJson("key_selection", {
@@ -120,29 +197,20 @@ export async function executeAttempt(
     strategy: candidate.provider.keyStrategy,
   });
 
-  const preparedResult = ctx.adapters[request.protocol].prepareNative({
-    protocol: request.protocol,
-    baseUrl: candidate.provider.baseUrl,
-    upstreamModel: candidate.model.upstreamModel,
-    clientBody: request.body,
-    clientHeaders: request.headers,
-    providerHeaders: candidate.provider.headers,
-    providerSecret: lease.secret,
-    mutations: candidate.mutations,
-    deadlineMs: ctx.deadlineMs,
-    streamIdleMs: ctx.streamIdleMs,
-  });
-  if (!preparedResult.ok) {
-    await ctx.trace.recordJson("mutation", { failure: failureJson(preparedResult.error) });
-    return { kind: "prepare_failed", failure: preparedResult.error };
+  const built = preparer.buildRequest(candidate, request, ctx, lease, pre);
+  if (!built.ok) {
+    await ctx.trace.recordJson("mutation", { failure: failureJson(built.error) });
+    return { kind: "prepare_failed", failure: built.error };
   }
-  const prepared = { ...preparedResult.value, provider: candidate.provider.name };
-  await ctx.trace.recordJson("mutation", {
-    defaults: candidate.mutations.defaults,
-    extraBody: candidate.mutations.extraBody,
-    overrides: candidate.mutations.overrides,
-    upstreamModel: candidate.model.upstreamModel,
-  });
+  const prepared = { ...built.value, provider: candidate.provider.name };
+  if (preparer.traceNativeMutation === true) {
+    await ctx.trace.recordJson("mutation", {
+      defaults: candidate.mutations.defaults,
+      extraBody: candidate.mutations.extraBody,
+      overrides: candidate.mutations.overrides,
+      upstreamModel: candidate.model.upstreamModel,
+    });
+  }
   await ctx.trace.recordJson("provider_request", {
     provider: prepared.provider,
     protocol: prepared.protocol,
@@ -226,26 +294,74 @@ export async function executeAttempt(
     finalUrl: response.finalUrl,
   });
 
-  const observation = ctx.adapters[request.protocol].classify(response, ctx.clock.nowWall().getTime());
+  const observation = preparer.classify(candidate, request, ctx, response);
+  return {
+    kind: "dispatched",
+    response,
+    observation,
+    lease,
+    attemptNumber,
+    dispatchDurationMs,
+    stream: prepared.stream,
+    pre,
+  };
+}
+
+/**
+ * Executes exactly one attempt on a candidate: key acquisition (rotating to an
+ * available key, waiting out cooldowns inside the deadline), native request
+ * preparation, dispatch, response-head classification, and key observation.
+ *
+ * Native preparation and same-protocol classification supply the path-specific
+ * seam of the shared dispatch core; the head observation is final here, so it
+ * settles inline (translated paths use `dispatchOneAttempt` directly to defer
+ * settlement past spool/bootstrap).
+ */
+export async function executeAttempt(
+  candidate: CandidateDescriptor,
+  request: GatewayRequest,
+  ctx: AttemptContext,
+): Promise<AttemptOutcome> {
+  const dispatched = await dispatchOneAttempt(candidate, request, ctx, {
+    traceNativeMutation: true,
+    prepareBeforeLease: async () => ({ ok: true as const, value: undefined }),
+    buildRequest: (candidate, request, ctx, lease) =>
+      ctx.adapters[request.protocol].prepareNative({
+        protocol: request.protocol,
+        baseUrl: candidate.provider.baseUrl,
+        upstreamModel: candidate.model.upstreamModel,
+        clientBody: request.body,
+        clientHeaders: request.headers,
+        providerHeaders: candidate.provider.headers,
+        providerSecret: lease.secret,
+        mutations: candidate.mutations,
+        deadlineMs: ctx.deadlineMs,
+        streamIdleMs: ctx.streamIdleMs,
+      }),
+    classify: (_candidate, request, ctx, response) =>
+      ctx.adapters[request.protocol].classify(response, ctx.clock.nowWall().getTime()),
+  });
+  if (dispatched.kind !== "dispatched") {
+    return dispatched;
+  }
   const cooldownMs = finishAttempt(
     ctx,
     request,
     candidate,
-    lease,
-    attemptNumber,
-    observation,
-    observation.status,
-    dispatchDurationMs,
-    prepared.stream,
+    dispatched.lease,
+    dispatched.attemptNumber,
+    dispatched.observation,
+    dispatched.observation.status,
+    dispatched.dispatchDurationMs,
+    dispatched.stream,
   );
-
   return {
     kind: "response",
-    response,
-    observation,
+    response: dispatched.response,
+    observation: dispatched.observation,
     cooldownMs,
-    attemptNumber,
-    streamRequested: prepared.stream,
+    attemptNumber: dispatched.attemptNumber,
+    streamRequested: dispatched.stream,
   };
 }
 
