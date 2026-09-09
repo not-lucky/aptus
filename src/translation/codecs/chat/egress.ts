@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Egress encoder for the OpenAI Chat Completions protocol.
+ *
+ * Translates intermediate representation (IR) requests and outcomes onto the
+ * OpenAI Chat Completions wire format. Request encoding projects generation controls,
+ * transcript items, tools, and sidecar options into the Chat schema. Outcome encoding
+ * reconstructs completion envelopes, choices, finish reasons, usage, and moderation facts.
+ *
+ * Encoding is total over preflight-validated IR structures; usage counters are emitted
+ * only when reported by the IR, and text runs and refusals are coalesced consistently.
+ */
+
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
@@ -13,25 +25,36 @@ import { chatUsageBody } from "../shared/usage.ts";
 import { chatOutcomeWireFields, chatResponsesRequestFields } from "../shared/wire-options.ts";
 
 /**
- * Egress encoder for OpenAI Chat Completions requests and responses.
+ * Encodes IR requests and outcomes onto the OpenAI Chat Completions wire format.
  *
- * Request encoding projects IR generation controls and the admitted wire-only
- * sidecar fields onto Chat wire fields; per-part prompt-cache breakpoints are
- * re-anchored onto the reconstructed message parts. Outcome encoding emits
- * usage subdivisions, the moderation result (re-wrapped into the Chat verdict
- * envelope), and the effective service-tier echo.
+ * Implements {@link EgressEncoder} for `openai-chat`. Delegates transcript assembly,
+ * tool mapping, output format, and usage serialization to shared codec helpers while
+ * assembling the final request and response envelopes.
  */
 export class ChatEgressEncoder implements EgressEncoder {
-  /**
-   * Wall-clock Unix epoch seconds used to synthesize the envelope `created`
-   * timestamp. Injectable so tests stay deterministic; defaults to the real clock.
-   */
+  /** Clock supplying whole Unix epoch seconds for envelope `created` timestamps. */
   private readonly now: () => number;
 
+  /**
+   * Creates a Chat egress encoder with an optional clock override.
+   *
+   * @param now - Factory returning whole Unix epoch seconds, defaulting to system time.
+   */
   constructor(now: () => number = () => Math.floor(Date.now() / 1000)) {
     this.now = now;
   }
 
+  /**
+   * Encodes an admitted IR request into an OpenAI Chat Completions request body.
+   *
+   * Reconstructs messages with prompt cache breakpoints, projects generation parameters,
+   * tool configurations, and output formats. Sets `stream: false`.
+   *
+   * @param request - Preflight-validated IR request to encode.
+   * @param targetModel - Provider-facing model name for the target payload.
+   * @param requestWireOptions - Optional wire sidecars captured during ingress.
+   * @returns Serialized Chat Completions JSON request body.
+   */
   encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
     const markedItems = new Set(
       (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
@@ -49,6 +72,16 @@ export class ChatEgressEncoder implements EgressEncoder {
     };
   }
 
+  /**
+   * Encodes an IR outcome into an OpenAI Chat Completions response envelope.
+   *
+   * Partitions output parts into text runs and tool calls, maps finish reasons,
+   * formats usage counters if present, and projects wire sidecar options.
+   *
+   * @param outcome - Preflight-validated IR outcome to encode.
+   * @param outcomeWireOptions - Optional wire options including moderation and service tier.
+   * @returns HTTP response payload containing status 200, JSON headers, and the completion body.
+   */
   encodeOutcome(
     outcome: IrOutcome,
     outcomeWireOptions?: OutcomeWireOptions,
@@ -57,8 +90,7 @@ export class ChatEgressEncoder implements EgressEncoder {
     readonly headers: HeaderMap;
     readonly body: JsonObject;
   } {
-    // One coalescing rule for every wire: text runs collapse in
-    // partitionOutcomeParts, so Chat cannot drift from Messages and Responses.
+    // Collapse text runs through one shared rule so Chat cannot drift from Messages and Responses.
     const segments = partitionOutcomeParts(outcome.parts);
     const textRuns = segments.flatMap((segment) => (segment.type === "text" ? [segment.text] : []));
     const text = textRuns.join("");
@@ -81,17 +113,12 @@ export class ChatEgressEncoder implements EgressEncoder {
     );
 
     const finishReason = chatFinishReason(outcome.finish.reason);
-    // Preflight rejects every non-C/R refusal before encoding, so a refusal
-    // part reaching this total encoder is unreachable in translated turns; the
-    // fallback coalesces all refusal texts so a hypothetical multi-refusal
-    // outcome loses nothing.
+    // Coalesce every refusal text because preflight keeps translated refusals unreachable here.
     const refusalTexts = outcome.parts.flatMap((p) => (p.type === "refusal" ? [p.text ?? ""] : []));
     const refusalPart = refusalTexts.length > 0 ? { text: refusalTexts.join("") } : undefined;
 
-    // Never fabricate usage: Chat may omit it, so the field is present only when
-    // the IR outcome actually reports counters (absence is distinct from zero).
-    // Subdivisions ride in the documented details objects and are never
-    // re-added to the totals.
+    // Keep usage absent when the IR reports no counters because absence differs from zero.
+    // Subdivisions travel inside the documented details objects and never inflate the totals.
     const usage = outcome.usage !== undefined ? chatUsageBody(outcome.usage) : undefined;
 
     const body: JsonObject = {
@@ -104,8 +131,7 @@ export class ChatEgressEncoder implements EgressEncoder {
           index: 0,
           message: {
             role: "assistant",
-            // Tool-only or refusal outcomes without text carry null content; any text part (even one
-            // concatenating to empty) is the scalar content spelling.
+            // Carry null content for tool-only and refusal outcomes and scalar content otherwise.
             content: textRuns.length > 0 ? text : refusalPart !== undefined || toolCalls.length > 0 ? null : "",
             ...(refusalPart !== undefined ? { refusal: refusalPart.text ?? "" } : {}),
             ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
@@ -115,9 +141,7 @@ export class ChatEgressEncoder implements EgressEncoder {
         },
       ],
       ...(usage !== undefined ? { usage } : {}),
-      // The moderation result re-wraps into the Chat verdict envelope and the
-      // tier echo passes through; both projections are shared with the
-      // streaming client encoder.
+      // Reuse the shared projection for the verdict envelope and the tier echo.
       ...chatOutcomeWireFields(outcomeWireOptions),
     };
 

@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Routing gateway composition root and candidate orchestration engine.
+ *
+ * Implements the {@link Gateway} contract via {@link createGateway}: builds immutable candidate,
+ * provider, and route indexes from configuration, manages key pool instances, and executes requests.
+ * Evaluates candidates in route order across dry-run previews, native attempts, and cross-protocol
+ * translated attempts with automatic retries and fallback progression.
+ */
+
 import type { AptusConfig, ModelConfig, RouteConfig } from "../config/types.ts";
 import type {
   DryRunProviderRequest,
@@ -36,58 +46,73 @@ import { executeTranslatedAttempt, executeTranslatedDryRun } from "./translated-
 import { executeTranslatedStreamAttempt } from "./translated-stream-attempt.ts";
 
 /**
- * Construction options for the Gateway composition seam.
+ * Options for constructing the gateway orchestrator instance.
  */
 export interface GatewayOptions {
-  /** Deep-frozen configuration snapshot. */
+  /** Gateway configuration snapshot. */
   readonly config: AptusConfig;
-  /** SHA-256 config revision digest recorded in trace manifests. */
+  /** SHA-256 digest of configuration revision. */
   readonly revision: string;
-  /** Protocol adapters keyed by protocol. */
+  /** Protocol adapters keyed by protocol identifier. */
   readonly adapters: Readonly<Record<Protocol, ProtocolAdapter>>;
-  /** Network dispatcher. */
+  /** Network dispatcher executing provider HTTP requests. */
   readonly dispatcher: ProviderDispatcher;
-  /** Trace recorder (file or no-op). */
+  /** Trace recorder opening per-request trace sessions. */
   readonly traceRecorder: TraceRecorder;
-  /** Telemetry observer. */
+  /** Telemetry observer tracking request lifecycle events. */
   readonly observer: GatewayObservability;
-  /** Optional monotonic and wall clock source. */
+  /** Monotonic and wall clock source (defaults to `systemClock`). */
   readonly clock?: Clock;
-  /** Optional abortable sleeper. */
+  /** Abortable sleeper timer (defaults to `systemSleeper`). */
   readonly sleeper?: Sleeper;
-  /** Optional pseudo-random number generator. */
+  /** Pseudo-random number generator for jitter (defaults to `systemRandomSource`). */
   readonly random?: RandomSource;
-  /** Optional field-aware secret redactor. */
+  /** Redactor for stripping secrets from trace logs (defaults to auto-discovered secrets). */
   readonly redactor?: Redactor;
   /** Optional cross-protocol translation coordinator. */
   readonly translation?: TranslationCoordinator;
 }
 
-/**
- * Gateway dependencies plus precomputed indexes and timing seams.
- */
+/** Resolved gateway dependencies and precomputed configuration indexes. */
 interface RunDependencies {
+  /** Gateway configuration snapshot. */
   readonly config: AptusConfig;
+  /** SHA-256 digest of configuration revision. */
   readonly revision: string;
+  /** Protocol adapters keyed by protocol identifier. */
   readonly adapters: Readonly<Record<Protocol, ProtocolAdapter>>;
+  /** Network dispatcher executing provider HTTP requests. */
   readonly dispatcher: ProviderDispatcher;
+  /** Trace recorder opening per-request trace sessions. */
   readonly traceRecorder: TraceRecorder;
+  /** Telemetry observer tracking request lifecycle events. */
   readonly observer: GatewayObservability;
+  /** Monotonic and wall clock source. */
   readonly clock: Clock;
+  /** Abortable sleeper timer. */
   readonly sleeper: Sleeper;
+  /** Precomputed model/route name and authorization index. */
   readonly nameIndex: NameIndex;
+  /** Precomputed map of configured models by name. */
   readonly modelsByName: ReadonlyMap<string, ModelConfig>;
+  /** Precomputed map of configured routes by name. */
   readonly routesByName: ReadonlyMap<string, RouteConfig>;
+  /** Precomputed map of providers and their key pools. */
   readonly providers: ReadonlyMap<string, ProviderEntry>;
+  /** Redactor for stripping secrets from trace logs. */
   readonly redactor: Redactor;
+  /** Optional cross-protocol translation coordinator. */
   readonly translation?: TranslationCoordinator;
 }
 
 /**
- * Creates the native request Gateway orchestrator.
+ * Creates the routing gateway orchestrator implementing the {@link Gateway} contract.
  *
- * @param options - Composition dependencies.
- * @returns A {@link Gateway} instance.
+ * Precomputes lookup indexes, initializes provider key pools, builds credential redactors,
+ * and wires candidate dispatch loops for incoming requests.
+ *
+ * @param options - Gateway composition dependencies and configuration.
+ * @returns Gateway instance with an `execute` entry point.
  */
 export function createGateway(options: GatewayOptions): Gateway {
   const clock = options.clock ?? systemClock;
@@ -136,7 +161,11 @@ export function createGateway(options: GatewayOptions): Gateway {
 }
 
 /**
- * Executes the native request sequence or dry-run evaluation.
+ * Executes a single request through candidate resolution, retries, and fallback progression.
+ *
+ * @param request - Admitted gateway request.
+ * @param deps - Resolved gateway dependencies and precomputed indexes.
+ * @returns Gateway result for HTTP response relay.
  */
 async function runRequest(request: GatewayRequest, deps: RunDependencies): Promise<GatewayResult> {
   const clock = deps.clock;
@@ -147,9 +176,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
 
   let attemptNumber = 0;
 
-  // A terminal fact is built here but finalized by HTTP after the client write,
-  // so duration and first-byte timing reflect actual delivery rather than the
-  // moment the Gateway discovered the outcome.
+  // A terminal fact is built here but finalized by HTTP after the client write.
   const terminalFailure = (failure: NormalizedFailure, candidate?: CandidateDescriptor): GatewayResult => {
     const status = statusFromCategory(failure.category, request.protocol);
     const fact = {
@@ -225,7 +252,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       });
     };
 
-    /** True (after emitting the transition) when policy allows moving to the next candidate. */
+    /** True when policy allows moving to the next candidate. */
     const tryFallback = async (
       candidate: CandidateDescriptor,
       candidateIndex: number,
@@ -243,7 +270,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       return true;
     };
 
-    /** Records one candidate skip in Trace and telemetry (shared by both execution paths). */
+    /** Records candidate skip in trace and telemetry. */
     const emitCandidateSkip = async (candidate: CandidateDescriptor, failure: NormalizedFailure): Promise<void> => {
       await request.trace.recordJson("candidate_skip", {
         candidateIndex: candidate.index,
@@ -272,17 +299,7 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
       });
     };
 
-    /**
-     * Gates a cross-protocol candidate: returns the capability failure that
-     * blocks it (no translation bundle or streaming request), or the active
-     * coordinator when the candidate may proceed to translation.
-     *
-     * A no-translation skip is a generic "no compatible provider" condition and
-     * does not become the lastCandidateFailure (so a prior real failure or the
-     * client-protocol generic surfaces as terminal). A stream skip names the
-     * actual capability and does become the terminal when every candidate is
-     * skipped.
-     */
+    /** Gates a cross-protocol candidate, checking coordinator availability. */
     const translationGate = (
       candidate: CandidateDescriptor,
     ):
@@ -342,8 +359,6 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
               lastCandidateFailure = dryRunOutcome.failure;
               continue;
             }
-            // A request-level translation failure (e.g. malformed payload) is
-            // not a candidate incompatibility: no other candidate can serve it.
             return terminalFailure(dryRunOutcome.failure, candidate);
           }
 
@@ -408,7 +423,6 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         const prepared = prepareResult.value;
         await request.trace.recordJson("mutation", { mutations: prepared.mutations });
 
-        // Redact outbound request headers and body for preview inspection
         const redactedHeaders = deps.redactor.redactHeaders(prepared.headers);
         const parsedBody = JSON.parse(new TextDecoder().decode(prepared.body)) as JsonObject;
         const redactedBody = deps.redactor.redactJson(parsedBody) as JsonObject;
@@ -519,7 +533,9 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
 
     for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
       const candidate = candidates[candidateIndex];
-      if (candidate === undefined) continue; // Protocol preflight check / Translation branch
+      if (candidate === undefined) continue;
+
+      // Protocol preflight check / Translation branch
       if (candidate.provider.protocol !== request.protocol) {
         const gate = translationGate(candidate);
         if (gate.kind === "blocked") {

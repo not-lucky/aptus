@@ -1,8 +1,16 @@
+/**
+ * @fileoverview HTTP header filtering for provider dispatch and response relay.
+ *
+ * Sanitizes headers crossing the gateway boundary in both directions: strips hop-by-hop
+ * transport headers (RFC 7230), prevents client credential leakage, injects provider
+ * authentication tokens, and blocks inbound cookies (`set-cookie`).
+ */
+
 import type { HeaderMap } from "./contracts.ts";
 
 /**
- * Hop-by-hop and transport-framing header names defined by RFC 7230 §6.1.
- * Never forwarded across the gateway boundary in either direction.
+ * Hop-by-hop and transport framing header names from RFC 7230 section 6.1.
+ * Dropped in both inbound and outbound directions as each connection negotiates framing independently.
  */
 export const HOP_BY_HOP: ReadonlySet<string> = new Set([
   "connection",
@@ -16,10 +24,9 @@ export const HOP_BY_HOP: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Outbound request headers removed before dispatch. Extends the hop-by-hop set
- * with framing fields the dispatcher owns (`host`, `content-length`) and the
- * client's authentication credentials, which Aptus replaces with the selected
- * provider key credential.
+ * Headers stripped from outbound requests before dispatching to upstream providers.
+ * Combines hop-by-hop headers, dispatcher-managed framing (`host`, `content-length`),
+ * and client credentials (`authorization`, `x-api-key`).
  */
 export const OUTBOUND_REMOVE: ReadonlySet<string> = new Set([
   ...HOP_BY_HOP,
@@ -30,21 +37,32 @@ export const OUTBOUND_REMOVE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Inbound response headers removed after dispatch. Extends the hop-by-hop set
- * with `set-cookie`, which is intentionally never relayed to downstream clients.
+ * Headers stripped from inbound upstream provider responses before relaying to clients.
+ * Combines hop-by-hop headers with `set-cookie` to prevent providers from setting client cookies.
  */
 export const INBOUND_REMOVE: ReadonlySet<string> = new Set([...HOP_BY_HOP, "set-cookie"]);
 
 /**
- * Provider authentication header installed on an outbound request.
+ * Upstream provider authentication header configuration.
  */
 export interface OutboundAuth {
+  /** Target header name (e.g. `authorization` or `x-api-key`). Normalized to lowercase during dispatch. */
   readonly name: string;
+  /** Full credential string, including any required schema prefix (e.g. `Bearer <token>`). */
   readonly value: string;
 }
 
 /**
- * Builds the filtered outbound request headers for a provider dispatch.
+ * Prepares outbound HTTP headers for provider dispatch.
+ *
+ * Merges client and static provider headers after filtering through {@link OUTBOUND_REMOVE},
+ * then installs the leased provider authentication header. Provider headers override
+ * matching client headers, and the authentication header takes final precedence.
+ *
+ * @param clientHeaders - Admitted client request headers.
+ * @param providerHeaders - Static headers configured on the target provider.
+ * @param auth - Leased provider authentication credential.
+ * @returns An immutable lowercased {@link HeaderMap} safe for outbound network dispatch.
  */
 export function filterOutboundHeaders(
   clientHeaders: HeaderMap,
@@ -65,7 +83,12 @@ export function filterOutboundHeaders(
 }
 
 /**
- * Filters inbound provider response headers before they reach the Gateway.
+ * Filters upstream response headers before relaying to the downstream client.
+ *
+ * Strips hop-by-hop framing headers and `set-cookie` directives matching {@link INBOUND_REMOVE}.
+ *
+ * @param headers - Raw response headers received from upstream provider.
+ * @returns A filtered lowercased {@link HeaderMap} safe for downstream client delivery.
  */
 export function filterInboundHeaders(headers: HeaderMap): HeaderMap {
   const result: Record<string, string> = {};

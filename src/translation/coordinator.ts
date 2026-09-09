@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Coordinates cross-protocol request and outcome translation between client and provider wire formats.
+ *
+ * Implements {@link TranslationCoordinator} to execute the ordered translation pipeline:
+ * decode to Intermediate Representation (IR), validate semantic invariants, preflight capability
+ * compatibility, and encode into target wire formats. For Anthropic Messages targets, resolves
+ * and injects mandatory `max_tokens` limits.
+ *
+ * Exposes both ticketed (`TranslatedTicket`) and direct execution paths for complete and streaming flows.
+ */
+
 import { randomUUID } from "node:crypto";
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
@@ -32,9 +43,12 @@ import { ok, payloadTooLarge, unsupportedCapability } from "./result.ts";
 import { validateIrOutcome, validateIrRequest } from "./validate.ts";
 
 /**
- * Resolves the required Anthropic Messages `max_tokens`: the caller's output
- * token limit wins; the target model's configured default fills in when absent.
- * Returns a fail-closed failure when no positive safe integer can be resolved.
+ * Resolves the mandatory `max_tokens` limit required by Anthropic Messages targets,
+ * preferring explicit request-level limits over configured target model defaults.
+ *
+ * @param irRequest - Validated intermediate representation of the inbound request.
+ * @param targetDefaultMaxTokens - Configured default limit for the target model.
+ * @returns Resolved positive safe integer token limit, or unsupported capability failure if unresolvable.
  */
 function resolveMessagesMaxTokens(
   irRequest: IrRequest,
@@ -50,6 +64,15 @@ function resolveMessagesMaxTokens(
   return ok(maxTokens);
 }
 
+/**
+ * Injects resolved `max_tokens` into an Anthropic Messages request body and verifies
+ * serialized size does not exceed the media body limit.
+ *
+ * @param encodedBody - Mutable JSON request body to finalize.
+ * @param irRequest - Validated semantic request representation.
+ * @param targetDefaultMaxTokens - Configured fallback token limit.
+ * @returns Successful result or normalized failure if limit is missing or payload too large.
+ */
 function finalizeMessagesRequestBody(
   encodedBody: Record<string, unknown>,
   irRequest: IrRequest,
@@ -66,10 +89,10 @@ function finalizeMessagesRequestBody(
 }
 
 /**
- * Extracts the numeric `max_tokens` model default, if configured.
+ * Extracts a numeric `max_tokens` default from loosely typed provider catalog defaults.
  *
- * Centralizes the `typeof === "number"` guard previously copy-pasted across
- * every translated path, so callers pass model defaults through one spelling.
+ * @param defaults - Upstream provider model configuration defaults.
+ * @returns Numeric token limit if present and valid, otherwise `undefined`.
  */
 export function targetDefaultMaxTokensFrom(
   defaults: { readonly max_tokens?: unknown } | undefined,
@@ -79,17 +102,16 @@ export function targetDefaultMaxTokensFrom(
 }
 
 /**
- * Creates the pure, side-effect-free cross-protocol translation coordinator.
+ * Instantiates a stateless {@link TranslationCoordinator} closing over the provided protocol codecs.
  *
- * Coordinates request decoding (IR + wire-options sidecar), IR validation,
- * capability preflight (including per-direction sidecar feasibility), and
- * target encoding, as well as provider response decoding, outcome validation,
- * preflight, sidecar normalization, and client encoding.
- *
- * @param codecs - Registered ingress decoders and egress encoders for each protocol.
- * @returns A {@link TranslationCoordinator} bundle.
+ * @param codecs - Registry of complete and streaming codecs for supported protocols.
+ * @returns Configured coordinator supporting ticketed and direct translation workflows.
  */
 export function createTranslationCoordinator(codecs: TranslationCodecs): TranslationCoordinator {
+  /**
+   * Executes the 5-stage complete request translation pipeline: decode, re-key model,
+   * validate, preflight capabilities, and encode target body with protocol finalization.
+   */
   const runComplete = (
     input: TranslateCompleteInput,
   ): Result<{ body: TranslateCompleteRequestResult["body"]; irRequest: IrRequest }, NormalizedFailure> => {
@@ -138,6 +160,10 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
     return ok({ body: encodedBody, irRequest });
   };
 
+  /**
+   * Executes the 5-stage streaming request translation pipeline, preserving stream wire
+   * options for subsequent session binding.
+   */
   const runStream = (input: TranslateStreamRequestInput): Result<TranslateStreamRequestResult, NormalizedFailure> => {
     const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
     const streamDecoder = codecs.streamRequestDecoders[input.sourceProtocol];
@@ -192,6 +218,9 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
     });
   };
 
+  /**
+   * Translates a request and wraps the verified result in a branded {@link TranslatedTicket}.
+   */
   const buildTicket = (input: TranslateRequestInput): Result<TranslatedTicket, NormalizedFailure> => {
     if (input.stream) {
       const result = runStream({
@@ -237,6 +266,9 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
     });
   };
 
+  /**
+   * Constructs a paired stream decoder and encoder bundle bound to a common session identity.
+   */
   const buildSession = (
     ticket: TranslatedTicket,
     responseId: string | undefined,
@@ -260,10 +292,23 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
   };
 
   return {
+    /**
+     * Translates an inbound request into a branded {@link TranslatedTicket} for provider dispatch.
+     *
+     * @param input - Inbound request parameters, models, and delivery mode.
+     * @returns Successful ticket containing encoded body and semantic IR, or normalized failure.
+     */
     translateRequest(input: TranslateRequestInput): Result<TranslatedTicket, NormalizedFailure> {
       return buildTicket(input);
     },
 
+    /**
+     * Prepares an outbound provider HTTP request from an already-translated ticket.
+     *
+     * @param ticket - Verified ticket produced by {@link translateRequest}.
+     * @param input - Provider connection, authentication, headers, and timeout settings.
+     * @returns Prepared provider request ready for HTTP dispatch.
+     */
     prepareTicketRequest(ticket: TranslatedTicket, input: PrepareTicketRequestInput) {
       return prepareTranslatedProviderRequest({
         providerName: input.providerName,
@@ -279,20 +324,46 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       });
     },
 
+    /**
+     * Creates a streaming session bundle from a verified streaming ticket.
+     *
+     * @param ticket - Streaming ticket that the session will serve.
+     * @param input - Optional overrides for response ID and part ID generation.
+     * @returns Session bundle holding shared session identity, provider decoder, and client encoder.
+     * @throws {Error} When `ticket.stream` is false.
+     */
     createTicketSession(ticket, input) {
       return buildSession(ticket, input?.responseId, input?.createPartId);
     },
 
+    /**
+     * Translates a complete (non-streaming) request without producing a branded ticket.
+     *
+     * @param input - Inbound request parameters, models, and fallback token limits.
+     * @returns Encoded target body and semantic IR request, or normalized failure.
+     */
     translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure> {
       return runComplete(input);
     },
 
+    /**
+     * Translates a streaming request without producing a branded ticket.
+     *
+     * @param input - Inbound streaming request parameters, models, and fallback token limits.
+     * @returns Encoded target streaming body, IR request, and stream wire options, or normalized failure.
+     */
     translateStreamRequest(
       input: TranslateStreamRequestInput,
     ): Result<TranslateStreamRequestResult, NormalizedFailure> {
       return runStream(input);
     },
 
+    /**
+     * Constructs a streaming session bundle from direct parameters without a ticket.
+     *
+     * @param input - Source/target protocols, logical model, wire options, and optional ID overrides.
+     * @returns Session bundle holding shared session identity, provider decoder, and client encoder.
+     */
     createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle {
       const responseId = input.responseId ?? randomUUID();
       const createPartId = input.createPartId ?? (() => randomUUID().replace(/-/g, "").slice(0, 16));
@@ -316,6 +387,12 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       };
     },
 
+    /**
+     * Translates an upstream provider response back into the client-native protocol format.
+     *
+     * @param input - Response status, headers, body, protocols, and canonical model name.
+     * @returns Client response envelope and semantic IR outcome, or normalized failure.
+     */
     translateCompleteOutcome(
       input: TranslateCompleteOutcomeInput,
     ): Result<TranslateCompleteOutcomeResult, NormalizedFailure> {
@@ -341,15 +418,13 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
         return validateResult;
       }
 
-      // 3. Preflight outcome finish/parts/sidecar feasibility (e.g. moderation
-      //    discovered for a Messages client fails closed here)
+      // 3. Preflight outcome finish/parts/sidecar feasibility
       const preflightResult = preflightOutcome(irOutcome, direction, decodeResult.value.outcomeWireOptions);
       if (!preflightResult.ok) {
         return preflightResult;
       }
 
-      // 4. Normalize the sidecar for the direction, then encode to the
-      //    client-native outcome representation
+      // 4. Normalize the sidecar for the direction, then encode to client representation
       const normalizedWireOptions = normalizeOutcomeWireOptions(
         decodeResult.value.outcomeWireOptions,
         input.sourceProtocol,
@@ -365,6 +440,12 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
       });
     },
 
+    /**
+     * Prepares an outbound provider HTTP request from direct input parameters without a ticket.
+     *
+     * @param input - Connection parameters, protocols, headers, credentials, body, and timeouts.
+     * @returns Prepared provider request ready for HTTP dispatch.
+     */
     prepareTranslatedProviderRequest(input: PrepareTranslatedRequestInput) {
       return prepareTranslatedProviderRequest(input);
     },

@@ -1,11 +1,9 @@
 /**
- * JSON Schema dialect validators for the `function-tool-definition` and
- * `function-schema-strictness` matrix rows.
+ * @fileoverview Validation of JSON Schema dialects for strict tool definitions and structured outputs.
  *
- * The IR carries provider-neutral JSON Schema. Each target protocol honors a
- * different strict subset, so preflight validates the schema against the
- * target dialect before dispatch and rejects with the owning row when the
- * schema cannot be honored.
+ * Verifies that provider-neutral JSON Schema definitions satisfy target-specific strict requirements:
+ * OpenAI strict mode (depth <= 10, total properties <= 5000, forbidden combinators, closed additionalProperties),
+ * Anthropic Messages object root requirements, and Messages structured output constraints.
  */
 
 import type { JsonObject, JsonValue, Result } from "../domain/contracts.ts";
@@ -14,27 +12,25 @@ import type { NormalizedFailure } from "../domain/operations.ts";
 import type { MatrixRowId } from "./matrix.ts";
 import { ok, unsupportedCapability } from "./result.ts";
 
-/** OpenAI strict-mode documented limits (5000 properties, 10 nesting levels, 120k chars, 1000 enum values). */
+/** Maximum number of object properties across an OpenAI strict schema tree. */
 const OPENAI_STRICT_MAX_PROPERTIES = 5000;
+
+/** Maximum nesting depth permitted in an OpenAI strict schema tree. */
 const OPENAI_STRICT_MAX_DEPTH = 10;
+
+/** Maximum serialized character length of an OpenAI strict schema payload. */
 const OPENAI_STRICT_MAX_CHARS = 120_000;
+
+/** Maximum total enumeration elements permitted in an OpenAI strict schema tree. */
 const OPENAI_STRICT_MAX_ENUM_VALUES = 1000;
 
-/** The only root keywords Messages strict mode can honor (its documented strict shape). */
+/** Allowed root-level keywords in an Anthropic Messages strict tool schema. */
 const MESSAGES_STRICT_ROOT_KEYWORDS = ["type", "properties", "required"];
 
-/**
- * Child keywords the OpenAI strict walk descends into.
- * `additionalProperties: false` carries no subschema to check, but stays
- * listed so the walk can reject any non-false spelling of it.
- */
+/** Child keywords traversed during OpenAI strict schema descent. */
 const OPENAI_STRICT_CHILD_KEYWORDS = ["properties", "items", "additionalProperties", "$defs"] as const;
 
-/**
- * Combinators and composition keywords the OpenAI strict subset does not
- * document: they appear anywhere in the schema (root or nested) and strict
- * mode cannot honor them, so any occurrence rejects.
- */
+/** Schema keywords forbidden in OpenAI strict mode. */
 const OPENAI_STRICT_FORBIDDEN_KEYWORDS = [
   "anyOf",
   "oneOf",
@@ -52,13 +48,21 @@ const OPENAI_STRICT_FORBIDDEN_KEYWORDS = [
   "const",
 ] as const;
 
+/**
+ * Verifies that a value is an array consisting solely of string elements.
+ *
+ * @param value - Value to inspect.
+ * @returns True if value is an array of strings.
+ */
 function isArrayOfStrings(value: JsonValue): boolean {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
 /**
- * Messages requires every client tool `input_schema` to declare an object
- * root. Any other root is not a tool schema the Messages wire can carry.
+ * Validates that an Anthropic Messages tool input schema specifies an object root type.
+ *
+ * @param schema - Schema to validate.
+ * @returns Ok if schema root is an object; otherwise unsupported capability failure.
  */
 export function validateMessagesObjectRoot(schema: JsonObject): Result<void, NormalizedFailure> {
   if (schema.type !== "object") {
@@ -68,14 +72,10 @@ export function validateMessagesObjectRoot(schema: JsonObject): Result<void, Nor
 }
 
 /**
- * Messages strict mode honors only object-root schemas whose root keywords
- * stay within {type, properties, required} and whose property values are
- * plain objects. Anything richer is not representable under Messages strict.
+ * Validates that an Anthropic Messages tool schema satisfies strict mode restrictions.
  *
- * M documents a validation guarantee but not cross-provider dialect
- * equivalence, so the guarantee is only provable for the exact documented
- * shape; non-strict schemas into M carry no guarantee and pass with only the
- * object-root check.
+ * @param schema - Tool input schema to validate.
+ * @returns Ok if schema adheres to Messages strict subset; otherwise unsupported capability failure.
  */
 export function validateMessagesStrictSchema(schema: JsonObject): Result<void, NormalizedFailure> {
   if (schema.type !== "object") {
@@ -103,17 +103,22 @@ export function validateMessagesStrictSchema(schema: JsonObject): Result<void, N
   return ok(undefined);
 }
 
+/**
+ * Escapes special characters (`~` and `/`) in a JSON Pointer path token.
+ *
+ * @param segment - Raw property or key token.
+ * @returns Escaped JSON Pointer segment.
+ */
 function escapePointer(segment: string): string {
   return segment.replace(/~/g, "~0").replace(/\//g, "~1");
 }
 
 /**
- * OpenAI strict mode (Chat and Responses) honors a documented JSON Schema
- * subset: an object root without anyOf/oneOf, every object node closed with
- * `additionalProperties: false` and `required` listing all property names,
- * within fixed size limits. Schemas outside the subset fall back to
- * best-effort generation, which strict mode must never do, so preflight
- * rejects them.
+ * Validates a schema against the OpenAI strict subset for Chat and Responses.
+ *
+ * @param schema - Schema object to validate.
+ * @param capability - Matrix capability ID reported upon rejection.
+ * @returns Ok if compliant with strict dialect; otherwise unsupported capability failure.
  */
 export function validateOpenAiStrictSchema(
   schema: JsonObject,
@@ -133,6 +138,9 @@ export function validateOpenAiStrictSchema(
   return ok(undefined);
 }
 
+/**
+ * Recursively validates an OpenAI strict schema node, enforcing keywords, bounds, and closed schemas.
+ */
 function walkOpenAiStrictNode(
   node: JsonObject,
   pointer: string,
@@ -144,8 +152,6 @@ function walkOpenAiStrictNode(
   }
   const enumValues = node.enum;
   if (enumValues !== undefined && !Array.isArray(enumValues)) {
-    // Present-but-malformed `enum` cannot be proven honored under a strict
-    // guarantee, so it rejects instead of passing unvalidated.
     return `${pointer}/enum: enum must be an array`;
   }
   if (Array.isArray(enumValues)) {
@@ -183,15 +189,10 @@ function walkOpenAiStrictNode(
   for (const key of OPENAI_STRICT_CHILD_KEYWORDS) {
     const child = node[key];
     if (child === undefined) continue;
-    // Tuple-style `items` arrays and non-object bag entries (boolean schemas,
-    // strings, numbers) have no strict-subset spelling; any present-but-
-    // unusable value rejects rather than passing unvalidated.
     if (key === "additionalProperties" && child === false) continue;
     if (!isPlainObject(child)) {
       return `${pointer}/${escapePointer(key)}: ${key} must be an object`;
     }
-    // `properties` and `$defs` are bags of named child nodes; `items` and a
-    // schema-valued `additionalProperties` are single nodes.
     if (key === "properties" || key === "$defs") {
       const childKeys = Object.keys(child).sort();
       for (const childKey of childKeys) {
@@ -216,12 +217,15 @@ function walkOpenAiStrictNode(
   return undefined;
 }
 
+/** Allowed keywords per node in Anthropic Messages structured output schemas. */
 const MESSAGES_OUTPUT_ALLOWED_KEYWORDS: ReadonlyArray<string> = ["type", "properties", "required"];
 
 /**
- * Validates a schema against the Anthropic Messages structured output subset.
- * M documents no dialect and no strict guarantee, so preflight admits only
- * object roots whose nodes stay within {type, properties, required} with depth <= 10.
+ * Validates a schema against the Messages structured output subset.
+ *
+ * @param schema - Schema object to validate.
+ * @param capability - Capability identifier reported on rejection.
+ * @returns Ok if schema conforms to Messages output subset; otherwise unsupported capability failure.
  */
 export function validateMessagesOutputSchema(
   schema: JsonObject,
@@ -237,6 +241,9 @@ export function validateMessagesOutputSchema(
   return ok(undefined);
 }
 
+/**
+ * Recursively validates a Messages structured output node against allowed keywords and depth limits.
+ */
 function walkMessagesOutputNode(node: JsonObject, pointer: string, depth: number): string | undefined {
   if (depth > OPENAI_STRICT_MAX_DEPTH) {
     return `${pointer === "" ? "/" : pointer}: nesting depth limit exceeded`;

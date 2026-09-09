@@ -1,60 +1,80 @@
+/**
+ * @fileoverview Strict Server-Sent Events (SSE) framing for the streaming translation pipeline.
+ *
+ * Implements incremental line-oriented SSE chunk parsing and canonical frame serialization.
+ * Enforces strict UTF-8 validation, closed-world field naming (`event`, `data`, `id`, `retry`),
+ * singleton field uniqueness, and per-event buffer size bounds without imposing protocol semantics.
+ */
+
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { invalidRequestFailure } from "./failures.ts";
 
-/** A decoded SSE field block without protocol semantics. */
+/**
+ * Decoded server-sent events field block without protocol semantics.
+ */
 export interface SseFrame {
-  /** Optional named event; absent for data-only Chat events. */
+  /** Optional event type name for named event blocks. */
   readonly event?: string;
-  /** Ordered concatenated data lines separated by `\n`. */
+
+  /** Concatenated data payload joined by newline characters. */
   readonly data: string;
-  /** Optional event ID retained only when the target protocol defines it. */
+
+  /** Optional event identifier token without NUL characters. */
   readonly id?: string;
+
   /** Optional reconnection delay in milliseconds. */
   readonly retryMs?: number;
 }
 
-/** Incremental result from a strict UTF-8 SSE parser. */
+/** Incremental result yielded by the strict SSE decoder. */
 export type SseDecodeResult =
   | { readonly kind: "frame"; readonly frame: SseFrame }
   | { readonly kind: "comment"; readonly text: string }
   | { readonly kind: "need_more" }
   | { readonly kind: "failure"; readonly failure: NormalizedFailure };
 
-/** Owns incremental SSE framing, not protocol semantics. */
+/** Incremental SSE byte framing contract. */
 export interface SseDecoder {
-  /** Accepts one received byte segment.
-   * @param bytes Next exact upstream bytes.
-   * @returns Zero or more ordered frames/comments, or one terminal parse failure.
-   * @remarks It preserves frame order and buffers at most the configured event limit.
+  /**
+   * Consumes an incoming raw byte chunk.
+   *
+   * @param bytes - Next raw byte chunk from upstream transport.
+   * @returns Yielded complete frames, comments, need-more markers, or parse failures.
    */
   push(bytes: Uint8Array): readonly SseDecodeResult[];
-  /** Finishes at EOF.
-   * @returns Remaining frames or an incomplete-frame failure.
+
+  /**
+   * Finalizes framing at end-of-stream.
+   *
+   * @returns Trailing frames, or failure if a block was truncated mid-event.
    */
   finish(): readonly SseDecodeResult[];
 }
 
-/** Encodes one complete target SSE frame. */
+/** Canonical SSE frame serialization contract. */
 export interface SseEncoder {
-  /** Serializes one target frame.
-   * @param frame Frame with target-protocol fields.
-   * @returns UTF-8 SSE bytes ending in one blank line.
+  /**
+   * Encodes an SSE frame into canonical wire bytes.
+   *
+   * @param frame - SSE frame to serialize.
+   * @returns UTF-8 encoded SSE byte chunk terminated by a blank line.
    */
   encode(frame: SseFrame): Uint8Array;
 }
 
-/** One-owner state after response headers. */
+/** Stream dispatch ownership state machine tracking response header lifecycle. */
 export type ResponseOwnership =
   | { readonly kind: "unowned" }
   | { readonly kind: "owned"; readonly attemptNumber: number; readonly status: number }
   | { readonly kind: "closed"; readonly reason: "complete" | "failed" | "cancelled" };
 
-/** Options for creating an incremental SSE decoder. */
+/** Options configuring incremental SSE decoder limits. */
 export interface SseDecoderOptions {
-  /** Maximum allowable raw bytes per in-progress SSE event block (default 64 KB). */
+  /** Maximum allowable raw byte length per SSE event block (defaults to 64 KiB). */
   readonly maxEventBytes?: number;
 }
 
+/** Default ceiling for raw bytes buffered in a single SSE event block (64 KiB). */
 const DEFAULT_MAX_EVENT_BYTES = 64 * 1024;
 
 /**
@@ -315,6 +335,9 @@ class CanonicalSseEncoder implements SseEncoder {
 
 /**
  * Creates a new incremental SSE decoder.
+ *
+ * @param options - Configuration options controlling byte limits.
+ * @returns Fresh {@link SseDecoder} instance.
  */
 export function createSseDecoder(options?: SseDecoderOptions): SseDecoder {
   return new StrictSseDecoder(options);
@@ -322,6 +345,8 @@ export function createSseDecoder(options?: SseDecoderOptions): SseDecoder {
 
 /**
  * Creates a canonical SSE frame encoder.
+ *
+ * @returns Fresh {@link SseEncoder} instance.
  */
 export function createSseEncoder(): SseEncoder {
   return new CanonicalSseEncoder();

@@ -1,37 +1,39 @@
+/**
+ * @fileoverview
+ * Provider API key pool with selection strategies and adaptive health tracking.
+ *
+ * Manages pools of credentials for upstream LLM providers. Supports `fill-first` (traffic
+ * concentration to maximize provider prompt cache hits) and `round-robin` load spreading.
+ * Tracks key health, applying jittered backoff on rate limits (429) and stepped cooldowns
+ * on repeated server/transport errors while ignoring stale lease generations.
+ */
+
 import type { KeyPoolConfig, KeyStrategy, ProviderKeyConfig } from "../config/types.ts";
 import type { AttemptObservation, KeyAcquireResult, KeyLease, KeyPool } from "../domain/contracts.ts";
 import { calculateRetryDelay } from "./retry-policy.ts";
 import { type RandomSource, systemRandomSource } from "./timing.ts";
 
-/**
- * Mutable health and lease tracking state for a single provider key.
- */
+/** Internal mutable state tracking health and lease generation for a single provider key. */
 interface KeyState {
+  /** Static configuration entry for this key. */
   readonly config: ProviderKeyConfig;
+  /** Number of consecutive failed observations triggering cooldown. */
   failureStreak: number;
+  /** Monotonic millisecond timestamp until which this key is unavailable. */
   cooldownUntilMs: number;
+  /** Monotonically increasing generation count to detect and discard stale lease observations. */
   generation: number;
 }
 
 /**
  * Creates a per-provider {@link KeyPool} managing key selection strategies and adaptive health.
  *
- * Requirements:
- * - Key selection supports `fill-first` and `round-robin` across enabled keys.
- * - `acquire` is non-blocking and returns `acquired`, `wait` (when all enabled keys are cooling down), or `unavailable`.
- * - `observe` ignores stale lease generations where the key was re-leased since the observation began.
- * - Success resets the failure streak and clears cooldown.
- * - 4xx non-429 and client cancellation bypass cooldown.
- * - Rate limit (429 or observed `retryDelayMs`) applies `base = min(delay, maxRetryAfterMs)` plus uniform jitter `[0, jitterRatio * base)`.
- * - Server/transport failures escalate through fixed `failureCooldownMs` rungs `min(failureStreak - 1, 1)` with no jitter.
- * - Exposes `availableCount(nowMs)` returning the number of enabled keys not cooling down at `nowMs`.
- *
- * @param provider - Provider name owning this pool.
+ * @param provider - Name of the upstream provider owning this key pool.
  * @param keys - Configured provider keys.
  * @param strategy - Key selection strategy (`fill-first` or `round-robin`).
- * @param config - Key pool timing and cooldown configuration.
- * @param random - Injectable pseudo-random number generator seam.
- * @returns A {@link KeyPool} instance.
+ * @param config - Key pool cooldown configuration.
+ * @param random - Optional random source for jitter calculation (defaults to `systemRandomSource`).
+ * @returns Key pool instance.
  */
 export function createKeyPool(
   provider: string,
@@ -44,20 +46,21 @@ export function createKeyPool(
     keys.map((key) => [key.name, { config: key, failureStreak: 0, cooldownUntilMs: 0, generation: 0 }]),
   );
 
-  // Process-local cursor. `acquire` and `observe` are fully synchronous and
-  // the pool is only touched from the single event-loop thread, so a plain
-  // number gives the atomicity the round-robin strategy requires.
   let roundRobinCursor = 0;
 
   return {
+    /**
+     * Attempts to acquire an active lease for an enabled, non-cooling key.
+     *
+     * @param nowMs - Current monotonic millisecond timestamp.
+     * @returns Acquired lease, wait timestamp if all keys are cooling, or unavailable.
+     */
     acquire(nowMs: number): KeyAcquireResult {
       const enabled = [...statesByName.values()].filter((state) => state.config.enabled);
       if (enabled.length === 0) {
         return { kind: "unavailable" };
       }
 
-      // Scan for the first available key; round-robin starts its scan at the
-      // cursor and advances it past the key it selects.
       const count = enabled.length;
       for (let offset = 0; offset < count; offset++) {
         const index = strategy === "round-robin" ? (roundRobinCursor + offset) % count : offset;
@@ -89,6 +92,17 @@ export function createKeyPool(
       return { kind: "wait", untilMs: earliestUntilMs };
     },
 
+    /**
+     * Updates key health following a provider attempt observation.
+     *
+     * Resets failure streaks on success, bypasses cooldown on client cancellation / non-429 4xx errors,
+     * applies jittered backoff on rate limits, and stepped cooldowns on server/transport errors.
+     *
+     * @param lease - Lease issued for the attempt.
+     * @param observation - Attempt result observation.
+     * @param nowMs - Current monotonic millisecond timestamp.
+     * @returns Cooldown delay applied in milliseconds, or undefined if no cooldown was applied.
+     */
     observe(lease: KeyLease, observation: AttemptObservation, nowMs: number): number | undefined {
       const state = statesByName.get(lease.keyName);
       if (state === undefined) {
@@ -122,8 +136,6 @@ export function createKeyPool(
         return undefined;
       }
 
-      // Apply cooldown to this key, returning the exact scheduled delay so the
-      // Gateway can record it without recomputing (and re-jittering) it.
       state.failureStreak++;
 
       const isRateLimit = observation.status === 429 || observation.retryDelayMs !== undefined;
@@ -139,6 +151,7 @@ export function createKeyPool(
       return delayMs;
     },
 
+    /** Returns the number of enabled keys not currently cooling down. */
     availableCount(nowMs: number): number {
       let count = 0;
       for (const state of statesByName.values()) {
@@ -149,6 +162,7 @@ export function createKeyPool(
       return count;
     },
 
+    /** Previews the next key that would be selected without advancing cursor or lease generation. */
     preview() {
       const enabled = [...statesByName.values()].filter((state) => state.config.enabled);
       if (enabled.length === 0) {
@@ -158,7 +172,6 @@ export function createKeyPool(
         const first = enabled[0];
         return first !== undefined ? { keyName: first.config.name, secret: first.config.secret } : undefined;
       }
-      // round-robin preview: reads at cursor without advancing it
       const index = roundRobinCursor % enabled.length;
       const state = enabled[index];
       return state !== undefined ? { keyName: state.config.name, secret: state.config.secret } : undefined;

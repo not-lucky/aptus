@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Filesystem-backed trace recorder for request lifecycle stages.
+ *
+ * Creates a dedicated directory per request with restricted permissions (`0700`),
+ * recording structured manifests, stage payloads, and terminal markers atomically.
+ * Ensures stage writes are serialized and durable before being visible.
+ *
+ * Invariants: Trace write failures never fail live request traffic. Runtime failures
+ * trigger degradation hooks, record an `incomplete` terminal, and emit bounded safe
+ * error codes without leaking sensitive paths or payload data.
+ */
+
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -9,6 +21,8 @@ const encoder = new TextEncoder();
 
 /**
  * Bounded safe error codes for trace degradation telemetry.
+ *
+ * Normalizes filesystem errors into safe categories to avoid leaking file paths or secrets.
  */
 export type SafeErrorCode = "permission_denied" | "no_space" | "not_found" | "io_error";
 
@@ -20,16 +34,11 @@ export interface FileTraceRecorderOptions {
   readonly root: string;
   /** Resolved client and provider secrets to redact from parsed trace fields. */
   readonly secrets: ReadonlySet<string>;
-  /**
-   * Invoked on every runtime trace write failure with the affected request ID
-   * (`undefined` for the startup/manifest bootstrap). It must record the
-   * `aptus.trace.failure` event and increment the failure counter; it is not
-   * edge-triggered.
-   */
+  /** Level-triggered callback invoked on every trace write failure with safe error details. */
   readonly onFailure: (operation: string, safeErrorCode: SafeErrorCode, aptusRequestId?: string) => void;
-  /** Edge-triggered readiness degradation (invoked once until recovery). */
+  /** Edge-triggered callback invoked when tracing enters degraded state. */
   readonly onDegrade: () => void;
-  /** Edge-triggered readiness recovery (invoked once after a successful write). */
+  /** Edge-triggered callback invoked when tracing recovers from degradation. */
   readonly onRecover: () => void;
 }
 
@@ -41,15 +50,11 @@ type FileTraceSession = TraceSession & { readonly writeManifest: () => Promise<v
 /**
  * Creates the protected filesystem {@link TraceRecorder}.
  *
- * Per-request directories are created with mode `0700` and every file with mode
- * `0600`. Each stage is written atomically (create temp → write → fsync → close
- * → rename → directory fsync). A runtime write failure never fails traffic: it
- * records a best-effort `trace_failure` stage and an `incomplete` terminal,
- * invokes `onFailure`, and swallows the error. A later successful write invokes
- * `onRecover` to restore readiness.
+ * Enforces restrictive directory/file permissions (`0700`/`0600`) and commits all stages
+ * atomically. Trace write errors trigger degradation callbacks and never disrupt traffic.
  *
- * @param options - Recorder configuration and degradation hooks.
- * @returns A filesystem-backed {@link TraceRecorder}.
+ * @param options - Storage root, secrets set, and degradation callbacks.
+ * @returns A filesystem-backed {@link TraceRecorder} instance.
  */
 export function createFileTraceRecorder(options: FileTraceRecorderOptions): TraceRecorder {
   const redactor = createRedactor(options.secrets);
@@ -86,7 +91,17 @@ export function createFileTraceRecorder(options: FileTraceRecorderOptions): Trac
 }
 
 /**
- * Constructs one serial trace session bound to a request directory.
+ * Constructs a serial trace session bound to a specific request directory.
+ *
+ * Serializes stage writes via an internal promise queue, redacts secrets from JSON records,
+ * and handles graceful failure degradation with terminal marker guarantees.
+ *
+ * @param directory - Target trace directory path for this request.
+ * @param context - Trace context containing request identifier and start timestamp.
+ * @param redactor - Redactor applied to JSON records before serialization.
+ * @param onFailure - Level-triggered failure callback for reporting errors.
+ * @param onSuccess - Edge-triggered callback for clearing degradation.
+ * @returns An active {@link FileTraceSession}.
  */
 function makeSession(
   directory: string,
@@ -292,7 +307,12 @@ function makeSession(
 }
 
 /**
- * Writes a file atomically: temp file → write → fsync → close → rename → dir fsync.
+ * Writes a file atomically: temp file → write → fsync → close → rename → directory fsync.
+ *
+ * @param directory - Target directory path (must already exist).
+ * @param filename - Final filename within the directory.
+ * @param data - Exact byte payload to write.
+ * @throws {Error} If any filesystem step fails, preserving the underlying error code.
  */
 async function atomicWrite(directory: string, filename: string, data: Uint8Array): Promise<void> {
   const temp = join(directory, `.aptus-${randomUUID()}.tmp`);
@@ -313,7 +333,9 @@ async function atomicWrite(directory: string, filename: string, data: Uint8Array
 }
 
 /**
- * Best-effort directory fsync; some platforms do not support opening a dir for fsync.
+ * Best-effort directory fsync to persist directory entry modifications.
+ *
+ * @param directory - Directory path to fsync.
  */
 async function fsyncDirectory(directory: string): Promise<void> {
   try {
@@ -329,7 +351,10 @@ async function fsyncDirectory(directory: string): Promise<void> {
 }
 
 /**
- * Maps a raw-bytes trace stage to its file extension.
+ * Maps a raw-bytes trace stage to its corresponding file extension (`sse`, `jsonl`, or `bin`).
+ *
+ * @param stage - Byte-sink trace stage name.
+ * @returns File extension string without a leading dot.
  */
 function bytesExtension(stage: TraceStage): string {
   if (stage === "provider_stream" || stage === "client_stream") return "sse";
@@ -338,15 +363,20 @@ function bytesExtension(stage: TraceStage): string {
 }
 
 /**
- * Pads a sequence number to a three-digit file prefix.
+ * Formats a sequence number as a zero-padded 3-digit string for ordered directory listings.
+ *
+ * @param sequence - One-based sequence number.
+ * @returns Three-character padded string (e.g. `"001"`).
  */
 function pad(sequence: number): string {
   return String(sequence).padStart(3, "0");
 }
 
 /**
- * Extracts a safe, bounded error code for degradation logging (never a raw
- * path or secret-bearing message).
+ * Extracts a safe, bounded error code from a filesystem error for logging and metrics.
+ *
+ * @param error - The caught error to classify.
+ * @returns One of the four bounded {@link SafeErrorCode} values.
  */
 export function safeErrorCode(error: unknown): SafeErrorCode {
   if (error !== null && typeof error === "object" && "code" in error) {

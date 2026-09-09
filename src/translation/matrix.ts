@@ -1,15 +1,40 @@
+/**
+ * @fileoverview Capability matrix defining feature support tiers across translation directions.
+ *
+ * Serves as the single source of truth for cross-protocol translation support tiers (T1, T2, T3, —).
+ * Preflight validators in `./preflight.ts` enforce these tiers at runtime, returning exact
+ * {@link MatrixRowId} identifiers on rejection. Codecs consult row caveats when applying
+ * behavior-preserving transformations.
+ */
+
 import type { Direction } from "./contracts.ts";
 
+/**
+ * Support tier for a capability in a directed translation path:
+ * - `T1`: Translates natively with at most structural reshaping.
+ * - `T2`: Translates with a documented behavior-preserving transformation described in `caveat`.
+ * - `T3`: Untranslatable on target wire; fails closed with the row ID.
+ * - `—`: Feature not applicable to this translation direction.
+ */
 export type Tier = "T1" | "T2" | "T3" | "—";
 
+/**
+ * Capability row declaring cross-protocol support levels and caveats for a single feature.
+ */
 export interface MatrixRow {
+  /** Stable kebab-case identifier referenced by preflight checks and normalized failures. */
   readonly id: string;
+  /** Human-readable capability name for documentation and diagnostic rendering. */
   readonly name: string;
+  /** Intermediate representation symbol governed by this row, or em dash if IR-external. */
   readonly irSymbol: string;
+  /** Support tier for each of the six translation directions. */
   readonly tiers: Readonly<Record<Direction, Tier>>;
+  /** Transformation rules, restrictions, or provider subtleties governing this capability. */
   readonly caveat: string;
 }
 
+/** Complete table of capability rows defining cross-protocol translation support. */
 export const MATRIX = [
   {
     id: "logical-model-selection",
@@ -2665,20 +2690,18 @@ export const MATRIX = [
   },
 ] as const satisfies readonly MatrixRow[];
 
-/**
- * The compile-time union of every capability row ID in {@link MATRIX}.
- *
- * This is the translation layer's seam: `unsupportedCapability` accepts only a
- * {@link MatrixRowId}, so every capability rejection names a row that exists,
- * and renaming or deleting a row fails compilation at each rejection site
- * instead of surfacing as a drifted wire string caught by tests. The type is
- * derived from the table, never spelled out, so the matrix stays the single
- * place a capability can be declared.
- */
+/** Compile-time union of all valid capability row IDs declared in {@link MATRIX}. */
 export type MatrixRowId = (typeof MATRIX)[number]["id"];
 
+/** Static lookup index mapping capability row IDs to {@link MatrixRow} definitions. */
 const MATRIX_BY_ID = new Map<string, MatrixRow>(MATRIX.map((row) => [row.id, row]));
 
+/**
+ * Looks up a capability row by its unique identifier.
+ *
+ * @param id - Capability row identifier to resolve.
+ * @returns Matching {@link MatrixRow} if found, otherwise `undefined`.
+ */
 export function getCapabilityRow(id: string): MatrixRow | undefined {
   return MATRIX_BY_ID.get(id);
 }

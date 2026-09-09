@@ -1,41 +1,56 @@
+/**
+ * @fileoverview Periodic background scheduler for trace retention sweeps.
+ *
+ * Runs retention sweeps on a recurring timer to delete expired and oversized trace
+ * directories without blocking request traffic. Handles scheduler lifecycle, enforces
+ * non-overlapping passes, and reports sweep metrics and degradation events.
+ *
+ * Invariants: Passes never run concurrently. Sweep errors are reported to telemetry and
+ * trigger the readiness failure hook without throwing uncaught exceptions to the process.
+ */
+
 import type { TraceRetention } from "../../domain/operations.ts";
 import type { GatewayObservability } from "../lifecycle-observer.ts";
 import { safeErrorCode } from "./file-recorder.ts";
 
 /**
- * Handle to a running trace retention scheduler.
+ * Handle for controlling the background trace retention scheduler.
  */
 export interface TraceRetentionScheduler {
   /**
-   * Stops the background retention timer and suppresses future passes.
+   * Stops the background retention timer and cancels any scheduled passes.
    */
   stop(): void;
 
   /**
-   * Triggers an immediate retention pass outside the timer.
+   * Triggers an immediate retention pass outside the recurring schedule.
+   *
+   * @returns Promise resolving when the pass completes or is skipped.
    */
   triggerNow(): Promise<void>;
 }
 
 /**
- * Options for configuring {@link TraceRetentionScheduler}.
+ * Configuration options for the trace retention scheduler.
  */
 export interface TraceRetentionSchedulerOptions {
-  /** Trace retention runner implementation. */
+  /** Retention engine responsible for scanning and deleting trace directories. */
   readonly retention: TraceRetention;
-  /** Telemetry observer for recording retention results and degradation events. */
+  /** Telemetry observer for reporting sweep metrics and degradation events. */
   readonly observer: GatewayObservability;
-  /** Interval in milliseconds between retention passes. */
+  /** Interval in milliseconds between scheduled retention passes. */
   readonly intervalMs: number;
-  /** Callback to degrade readiness on retention I/O failure. */
+  /** Callback invoked when a sweep fails, degrading trace readiness. */
   readonly onFailure: () => void;
 }
 
 /**
  * Starts the periodic background retention scheduler.
  *
- * @param options - Retention engine, telemetry observer, interval, and failure hook.
- * @returns A {@link TraceRetentionScheduler} instance.
+ * Arms an unreferenced interval timer that triggers retention passes every `intervalMs`.
+ *
+ * @param options - Configuration including retention engine, observer, interval, and failure hook.
+ * @returns A {@link TraceRetentionScheduler} handle to control or stop the scheduler.
  */
 export function startRetentionScheduler(options: TraceRetentionSchedulerOptions): TraceRetentionScheduler {
   const { retention, observer, intervalMs, onFailure } = options;
@@ -44,6 +59,11 @@ export function startRetentionScheduler(options: TraceRetentionSchedulerOptions)
   let running = false;
   let timer: NodeJS.Timeout | undefined;
 
+  /**
+   * Executes a single retention pass if not currently stopped or running.
+   *
+   * @returns Promise resolving when the pass execution finishes.
+   */
   async function executePass(): Promise<void> {
     if (stopped || running) return;
     running = true;
@@ -67,12 +87,12 @@ export function startRetentionScheduler(options: TraceRetentionSchedulerOptions)
     }
   }
 
-  // Schedule background timer
+  // Arm the background timer that paces consecutive retention passes.
   timer = setInterval(() => {
     void executePass();
   }, intervalMs);
 
-  // Unref timer so it does not block Node process exit on its own
+  // Release the timer hold on the event loop so the scheduler never keeps a drained process alive on its own.
   timer.unref();
 
   return {

@@ -1,39 +1,47 @@
+/**
+ * @fileoverview Client credential authentication for the gateway HTTP listener.
+ *
+ * Validates incoming client credentials before request admission. Supports Bearer tokens
+ * (`Authorization: Bearer <secret>`) for OpenAI-compatible endpoints and API keys
+ * (`x-api-key: <secret>`) for Anthropic-compatible endpoints. Enforces header singularity,
+ * mutual exclusivity between schemes, and fail-closed secret matching against configured keys.
+ */
+
 import type { IncomingHttpHeaders } from "node:http";
 import type { ClientKeyConfig } from "../config/types.ts";
 
 /**
- * Kind of client authentication credential provided:
- * - `"bearer"`: `Authorization: Bearer <secret>` header.
- * - `"api-key"`: `x-api-key: <secret>` header.
+ * Kind of client credential presented in the request.
  */
 export type CredentialKind = "bearer" | "api-key";
 
 /**
- * Authenticated client identity containing the configured safe key name and credential type.
+ * Identity of an authenticated client.
  */
-export type AuthenticatedClient = { readonly name: string; readonly kind: CredentialKind };
+export type AuthenticatedClient = {
+  /** Configured name of the matching client key (safe for logging/telemetry). */
+  readonly name: string;
+  /** Credential scheme used by the client on this request. */
+  readonly kind: CredentialKind;
+};
 
 /**
- * Expected client authentication purpose:
- * - `"openai-create"`: Requires `Authorization: Bearer <secret>` header.
- * - `"messages-create"`: Requires `x-api-key: <secret>` header.
- * - `"catalog"`: Accepts either `Authorization: Bearer` or `x-api-key`.
+ * Endpoint-specific rule specifying permitted authentication credential schemes.
  */
 export type AuthPurpose = "openai-create" | "messages-create" | "catalog";
 
 /**
- * Extracts and authenticates an incoming HTTP client credential against configured client keys.
+ * Extracts and authenticates client credentials from incoming request headers.
  *
- * Security and protocol invariants:
- * 1. Mutual exclusivity: A request must provide exactly one authentication header (`Authorization` OR `x-api-key`). Providing both is rejected (`undefined`).
- * 2. Duplicate header rejection: Multiple instances of the same auth header or comma-separated lists are rejected.
- * 3. Exact matching: Secret is matched against configured client key secrets in constant-time logic.
+ * Enforces that exactly one authentication header is present without comma folding or duplication,
+ * verifies the credential format matches the expected endpoint purpose, and matches the secret
+ * against configured client keys. Fails closed (returns `undefined`) if no match or duplicate matches exist.
  *
- * @param headers - Express / Node.js parsed request headers.
- * @param clientKeys - Configured client key configurations.
- * @param purpose - Expected authentication format based on endpoint.
- * @param rawHeaders - Optional raw header tuple array from Node HTTP request to detect multi-header occurrences.
- * @returns {@link AuthenticatedClient} if valid; otherwise `undefined`.
+ * @param headers - Parsed lowercase request headers.
+ * @param clientKeys - Configured client key definitions containing names and secrets.
+ * @param purpose - Endpoint authorization purpose restricting permitted schemes.
+ * @param rawHeaders - Raw alternating header list from Node's IncomingMessage, if available.
+ * @returns The {@link AuthenticatedClient} identity on success, or `undefined` on authentication failure.
  */
 export function authenticateClient(
   headers: IncomingHttpHeaders,
@@ -44,9 +52,9 @@ export function authenticateClient(
   const authorization = credentialHeader(headers, rawHeaders, "authorization");
   const apiKey = credentialHeader(headers, rawHeaders, "x-api-key");
 
-  // Reject if either header had invalid formatting/duplicates.
+  // Reject if either header failed singularity validation
   if (authorization.kind === "invalid" || apiKey.kind === "invalid") return undefined;
-  // Reject if both headers are present or both are absent (must provide exactly one).
+  // Reject if both headers are present or both are absent (mutual exclusivity)
   if (authorization.kind === apiKey.kind) return undefined;
 
   let parsed: { readonly kind: CredentialKind; readonly secret: string } | undefined;
@@ -55,23 +63,29 @@ export function authenticateClient(
   else return undefined;
 
   if (parsed === undefined) return undefined;
-  // Enforce endpoint-specific credential scheme requirements.
+  // Enforce endpoint-specific credential scheme requirements
   if (purpose === "openai-create" && parsed.kind !== "bearer") return undefined;
   if (purpose === "messages-create" && parsed.kind !== "api-key") return undefined;
 
+  // Fail-closed match against configured keys: require exactly one matching key
   const matches = clientKeys.filter((key) => key.secret === parsed.secret);
   const match = matches[0];
   if (match === undefined || matches.length !== 1) return undefined;
   return { name: match.name, kind: parsed.kind };
 }
 
+/**
+ * Result of reading and checking singularity on an authentication header.
+ */
 type CredentialHeader =
   | { readonly kind: "absent" }
   | { readonly kind: "invalid" }
   | { readonly kind: "present"; readonly value: string };
 
 /**
- * Inspects headers (preferring rawHeaders array when available) to ensure single-value presence without comma joins.
+ * Reads a single credential header, enforcing that it occurs exactly once without commas.
+ *
+ * Prefers `rawHeaders` when provided to detect repeated header declarations that parsed maps merge.
  */
 function credentialHeader(
   headers: IncomingHttpHeaders,
@@ -85,7 +99,6 @@ function credentialHeader(
     }
     if (values.length === 0) return { kind: "absent" };
     const value = values[0];
-    // Reject multiple header declarations or comma-separated lists.
     if (value === undefined || values.length !== 1 || value.length === 0 || value.includes(",")) {
       return { kind: "invalid" };
     }
@@ -99,7 +112,7 @@ function credentialHeader(
 }
 
 /**
- * Parses a `Bearer <token>` string, ensuring non-whitespace secret payload.
+ * Parses an `Authorization: Bearer <token>` header value.
  */
 function parseBearer(value: string): { readonly kind: "bearer"; readonly secret: string } | undefined {
   const match = /^Bearer (\S+)$/.exec(value);
@@ -108,7 +121,7 @@ function parseBearer(value: string): { readonly kind: "bearer"; readonly secret:
 }
 
 /**
- * Parses an `x-api-key` string, ensuring non-whitespace secret payload.
+ * Parses an `x-api-key: <token>` header value.
  */
 function parseApiKey(value: string): { readonly kind: "api-key"; readonly secret: string } | undefined {
   return /^\S+$/.test(value) ? { kind: "api-key", secret: value } : undefined;

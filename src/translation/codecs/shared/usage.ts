@@ -1,3 +1,13 @@
+/**
+ * @fileoverview Usage accounting across provider token reporting vocabularies.
+ *
+ * Normalizes provider token counters into semantic `IrUsage` representations and reconstructs
+ * wire-format usage objects across OpenAI Chat, OpenAI Responses, and Anthropic Messages.
+ * Maintains distinctions between zero and absent metrics and prevents silent fabrication of counters.
+ *
+ * Shared between complete outcomes and streaming decoders/encoders to maintain invariant token accounting.
+ */
+
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type { IrUsage } from "../../ir.ts";
@@ -5,20 +15,11 @@ import { invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import { asFiniteNumber } from "./controls.ts";
 
 /**
- * Usage accounting across the three provider vocabularies.
+ * Parses and validates an optional usage details sub-object (`*_tokens_details`).
  *
- * Wire counters are parsed, accumulated, and rebuilt here so the complete and
- * streaming paths of a protocol cannot drift. Absence is distinct from zero
- * everywhere: a missing usage object stays absent and is never fabricated as
- * zeros, and a present but malformed counter fails closed instead of being
- * zero-filled. Subdivision counters are observations and are never re-added to
- * the totals.
- */
-
-/**
- * Parses one usage subdivision wrapper (`*_tokens_details`): absent or explicit
- * null stays absent (documented provider variance); any other non-object value
- * fails `invalid_request`.
+ * @param rawUsage - Enclosing raw usage record.
+ * @param field - Field name of the details sub-object to extract.
+ * @returns Parsed record, `undefined` if absent/null, or an `invalid_request` failure.
  */
 function parseUsageDetailsObject(
   rawUsage: Record<string, unknown>,
@@ -32,19 +33,22 @@ function parseUsageDetailsObject(
   return ok(value as Record<string, unknown>);
 }
 
-/**
- * The OpenAI usage wire vocabulary. Chat and Responses carry identical
- * counters and subdivisions under different field names; one key map drives
- * both parsing and egress reconstruction so each vocabulary lives in exactly
- * one place.
- */
+/** Wire field name vocabulary for OpenAI-family usage objects. */
 interface OpenAiUsageKeys {
+  /** Wire field name for input token counts (e.g. `prompt_tokens` or `input_tokens`). */
   readonly input: string;
+
+  /** Wire field name for output token counts (e.g. `completion_tokens` or `output_tokens`). */
   readonly output: string;
+
+  /** Wire field name for input token details object. */
   readonly inputDetails: string;
+
+  /** Wire field name for output token details object. */
   readonly outputDetails: string;
 }
 
+/** Wire field keys for OpenAI Chat completions usage reporting. */
 const CHAT_USAGE_KEYS: OpenAiUsageKeys = {
   input: "prompt_tokens",
   output: "completion_tokens",
@@ -52,6 +56,7 @@ const CHAT_USAGE_KEYS: OpenAiUsageKeys = {
   outputDetails: "completion_tokens_details",
 };
 
+/** Wire field keys for OpenAI Responses usage reporting. */
 const RESPONSES_USAGE_KEYS: OpenAiUsageKeys = {
   input: "input_tokens",
   output: "output_tokens",
@@ -59,6 +64,13 @@ const RESPONSES_USAGE_KEYS: OpenAiUsageKeys = {
   outputDetails: "output_tokens_details",
 };
 
+/**
+ * Validates that a required usage counter is present and a finite number.
+ *
+ * @param value - Raw counter value to validate.
+ * @param field - Field name for error attribution.
+ * @returns Parsed finite number, or an `invalid_request` failure.
+ */
 function requireFiniteUsageCounter(value: unknown, field: string): Result<number, NormalizedFailure> {
   const parsed = asFiniteNumber(value);
   if (parsed === undefined) {
@@ -67,6 +79,13 @@ function requireFiniteUsageCounter(value: unknown, field: string): Result<number
   return ok(parsed);
 }
 
+/**
+ * Validates that an optional usage counter is a finite number when present.
+ *
+ * @param value - Raw counter value to validate.
+ * @param field - Field name for error attribution.
+ * @returns Parsed finite number, `undefined` if absent, or an `invalid_request` failure.
+ */
 function optionalFiniteNumber(value: unknown, field: string): Result<number | undefined, NormalizedFailure> {
   if (value === undefined) return ok(undefined);
   const parsed = asFiniteNumber(value);
@@ -77,14 +96,11 @@ function optionalFiniteNumber(value: unknown, field: string): Result<number | un
 }
 
 /**
- * Extracts OpenAI usage counters plus cache/reasoning subdivisions from one
- * raw usage value, parameterized by the protocol's field vocabulary. Shared
- * verbatim by the complete outcome decoders and the provider stream decoders
- * so the two paths cannot drift. Absence or explicit null of the whole usage
- * value stays absence (OpenAI streaming chunks documentarily carry
- * `usage: null`; never fabricated as zeros); a present non-object usage value
- * fails closed, a present usage object must carry finite totals, and present
- * subdivision fields must be finite numbers.
+ * Extracts normalized IR usage counters from an OpenAI-family usage record.
+ *
+ * @param rawUsage - Raw usage value from wire payload.
+ * @param keys - Protocol-specific usage key mapping.
+ * @returns Normalized `IrUsage`, `undefined` if absent/null, or a failure result.
  */
 function parseOpenAiUsage(rawUsage: unknown, keys: OpenAiUsageKeys): Result<IrUsage | undefined, NormalizedFailure> {
   if (rawUsage === undefined || rawUsage === null) return ok(undefined);
@@ -126,41 +142,57 @@ function parseOpenAiUsage(rawUsage: unknown, keys: OpenAiUsageKeys): Result<IrUs
   });
 }
 
-/** Parses one OpenAI Chat usage value; see {@link parseOpenAiUsage}. */
+/**
+ * Parses an OpenAI Chat completion usage object into normalized IR usage.
+ *
+ * @param rawUsage - Raw `usage` payload from Chat response.
+ * @returns Normalized `IrUsage`, `undefined` if absent/null, or an `invalid_request` failure.
+ */
 export function parseChatUsage(rawUsage: unknown): Result<IrUsage | undefined, NormalizedFailure> {
   return parseOpenAiUsage(rawUsage, CHAT_USAGE_KEYS);
 }
 
-/** Parses one OpenAI Responses usage value; see {@link parseOpenAiUsage}. */
+/**
+ * Parses an OpenAI Responses usage object into normalized IR usage.
+ *
+ * @param rawUsage - Raw `usage` payload from Responses response.
+ * @returns Normalized `IrUsage`, `undefined` if absent/null, or an `invalid_request` failure.
+ */
 export function parseResponsesUsage(rawUsage: unknown): Result<IrUsage | undefined, NormalizedFailure> {
   return parseOpenAiUsage(rawUsage, RESPONSES_USAGE_KEYS);
 }
 
 /**
- * Accumulated Anthropic Messages usage counters across one response's usage
- * records (the complete body's `usage` object, or the stream's `message_start`
- * / `message_delta` payloads). Subdivision fields stay undefined until a valid
- * value arrives — an explicitly reported zero is preserved, because absence is
- * distinct from zero everywhere in the IR.
+ * Accumulates Anthropic Messages token usage across multiple response frames or payloads.
+ * Tracks presence explicitly to distinguish unobserved counters from explicit zeros.
  */
 export interface MessagesUsageAccumulator {
+  /** Whether any usage payload has been observed in the response stream. */
   sawUsage: boolean;
+
+  /** Base input tokens before prompt caching, when reported. */
   inputTokens?: number;
+
+  /** Cache read input tokens, when reported. */
   cacheReadInput?: number;
+
+  /** Cache creation input tokens, when reported. */
   cacheWriteInput?: number;
+
+  /** Total output tokens generated, when reported. */
   outputTokens?: number;
+
+  /** Reasoning/thinking tokens reported in output details. */
   thinkingTokens?: number;
 }
 
 /**
- * Validates and accumulates one raw Anthropic usage record. Output-side
- * discovery of the `inference_geo` echo fails closed first. Cumulative counters
- * overwrite rather than sum (each reported value is the latest total); every
- * present counter must be a finite number — malformed counters fail closed
- * instead of being zero-filled, and the `output_tokens_details` wrapper must
- * be an object when present (explicit null is absence). Shared verbatim by the
- * complete outcome decoder and the provider stream decoder so the two paths
- * cannot drift.
+ * Accumulates raw Anthropic Messages usage frames into accumulator state.
+ * Validates numeric fields and rejects unsupported server tool or geography capabilities.
+ *
+ * @param state - Mutable usage accumulator state to update.
+ * @param rawUsage - Raw usage payload from Messages response frame.
+ * @returns Success if accumulated, or a normalized failure.
  */
 export function accumulateMessagesUsage(
   state: MessagesUsageAccumulator,
@@ -200,14 +232,11 @@ export function accumulateMessagesUsage(
 }
 
 /**
- * Collapses accumulated Anthropic usage into the semantic IR shape: the input
- * total sums the post-breakpoint base plus both cache subdivisions
- * (`usage-input-output-total`), subdivisions ride as observations and are never
- * re-added, `total` is never fabricated for M-origin outcomes, and subdivision
- * counters stay absent when never reported. Billing totals are NOT defaulted:
- * once `sawUsage` is set, callers must have verified both totals were reported
- * (the complete decoder and the stream `message_stop` handler enforce this)
- * so a partial usage record fails closed instead of fabricating zeros.
+ * Collapses accumulated Messages usage into normalized IR usage.
+ * Combines base input and cache tokens into overall input counter.
+ *
+ * @param state - Populated Messages usage accumulator.
+ * @returns Normalized `IrUsage`, or `undefined` if no usage was observed.
  */
 export function collapseMessagesUsage(state: MessagesUsageAccumulator): IrUsage | undefined {
   if (!state.sawUsage) return undefined;
@@ -221,11 +250,11 @@ export function collapseMessagesUsage(state: MessagesUsageAccumulator): IrUsage 
 }
 
 /**
- * Builds the OpenAI usage object from one IR usage value: totals plus the
- * conditional `*_tokens_details` subdivision objects, parameterized by the
- * protocol's field vocabulary. Shared verbatim by the complete egress and the
- * streaming client encoder so complete-vs-stream wire parity is structural.
- * Subdivisions are never re-added to totals.
+ * Serializes an IR usage record into an OpenAI-family usage JSON object.
+ *
+ * @param usage - Normalized IR usage record.
+ * @param keys - Protocol-specific usage key mapping.
+ * @returns Serialized wire usage JSON object.
  */
 function openAiUsageBody(usage: IrUsage, keys: OpenAiUsageKeys): JsonObject {
   const inputDetails: JsonObject = {
@@ -243,22 +272,31 @@ function openAiUsageBody(usage: IrUsage, keys: OpenAiUsageKeys): JsonObject {
   };
 }
 
-/** Builds the OpenAI Chat usage object; see {@link openAiUsageBody}. */
+/**
+ * Serializes an IR usage record into an OpenAI Chat usage JSON object.
+ *
+ * @param usage - Normalized IR usage record.
+ * @returns Serialized Chat wire usage object.
+ */
 export function chatUsageBody(usage: IrUsage): JsonObject {
   return openAiUsageBody(usage, CHAT_USAGE_KEYS);
 }
 
-/** Builds the OpenAI Responses usage object; see {@link openAiUsageBody}. */
+/**
+ * Serializes an IR usage record into an OpenAI Responses usage JSON object.
+ *
+ * @param usage - Normalized IR usage record.
+ * @returns Serialized Responses wire usage object.
+ */
 export function responsesUsageBody(usage: IrUsage): JsonObject {
   return openAiUsageBody(usage, RESPONSES_USAGE_KEYS);
 }
 
 /**
- * Reconstructs the Anthropic Messages usage object from one IR usage value:
- * `input_tokens = input - cacheReadInput - cacheWriteInput` plus the flat cache
- * counters and the nested `output_tokens_details.thinking_tokens` breakdown.
- * Shared verbatim by the complete egress and the streaming client encoder so
- * complete-vs-stream parity is structural. Subdivisions are never re-added.
+ * Serializes an IR usage record into an Anthropic Messages usage JSON object.
+ *
+ * @param usage - Normalized IR usage record.
+ * @returns Serialized Messages wire usage object.
  */
 export function messagesUsageBody(usage: IrUsage): JsonObject {
   const outputDetails: JsonObject =

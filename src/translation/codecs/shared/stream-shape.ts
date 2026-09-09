@@ -7,65 +7,15 @@ import { parseFunctionArgumentsOnce } from "./hosted-tools.ts";
 import { StreamToolArgumentsBudget } from "./stream-limits.ts";
 
 /**
- * The wire-agnostic shape bookkeeping every provider stream decoder needs,
- * owned once instead of re-derived per protocol.
+ * @fileoverview Stream shape tracking and delta routing for provider stream decoders.
  *
- * The three provider decoders differ in wire dispatch (which SSE event carries
- * which meaning, which wire key addresses which part) but re-derive the same
- * shape bookkeeping: lazy part opening and typed delta routing, call-id dedup,
- * refusal pairing, argument budget accounting, start-once, and terminal-once.
- * This tracker absorbs all of it. Decoders address parts by an opaque wire
- * `slot` string of their choosing (`tool:0`, `block:2`, an item id, or a
- * single `current` slot) and the tracker owns the rest.
+ * Implements wire-agnostic bookkeeping for streaming responses: lazy and explicit part opening,
+ * tool call argument accumulation and budget enforcement, identity deduplication, and single-emission
+ * guarantees for response start and terminal events.
  *
- * Layering: the tracker is the decoders' private helper, not a normative gate.
- * The `IrStreamStateMachine` downstream still validates the full
- * lifecycle of every emitted event; the tracker merely lets each decoder emit
- * well-formed sequences by construction and fail closed at the wire with
- * protocol context.
+ * Used by OpenAI Chat, OpenAI Responses, and Anthropic Messages stream decoders to emit well-formed
+ * intermediate representation (IR) stream event sequences.
  */
-
-/** Part descriptors the IR stream admits. */
-export type ShapePartType = "text" | "refusal" | "function_call";
-
-/**
- * How an open call resolves a slot that already carries an open part:
- * `reuse-typed` reuses it only when the descriptor type matches (the lazy
- * delta pattern), `force-new` always opens a fresh part (the explicit
- * part-announced pattern). A replaced part stays open in the IR, so a wire
- * that abandons a part without closing it still fails the terminal check.
- */
-export type OpenPartMode = "reuse-typed" | "force-new";
-
-/** Read-only view of one open function part, for wire-side correlation. */
-export interface OpenFunctionPartInfo {
-  /** The decoder's wire slot the part was opened under. */
-  readonly slot: string;
-  readonly partId: string;
-  readonly callId: string;
-  readonly name: string;
-  readonly outputIndex: number | undefined;
-}
-
-interface OpenPart {
-  readonly slot: string;
-  readonly partId: string;
-  readonly type: ShapePartType;
-  readonly callId: string | undefined;
-  readonly name: string | undefined;
-  readonly outputIndex: number | undefined;
-  /** Accumulated function argument fragments, parsed once at close. */
-  arguments: string;
-  deltaCount: number;
-}
-
-export interface StreamShapeTrackerOptions {
-  readonly session: StreamSession;
-  readonly maxArgumentBytes?: number;
-  /** Wire label used in fail-closed messages ("Chat", "Responses", "Messages"). */
-  readonly wireLabel: string;
-}
-
 export class StreamShapeTracker {
   private readonly session: StreamSession;
   private readonly wireLabel: string;
@@ -76,24 +26,27 @@ export class StreamShapeTracker {
   private refusalSeen = false;
   private functionPartsStarted = 0;
 
-  /** Wire identities (call ids, item ids, block indexes) claimed for the whole stream. */
+  /** Wire identities claimed across the stream session to prevent duplicate reuse. */
   private readonly claimedIdentities = new Set<string>();
-  /** Open parts by wire slot, in open order. */
+
+  /** Currently open streaming parts indexed by decoder wire slot. */
   private readonly openParts = new Map<string, OpenPart>();
 
+  /**
+   * Initializes a stream shape tracker bound to a stream session.
+   *
+   * @param options - Tracker configuration options.
+   */
   constructor(options: StreamShapeTrackerOptions) {
     this.session = options.session;
     this.wireLabel = options.wireLabel;
     this.budget = new StreamToolArgumentsBudget(options.maxArgumentBytes);
   }
 
-  // =====================================================================
-  // Terminal-once
-  // =====================================================================
-
   /**
-   * Fails once the stream reached a terminal event, so a misbehaving provider
-   * cannot re-terminate; every decoder calls this before parsing a frame.
+   * Guards against frames received after the stream has reached a terminal event.
+   *
+   * @returns Success if stream is active, or `invalid_request` failure if already terminal.
    */
   guardFrame(): Result<void, NormalizedFailure> {
     if (this.terminal) {
@@ -102,23 +55,24 @@ export class StreamShapeTracker {
     return ok(undefined);
   }
 
-  /** Marks the stream terminal; idempotent. */
+  /** Marks the stream as terminal so subsequent frames fail guard checks. */
   markTerminal(): void {
     this.terminal = true;
   }
 
+  /**
+   * Reports whether the stream has reached a terminal state.
+   *
+   * @returns `true` if terminal, `false` otherwise.
+   */
   isTerminal(): boolean {
     return this.terminal;
   }
 
-  // =====================================================================
-  // Start-once
-  // =====================================================================
-
   /**
-   * Emits `response_start` on the first call and no-ops afterwards. For wires
-   * whose start event is implicit (Chat emits it lazily on the first content
-   * chunk, and every later chunk must not re-emit).
+   * Emits a `response_start` event on first invocation; no-op on subsequent calls.
+   *
+   * @param events - Stream event buffer to append `response_start` to.
    */
   ensureStarted(events: IrStreamEvent[]): void {
     if (this.started) return;
@@ -127,9 +81,10 @@ export class StreamShapeTracker {
   }
 
   /**
-   * Emits `response_start` exactly once and fails on a second explicit start
-   * event. For wires whose start event is a named frame (R response.created,
-   * M message_start): a duplicate frame is malformed provider output.
+   * Explicitly emits `response_start` once, failing if already started.
+   *
+   * @param events - Stream event buffer to append `response_start` to.
+   * @returns Success on first call, or `invalid_request` failure on duplicate start.
    */
   start(events: IrStreamEvent[]): Result<void, NormalizedFailure> {
     if (this.started) {
@@ -139,14 +94,11 @@ export class StreamShapeTracker {
     return ok(undefined);
   }
 
-  // =====================================================================
-  // Identity dedup
-  // =====================================================================
-
   /**
-   * Claims a wire identity (tool call id, item id, block index) for the whole
-   * stream: a second claim of the same identity fails, including after the
-   * owning part closed.
+   * Reserves a unique wire identity (e.g. tool call ID) for the lifetime of the stream.
+   *
+   * @param identity - Wire identity string to reserve.
+   * @returns Success if identity was unclaimed, or `invalid_request` failure if already claimed.
    */
   claimIdentity(identity: string): Result<void, NormalizedFailure> {
     if (this.claimedIdentities.has(identity)) {
@@ -156,31 +108,35 @@ export class StreamShapeTracker {
     return ok(undefined);
   }
 
-  /** Whether a wire identity was already claimed (terminal-output announcement checks). */
+  /**
+   * Checks whether a wire identity has been claimed during this stream session.
+   *
+   * @param identity - Wire identity string to check.
+   * @returns `true` if previously claimed, `false` otherwise.
+   */
   hasIdentity(identity: string): boolean {
     return this.claimedIdentities.has(identity);
   }
 
-  // =====================================================================
-  // Part lifecycle
-  // =====================================================================
-
   /**
-   * Opens (or reuses) the text part in `slot` and emits `part_start` when a
-   * new part is created.
+   * Opens or reuses a text streaming part for the given wire slot.
    *
-   * @returns The open part's IR partId.
+   * @param events - Stream event buffer to append `part_start` to if opened.
+   * @param slot - Wire slot key for part correlation.
+   * @param mode - Part resolution mode (`reuse-typed` or `force-new`).
+   * @returns Allocated IR part ID.
    */
   openTextPart(events: IrStreamEvent[], slot: string, mode: OpenPartMode): string {
     return this.openPart(events, slot, { type: "text" }, mode).partId;
   }
 
   /**
-   * Opens (or reuses) the refusal part in `slot` and emits `part_start` when
-   * a new part is created. Records that the stream saw a refusal part, which
-   * gates finish-reason derivation.
+   * Opens or reuses a refusal streaming part for the given wire slot.
    *
-   * @returns The open part's IR partId.
+   * @param events - Stream event buffer to append `part_start` to if opened.
+   * @param slot - Wire slot key for part correlation.
+   * @param mode - Part resolution mode (`reuse-typed` or `force-new`).
+   * @returns Allocated IR part ID.
    */
   openRefusalPart(events: IrStreamEvent[], slot: string, mode: OpenPartMode): string {
     this.refusalSeen = true;
@@ -188,13 +144,14 @@ export class StreamShapeTracker {
   }
 
   /**
-   * Opens a function-call part in `slot` and emits its `part_start`.
+   * Opens a function call streaming part in the specified wire slot.
    *
-   * @param dedupCallId - Fails when the call id was already used by another
-   * part on this stream (wires whose call ids are stream-unique by contract).
-   * @param outputIndex - Optional wire correlation hint remembered for
-   * {@link findFunctionPart}.
-   * @returns The open part's IR partId.
+   * @param events - Stream event buffer to append `part_start` to.
+   * @param slot - Wire slot key for part correlation.
+   * @param callId - Wire tool call identifier.
+   * @param name - Function name.
+   * @param opts - Optional configuration for call ID deduplication and output indexing.
+   * @returns Allocated IR part ID, or failure if slot is occupied or call ID duplicate.
    */
   openFunctionPart(
     events: IrStreamEvent[],
@@ -231,27 +188,43 @@ export class StreamShapeTracker {
     return ok(part.partId);
   }
 
-  /** The IR partId of the open part in `slot`, or undefined. */
+  /**
+   * Returns the IR part ID of the part currently open in the given slot.
+   *
+   * @param slot - Wire slot key to inspect.
+   * @returns Open IR part ID, or `undefined` if slot holds no open part.
+   */
   partIdOf(slot: string): string | undefined {
     return this.openParts.get(slot)?.partId;
   }
 
-  /** The type of the open part in `slot`, or undefined. */
+  /**
+   * Returns the part type currently open in the given slot.
+   *
+   * @param slot - Wire slot key to inspect.
+   * @returns ShapePartType of the open part, or `undefined` if not open.
+   */
   partTypeOf(slot: string): ShapePartType | undefined {
     return this.openParts.get(slot)?.type;
   }
 
-  /** The open function part in `slot`, or undefined. */
+  /**
+   * Returns a read-only snapshot of the open function part in the given slot.
+   *
+   * @param slot - Wire slot key to inspect.
+   * @returns OpenFunctionPartInfo snapshot, or `undefined` if slot is not an open function part.
+   */
   openFunctionPartInfo(slot: string): OpenFunctionPartInfo | undefined {
     const part = this.openParts.get(slot);
     return part !== undefined && part.type === "function_call" ? functionPartInfo(part) : undefined;
   }
 
   /**
-   * Resolves an open function part by wire identity or output index, in the
-   * correlation order the R wire needs: a direct slot hit first, then a scan
-   * for a matching call id or IR partId, with a conflicting `outputIndex`
-   * rejecting the match; an omitted key falls back to the output index alone.
+   * Resolves an open function part by key (slot, callId, partId) or output index.
+   *
+   * @param key - Wire slot, callId, or partId reference.
+   * @param outputIndex - Wire output index correlation hint.
+   * @returns Matching OpenFunctionPartInfo snapshot, or `undefined` if not found.
    */
   findFunctionPart(key: string | undefined, outputIndex: number | undefined): OpenFunctionPartInfo | undefined {
     if (key !== undefined) {
@@ -281,16 +254,21 @@ export class StreamShapeTracker {
     return undefined;
   }
 
-  // =====================================================================
-  // Deltas
-  // =====================================================================
-
   /**
-   * Routes a text delta to the open text part in `slot`. With `lazy` the part
-   * is opened on demand (wires whose deltas imply the part); without it the
-   * part must already be open (wires that announce every part).
+   * Appends a text delta to the open text part in the specified slot.
+   *
+   * @param events - Stream event buffer to append `text_delta` to.
+   * @param slot - Wire slot key for the target part.
+   * @param text - Text fragment to append.
+   * @param opts - Optional flags (e.g. `lazy` to open part on demand).
+   * @returns Success if routed, or `invalid_request` failure if part missing or mismatched.
    */
-  textDelta(events: IrStreamEvent[], slot: string, text: string, opts?: { lazy?: boolean }): Result<void, NormalizedFailure> {
+  textDelta(
+    events: IrStreamEvent[],
+    slot: string,
+    text: string,
+    opts?: { lazy?: boolean },
+  ): Result<void, NormalizedFailure> {
     let part = this.openParts.get(slot);
     if (opts?.lazy === true) {
       part = this.openPart(events, slot, { type: "text" }, "reuse-typed");
@@ -307,10 +285,12 @@ export class StreamShapeTracker {
   }
 
   /**
-   * Routes a refusal delta to the open refusal part in `slot`, opening the
-   * part on demand (refusal deltas imply the part on both wires that carry
-   * them). Refusal pairing — one open refusal part per slot, deltas only on
-   * refusal parts — is owned here.
+   * Appends a refusal delta to the refusal part in the specified slot, opening lazily if needed.
+   *
+   * @param events - Stream event buffer to append `refusal_delta` to.
+   * @param slot - Wire slot key for the refusal part.
+   * @param text - Refusal text fragment to append.
+   * @returns Success if routed, or `invalid_request` failure.
    */
   refusalDelta(events: IrStreamEvent[], slot: string, text: string): Result<void, NormalizedFailure> {
     const partId = this.openRefusalPart(events, slot, "reuse-typed");
@@ -322,12 +302,13 @@ export class StreamShapeTracker {
   }
 
   /**
-   * Routes a tool-argument fragment to the open function part in `slot`,
-   * claiming the stream argument budget and accumulating the fragment for the
-   * once-only parse at close.
+   * Routes a tool argument fragment to an open function part, claiming session budget.
    *
-   * @param expectedCallId - Fails when it does not match the open part's call
-   * id (wires whose fragments may drift from the announced call id).
+   * @param events - Stream event buffer to append `tool_arguments_delta` to.
+   * @param slot - Wire slot key for the target function part.
+   * @param fragment - Raw JSON argument fragment.
+   * @param expectedCallId - Optional expected call ID to verify against the open part.
+   * @returns Success if routed, or failure if budget exceeded, slot missing, or call ID mismatched.
    */
   toolArgumentsDelta(
     events: IrStreamEvent[],
@@ -337,7 +318,9 @@ export class StreamShapeTracker {
   ): Result<void, NormalizedFailure> {
     const part = this.openParts.get(slot);
     if (part === undefined || part.type !== "function_call") {
-      return invalidRequest(`${this.wireLabel} stream tool arguments delta received for non-open function part '${slot}'`);
+      return invalidRequest(
+        `${this.wireLabel} stream tool arguments delta received for non-open function part '${slot}'`,
+      );
     }
     if (expectedCallId !== undefined && part.callId !== expectedCallId) {
       return invalidRequest(
@@ -361,15 +344,23 @@ export class StreamShapeTracker {
     return ok(undefined);
   }
 
-  /** How many argument fragments the open function part in `slot` has received. */
+  /**
+   * Returns the count of argument deltas received so far for an open function part.
+   *
+   * @param slot - Wire slot key to inspect.
+   * @returns Number of deltas received, or 0 if slot is not open.
+   */
   argumentDeltaCount(slot: string): number {
     return this.openParts.get(slot)?.deltaCount ?? 0;
   }
 
   /**
-   * Emits a citation routed to the open part in `slot`. Part-type admission is
-   * left to the normative state machine, matching the wires that carry
-   * citations without restating the rule here.
+   * Routes a citation event to the open part in the specified slot.
+   *
+   * @param events - Stream event buffer to append `citation` to.
+   * @param slot - Wire slot key for the target part.
+   * @param citation - Decoded IR citation object.
+   * @returns Success if routed, or `invalid_request` failure if slot holds no open part.
    */
   citation(events: IrStreamEvent[], slot: string, citation: IrCitation): Result<void, NormalizedFailure> {
     const part = this.openParts.get(slot);
@@ -380,15 +371,14 @@ export class StreamShapeTracker {
     return ok(undefined);
   }
 
-  // =====================================================================
-  // Close
-  // =====================================================================
-
   /**
-   * Closes the open part in `slot`, type-checked. Function parts carry their
-   * accumulated argument text parsed exactly once into `part_end.arguments`;
-   * an unparseable accumulation is carried as raw text only (never forged
-   * into an object).
+   * Closes the open part in the specified slot, verifying expected part type.
+   * Function parts have their accumulated arguments parsed exactly once.
+   *
+   * @param events - Stream event buffer to append `part_end` to.
+   * @param slot - Wire slot key of the part to close.
+   * @param expectedType - Expected ShapePartType for validation.
+   * @returns Success if closed, or `invalid_request` failure if slot not open or type mismatched.
    */
   closePart(events: IrStreamEvent[], slot: string, expectedType: ShapePartType): Result<void, NormalizedFailure> {
     const part = this.openParts.get(slot);
@@ -420,8 +410,9 @@ export class StreamShapeTracker {
   }
 
   /**
-   * Closes every open function part in open order (the finish path of wires
-   * that close all parts at the finish marker rather than per part).
+   * Closes all currently open function parts in open order.
+   *
+   * @param events - Stream event buffer to append `part_end` events to.
    */
   closeAllFunctionParts(events: IrStreamEvent[]): void {
     for (const part of [...this.openParts.values()]) {
@@ -438,25 +429,31 @@ export class StreamShapeTracker {
     }
   }
 
-  // =====================================================================
-  // Finish-derivation state
-  // =====================================================================
-
-  /** Whether any refusal part was opened on this stream. */
+  /**
+   * Reports whether any refusal part was opened during this stream.
+   *
+   * @returns `true` if a refusal part was opened, `false` otherwise.
+   */
   sawRefusal(): boolean {
     return this.refusalSeen;
   }
 
-  /** How many function parts were opened (started), closed or not. */
+  /**
+   * Returns the total count of function parts opened during the stream session.
+   *
+   * @returns Total number of started function parts.
+   */
   startedFunctionPartCount(): number {
     return this.functionPartsStarted;
   }
 
-  // =====================================================================
-  // Terminal events
-  // =====================================================================
-
-  /** Emits the terminal `response_end` and marks the stream terminal. */
+  /**
+   * Emits terminal `response_end` event and marks the tracker as terminal.
+   *
+   * @param events - Stream event buffer to append `response_end` to.
+   * @param finish - Terminal finish details.
+   * @param usage - Optional token usage details.
+   */
   responseEnd(events: IrStreamEvent[], finish: IrFinish, usage?: IrUsage): void {
     events.push({
       type: "response_end",
@@ -467,16 +464,26 @@ export class StreamShapeTracker {
     this.terminal = true;
   }
 
-  /** Emits the terminal in-band `error` event and marks the stream terminal. */
+  /**
+   * Emits an in-band stream `error` event and marks the tracker as terminal.
+   *
+   * @param events - Stream event buffer to append `error` to.
+   * @param failure - Normalized failure to emit.
+   */
   error(events: IrStreamEvent[], failure: NormalizedFailure): void {
     events.push({ type: "error", responseId: this.session.responseId, failure });
     this.terminal = true;
   }
 
-  // =====================================================================
-  // Internals
-  // =====================================================================
-
+  /**
+   * Internal helper to open or reuse non-function parts (text or refusal).
+   *
+   * @param events - Stream event buffer to append `part_start` to if new.
+   * @param slot - Wire slot key for the part.
+   * @param descriptor - Part descriptor defining part type.
+   * @param mode - Resolution mode (`reuse-typed` or `force-new`).
+   * @returns OpenPart tracking record.
+   */
   private openPart(
     events: IrStreamEvent[],
     slot: string,
@@ -508,6 +515,78 @@ export class StreamShapeTracker {
   }
 }
 
+/** Streaming part types admitted by the intermediate representation. */
+export type ShapePartType = "text" | "refusal" | "function_call";
+
+/**
+ * Resolution mode when opening a part in an already occupied wire slot.
+ * `reuse-typed` reuses existing part if type matches; `force-new` always opens a new part.
+ */
+export type OpenPartMode = "reuse-typed" | "force-new";
+
+/** Read-only snapshot of an open function part for wire-side correlation. */
+export interface OpenFunctionPartInfo {
+  /** Decoder wire slot string under which the part was opened. */
+  readonly slot: string;
+
+  /** IR part identifier allocated for this part. */
+  readonly partId: string;
+
+  /** Wire-announced call identifier for the function call. */
+  readonly callId: string;
+
+  /** Function name as announced by the provider. */
+  readonly name: string;
+
+  /** Optional wire output index hint for correlation. */
+  readonly outputIndex: number | undefined;
+}
+
+/** Internal tracking record for an open streaming part in the tracker. */
+interface OpenPart {
+  /** Decoder wire slot key under which the part is open. */
+  readonly slot: string;
+
+  /** IR part identifier allocated for this part. */
+  readonly partId: string;
+
+  /** Streaming part type. */
+  readonly type: ShapePartType;
+
+  /** Wire call identifier for function parts, or `undefined`. */
+  readonly callId: string | undefined;
+
+  /** Function name for function parts, or `undefined`. */
+  readonly name: string | undefined;
+
+  /** Output index hint for wire correlation, or `undefined`. */
+  readonly outputIndex: number | undefined;
+
+  /** Accumulated raw argument text fragments. */
+  arguments: string;
+
+  /** Total number of argument fragments received. */
+  deltaCount: number;
+}
+
+/** Construction options for {@link StreamShapeTracker}. */
+export interface StreamShapeTrackerOptions {
+  /** Stream session providing response ID, model name, and part ID generator. */
+  readonly session: StreamSession;
+
+  /** Optional byte budget ceiling override for accumulated tool arguments. */
+  readonly maxArgumentBytes?: number;
+
+  /** Short wire protocol label (e.g. 'Chat', 'Responses', 'Messages') for error messages. */
+  readonly wireLabel: string;
+}
+
+/**
+ * Projects an internal function part record into a read-only snapshot.
+ *
+ * @param part - Internal function part record to project.
+ * @returns Read-only OpenFunctionPartInfo snapshot.
+ */
 function functionPartInfo(part: OpenPart): OpenFunctionPartInfo {
   return {
     slot: part.slot,

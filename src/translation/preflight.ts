@@ -1,3 +1,12 @@
+/**
+ * @fileoverview Direction-aware capability preflight for translated requests and outcomes.
+ *
+ * Enforces capability matrix support tiers (T1, T2, T3) before provider dispatch or client
+ * response emission. Requests and outcomes are verified across distinct policy domains:
+ * tool definitions, generation controls, wire option sidecars, structured outputs, and
+ * transcript structures. Unsupported features fail closed with their exact capability row ID.
+ */
+
 import type { Protocol, Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { CHAT_TOOL_NAME_REGEX } from "./codecs/shared/controls.ts";
@@ -14,11 +23,18 @@ import {
   validateOpenAiStrictSchema,
 } from "./schema-dialect.ts";
 
-/** C/R metadata limits (`request-metadata` declared subset). */
+/** Metadata entry and length bounds declared by the `request-metadata` matrix row. */
 const METADATA_MAX_ENTRIES = 16;
 const METADATA_MAX_KEY_LENGTH = 64;
 const METADATA_MAX_VALUE_LENGTH = 512;
 
+/**
+ * Validates direction feasibility for structured JSON schema outputs.
+ *
+ * @param req - Semantic IR request to check.
+ * @param facts - Direction classification facts.
+ * @returns Ok if schema controls are valid for target wire; otherwise unsupported capability failure.
+ */
 function preflightOutputFormat(req: IrRequest, facts: DirectionFacts): Result<void, NormalizedFailure> {
   const output = req.output;
   if (output === undefined || output.type !== "json_schema") return ok(undefined);
@@ -44,9 +60,10 @@ function preflightOutputFormat(req: IrRequest, facts: DirectionFacts): Result<vo
 }
 
 /**
- * Validates the C/R metadata size/count subset: at most 16 entries, keys ≤64
- * chars, values ≤512 chars. Violations fail `invalid_request` per the
- * `request-metadata` row's declared subset.
+ * Validates entry count and key/value string length limits for request metadata.
+ *
+ * @param metadata - Inbound metadata record to validate.
+ * @returns Ok if within limits; otherwise invalid request failure.
  */
 function validateMetadataLimits(metadata: Readonly<Record<string, string>>): Result<void, NormalizedFailure> {
   const entries = Object.entries(metadata);
@@ -64,27 +81,33 @@ function validateMetadataLimits(metadata: Readonly<Record<string, string>>): Res
   return ok(undefined);
 }
 
-/** Closed facts for each supported translation direction. */
+/**
+ * Closed set of immutable direction classification flags derived from a translation direction.
+ */
 export interface DirectionFacts {
+  /** Client-side source protocol format. */
   readonly source: Protocol;
+  /** Upstream provider-side target protocol format. */
   readonly target: Protocol;
+  /** True when either source or target is `anthropic-messages`. */
   readonly involvesMessages: boolean;
+  /** True when target protocol is `openai-chat`. */
   readonly isTargetChat: boolean;
+  /** True when target protocol is `openai-responses`. */
   readonly isTargetResponses: boolean;
+  /** True when target protocol is `anthropic-messages`. */
   readonly isTargetMessages: boolean;
+  /** True when translation stays within the OpenAI family (Chat <-> Responses). */
   readonly isChatResponses: boolean;
+  /** True when client-side source protocol is `anthropic-messages`. */
   readonly isSourceMessages: boolean;
 }
 
 /**
- * Derives the closed set of per-direction facts shared by every
- * direction-gated capability check. `isChatResponses` is the single spelling
- * of "this direction stays between OpenAI Chat and Responses"; the stream
- * state machine and both capability helpers must consume it rather than
- * recomparing protocol strings inline.
+ * Decomposes a translation direction string into structured protocol classification flags.
  *
- * @param direction - Directed conversion path (source is the client).
- * @returns The direction's immutable fact set.
+ * @param direction - Directed protocol conversion path.
+ * @returns Cached boolean facts describing the direction endpoints.
  */
 export function directionFacts(direction: Direction): DirectionFacts {
   const [source, target] = direction.split("->") as [Protocol, Protocol];
@@ -102,20 +125,11 @@ export function directionFacts(direction: Direction): DirectionFacts {
 }
 
 /**
- * Computes the refusal capability rejection for a translated outcome with a
- * refusal finish reason, or `undefined` when the direction admits it.
+ * Resolves capability matrix rejection ID for outcomes terminating with a refusal finish reason.
  *
- * A refusal finish without a refusal part can only originate from a Messages
- * provider (the sole wire with a refusal stop reason and no refusal content
- * block), so it reports `refusal-terminal-reason`. Any other refusal crossing
- * a Messages boundary reports `refusal-content`. C/R directions admit both.
- * Shared by the complete-path preflight and the stream state machine so the
- * two paths cannot drift.
- *
- * @param direction - Directed protocol conversion path (source is the client,
- * target is the upstream provider the outcome was decoded from).
- * @param hasRefusalPart - Whether the outcome carries a refusal part.
- * @returns Capability ID to reject with, or `undefined` when admitted.
+ * @param direction - Directed translation path.
+ * @param hasRefusalPart - Whether the outcome contains an explicit refusal content part.
+ * @returns Capability row ID to fail closed with, or `undefined` if admitted.
  */
 export function refusalFinishCapability(
   direction: Direction,
@@ -132,9 +146,12 @@ export function refusalFinishCapability(
 }
 
 /**
- * Validates per-target feasibility of every client tool surface on the request:
- * `req.tools` plus the allowed-tools subset sidecar, whose elements re-emit in
- * the target wire shape and so face the same per-target checks.
+ * Validates tool definitions and parallelism controls against target protocol capabilities.
+ *
+ * @param req - Inbound semantic IR request.
+ * @param facts - Direction classification flags.
+ * @param requestWireOptions - Optional request-side wire options.
+ * @returns Ok if tools are supported; otherwise unsupported capability failure.
  */
 function preflightToolSurfaces(
   req: IrRequest,
@@ -183,16 +200,16 @@ function preflightToolSurfaces(
 }
 
 /**
- * Validates direction feasibility of the admitted generation controls: verbosity
- * and common reasoning effort are C/R-only, and stop sequences carry
- * per-direction target constraints. Sampling bounds are enforced at decode, so
- * out-of-range values never reach preflight unclamped.
+ * Validates sampling hyperparameters, verbosity, reasoning effort, and stop sequences.
+ *
+ * @param req - Inbound semantic IR request.
+ * @param facts - Direction classification flags.
+ * @returns Ok if generation controls are supported; otherwise unsupported capability failure.
  */
 function preflightGenerationControls(req: IrRequest, facts: DirectionFacts): Result<void, NormalizedFailure> {
   // Sampling controls are already bounded to [0, 1] at decode; verbosity and
-  // common reasoning effort are C↔R-only; stop sequences have per-direction
-  // target constraints. Out-of-range values never reach preflight unclamped —
-  // the decoders reject them first.
+  // common reasoning effort are C<->R-only; stop sequences have per-direction
+  // target constraints.
   const generation = req.generation;
   if (generation !== undefined) {
     if (generation.verbosity !== undefined && !facts.isChatResponses) {
@@ -206,7 +223,7 @@ function preflightGenerationControls(req: IrRequest, facts: DirectionFacts): Res
       if (facts.isTargetResponses) {
         return unsupportedCapability("stop-sequence-request");
       }
-      // M→C: Chat admits at most 4 entries; larger (valid M) sets reject.
+      // M->C: Chat admits at most 4 entries; larger sets reject.
       if (facts.isSourceMessages && generation.stopSequences.length > 4) {
         return unsupportedCapability("stop-sequence-request");
       }
@@ -215,11 +232,7 @@ function preflightGenerationControls(req: IrRequest, facts: DirectionFacts): Res
   return ok(undefined);
 }
 
-/**
- * Validates direction feasibility of the request wire-only sidecar before any
- * dispatch: the decoder has no direction, so every per-row T1/T2/T3 rule for a
- * captured field is enforced here.
- */
+/** Request wire option keys that cannot cross an Anthropic Messages boundary. */
 const MESSAGES_FORBIDDEN_REQUEST_OPTIONS: ReadonlyArray<readonly [keyof RequestWireOptions, MatrixRowId]> = [
   ["store", "responses-storage"],
   ["promptCacheKey", "prompt-cache-key"],
@@ -231,6 +244,14 @@ const MESSAGES_FORBIDDEN_REQUEST_OPTIONS: ReadonlyArray<readonly [keyof RequestW
   ["legacyJsonObject", "legacy-json-object"],
 ];
 
+/**
+ * Validates direction feasibility for request-side wire options (storage, caching, metadata, callers).
+ *
+ * @param req - Inbound semantic IR request.
+ * @param facts - Direction classification flags.
+ * @param requestWireOptions - Optional request wire options captured at ingress.
+ * @returns Ok if wire options are supported; otherwise unsupported capability failure.
+ */
 function preflightRequestWireOptions(
   req: IrRequest,
   facts: DirectionFacts,
@@ -239,14 +260,12 @@ function preflightRequestWireOptions(
   const { involvesMessages, isTargetChat } = facts;
 
   if (requestWireOptions !== undefined) {
-    // C↔R-only rows: every M direction is T3.
+    // C<->R-only rows: every M direction is T3.
     if (involvesMessages) {
       for (const [key, capability] of MESSAGES_FORBIDDEN_REQUEST_OPTIONS) {
         if (requestWireOptions[key] !== undefined) return unsupportedCapability(capability);
       }
-      // Service tier maps into/out of M only at the documented `auto`
-      // intersection. Explicit null is the sidecar's deliberately-preserved
-      // "no tier requested" fact and is treated as unspecified for M.
+      // Service tier maps into/out of M only at the documented `auto` intersection.
       if (
         requestWireOptions.serviceTier !== undefined &&
         requestWireOptions.serviceTier !== null &&
@@ -255,18 +274,16 @@ function preflightRequestWireOptions(
         return unsupportedCapability("service-tier");
       }
     }
-    // Chat has no caller surface at all, so any surviving caller entry fails
-    // closed here; decode has already rejected every non-"direct" literal.
+    // Chat has no caller surface at all, so any surviving caller entry fails closed.
     if (requestWireOptions.toolAllowedCallers !== undefined && isTargetChat) {
       return unsupportedCapability("allowed-callers");
     }
-    // request-metadata is T2 in every direction: enforce the declared C/R
-    // size/count subset and let the egress subset into M (user_id only).
+    // request-metadata is T2 in every direction: enforce declared C/R limits.
     if (requestWireOptions.metadata !== undefined) {
       const metadataResult = validateMetadataLimits(requestWireOptions.metadata);
       if (!metadataResult.ok) return metadataResult;
     }
-    // provider-file-id / provider-image-id: C↔R only, every M direction is T3.
+    // provider-file-id / provider-image-id: C<->R only.
     if (requestWireOptions.providerFileRefs !== undefined && requestWireOptions.providerFileRefs.length > 0) {
       if (involvesMessages) {
         for (const ref of requestWireOptions.providerFileRefs) {
@@ -279,16 +296,8 @@ function preflightRequestWireOptions(
         }
       }
     }
-    // prompt-cache-breakpoints: C↔R is direct and into/out of M is marker-only
-    // with declared TTL loss (egress-side), except breakpoints anchored to
-    // assistant content cannot target Responses: R egress would re-emit the
-    // marker onto an output_text part, which the R provider 400s (the R wire
-    // admits markers only on input_text/input_image/input_file blocks). C and
-    // M wires accept markers on assistant content, so only R-targeting
-    // directions reject. Tool anchors extend the same rule: C tool_calls
-    // entries and R function_call/function_call_output items carry no marker
-    // surface, and R function_call_output admits no marker either, while C
-    // tool messages and M tool_use/tool_result blocks re-attach them.
+    // prompt-cache-breakpoints: Responses rejects markers re-emitted on assistant output parts,
+    // and neither OpenAI wire supports markers on tool call or tool result entries.
     if (requestWireOptions.promptCacheBreakpoints !== undefined) {
       const targetResponses = facts.isTargetResponses;
       for (const entry of requestWireOptions.promptCacheBreakpoints) {
@@ -309,6 +318,13 @@ function preflightRequestWireOptions(
   return ok(undefined);
 }
 
+/**
+ * Validates media source constraints (URLs, inline bytes, gateway references) for an input part.
+ *
+ * @param part - Input media part to validate.
+ * @param facts - Direction classification flags.
+ * @returns Ok if media format is supported; otherwise unsupported capability failure.
+ */
 function checkMediaPart(part: IrInputPart, facts: DirectionFacts): Result<void, NormalizedFailure> {
   if (part.type === "image") {
     if (part.source.type === "gateway_file") {
@@ -340,13 +356,15 @@ function checkMediaPart(part: IrInputPart, facts: DirectionFacts): Result<void, 
 }
 
 /**
- * Validates the transcript: instruction placement and authority, tool call and
- * tool result shapes, and content parts that no target wire admits.
+ * Validates conversation transcript items, instruction placement, citations, and tool calls.
+ *
+ * @param req - Inbound semantic IR request.
+ * @param facts - Direction classification flags.
+ * @returns Ok if transcript items are supported; otherwise unsupported capability failure.
  */
 function preflightTranscript(req: IrRequest, facts: DirectionFacts): Result<void, NormalizedFailure> {
   const { involvesMessages, isTargetMessages, isTargetChat, isSourceMessages } = facts;
 
-  // Transcript items and content parts inspection
   let sawNonInstruction = false;
 
   for (const item of req.items) {
@@ -370,11 +388,6 @@ function preflightTranscript(req: IrRequest, facts: DirectionFacts): Result<void
 
     if (item.type === "tool_call") {
       if (item.call.type === "custom" && involvesMessages) {
-        // Custom calls carry no format in the IR or on either OpenAI wire
-        // (C custom:{name,input}, R {call_id,name,input}); when a grammar
-        // definition is present, the tools loop above has already rejected
-        // with custom-grammar-tool. A call without any current definition is
-        // attributable only as custom-text-tool.
         return unsupportedCapability("custom-text-tool");
       }
       if (item.call.type === "function" && isTargetMessages && item.call.arguments === undefined) {
@@ -385,8 +398,7 @@ function preflightTranscript(req: IrRequest, facts: DirectionFacts): Result<void
       if (item.isError) {
         return unsupportedCapability("tool-result-error");
       }
-      // Chat tool content is a single text string: empty, multipart, or
-      // non-text results cannot map onto the C wire.
+      // Chat tool content is a single text string: empty, multipart, or non-text results cannot map onto C.
       if (isTargetChat && !(item.content.length === 1 && item.content[0]?.type === "text")) {
         return unsupportedCapability("tool-result-multipart");
       }
@@ -429,21 +441,11 @@ function preflightTranscript(req: IrRequest, facts: DirectionFacts): Result<void
     }
   }
 
-  // Size enforcement lives at exactly two documented points: the HTTP ingress
-  // body limit and the M-bound serialized-body check in the coordinator. No
-  // direction-independent media-byte cap exists here — the request-body-size
-  // row pins no universal JSON cap for C/R traffic.
   return ok(undefined);
 }
 
 /**
- * Shared preflight checks for plain-text request subset across complete and
- * stream deliveries.
- *
- * Each policy domain above is an independent validator; this function only
- * fixes the order in which they run, so adding a check never means editing an
- * unrelated domain's branch. The order is load-bearing: the first failure is
- * the one reported, and the matrix names exactly one owning row per request.
+ * Evaluates shared preflight policy domains in fixed order: tools, controls, sidecar, output, transcript.
  */
 function preflightPlainTextRequestFeatures(
   req: IrRequest,
@@ -466,15 +468,9 @@ function preflightPlainTextRequestFeatures(
  * Evaluates semantic capability feasibility for an admitted complete {@link IrRequest}
  * given the specific translation direction.
  *
- * Plain-text and client-tool complete requests are admitted. Any
- * unsupported direction-specific transcript structures, non-admitted tool
- * capabilities, or wire-only sidecar fields traveling in a T3 direction fail
- * closed with their exact matrix capability ID before any provider dispatch
- * occurs.
- *
  * @param req - Validated semantic IR request.
  * @param direction - Directed protocol conversion path.
- * @param requestWireOptions - Wire-only sidecar captured by the source ingress.
+ * @param requestWireOptions - Wire-only sidecar captured by source ingress.
  * @returns Ok if eligible for translation; otherwise fail-closed normalized failure.
  */
 export function preflightRequest(
@@ -482,7 +478,6 @@ export function preflightRequest(
   direction: Direction,
   requestWireOptions?: RequestWireOptions,
 ): Result<void, NormalizedFailure> {
-  // Gated delivery mode
   if (req.delivery !== "complete") {
     return unsupportedCapability("semantic-stream-lifecycle");
   }
@@ -495,17 +490,9 @@ export function preflightRequest(
  * Evaluates semantic capability feasibility for an admitted streaming {@link IrRequest}
  * given the specific translation direction.
  *
- * Streaming requests may carry client tool definitions and controls so the
- * target request encoder can project them. Admitted function tool call
- * streaming translates piecewise across all six directions; custom tools fail
- * closed with their streaming rows (`custom-tool-streaming`). Other unsupported
- * direction-specific transcript structures or wire-only sidecar fields traveling
- * in a T3 direction fail closed with their exact matrix capability ID before any
- * provider dispatch occurs.
- *
  * @param req - Validated semantic IR request.
  * @param direction - Directed protocol conversion path.
- * @param requestWireOptions - Wire-only sidecar captured by the source ingress.
+ * @param requestWireOptions - Wire-only sidecar captured by source ingress.
  * @returns Ok if eligible for translation; otherwise fail-closed normalized failure.
  */
 export function preflightStreamRequest(
@@ -517,10 +504,7 @@ export function preflightStreamRequest(
     return unsupportedCapability("semantic-stream-lifecycle");
   }
 
-  // Custom tools are permanently blocked in translated streams: the IR has no
-  // cross-protocol custom-tool stream surface. Function tool definitions,
-  // choices, and parallelism are request-side fields and are validated by the
-  // shared target preflight before the stream request encoder projects them.
+  // Custom tools are permanently blocked in translated streams.
   const hasCustomToolSurface =
     req.tools?.some((tool) => tool.type === "custom") ||
     requestWireOptions?.allowedToolSubset?.tools?.some((tool) => tool.type === "custom") ||
@@ -534,13 +518,11 @@ export function preflightStreamRequest(
 }
 
 /**
- * Returns the fail-closed failure for response-side wire options discovered in
- * a forbidden direction, or undefined when the sidecar is admissible.
+ * Returns normalized failure if response-side wire options are inadmissible for client protocol.
  *
- * A moderation result destined for a Messages client is T3 (`moderation-policy-
- * result`): the M wire has no moderation field, so a present result can never
- * map. Shared by the complete-path outcome preflight and the stream pump,
- * which bypasses it.
+ * @param clientProtocol - Target client protocol.
+ * @param outcomeWireOptions - Response-side wire options from provider.
+ * @returns Normalized failure if unsupported, otherwise `undefined`.
  */
 export function outcomeWireOptionsFailure(
   clientProtocol: Protocol,
@@ -553,14 +535,12 @@ export function outcomeWireOptionsFailure(
 }
 
 /**
- * Normalizes outcome-side wire options for one translation direction before
- * client encoding.
+ * Normalizes outcome wire options for a translation direction before client encoding.
  *
- * The service-tier echo passes through only between Chat and Responses: M
- * echoes (`standard|priority|batch`) share no documented cross-provider
- * equivalence with the C/R tiers — `priority` especially has different routing
- * semantics — so an echo touching Messages is declared loss and never
- * fabricated into the other vocabulary.
+ * @param options - Outcome wire options from provider.
+ * @param clientProtocol - Client protocol receiving the response.
+ * @param providerProtocol - Upstream provider protocol that generated the outcome.
+ * @returns Filtered wire options appropriate for the client protocol.
  */
 export function normalizeOutcomeWireOptions(
   options: OutcomeWireOptions,
@@ -573,17 +553,11 @@ export function normalizeOutcomeWireOptions(
 }
 
 /**
- * Evaluates semantic capability feasibility for an upstream provider's {@link IrOutcome}
- * given the specific translation direction (the direction's source protocol is
- * the client the outcome is destined for).
- *
- * Natural, length, and tool-call finishes with text and tool parts are
- * admitted. Any refusal, content filter discoveries, or a moderation result
- * destined for a Messages client terminate fail-closed.
+ * Evaluates semantic capability feasibility for an upstream provider {@link IrOutcome}.
  *
  * @param out - Validated semantic IR outcome from upstream provider.
  * @param direction - Directed protocol conversion path.
- * @param outcomeWireOptions - Wire-only sidecar captured by the provider ingress.
+ * @param outcomeWireOptions - Wire-only sidecar captured by provider ingress.
  * @returns Ok if eligible for client translation; otherwise fail-closed normalized failure.
  */
 export function preflightOutcome(
@@ -591,9 +565,6 @@ export function preflightOutcome(
   direction: Direction,
   outcomeWireOptions?: OutcomeWireOptions,
 ): Result<void, NormalizedFailure> {
-  // Finish/parts well-formedness guard: a tool finish with zero tool calls is
-  // a malformed provider outcome and fails closed before any client wire is
-  // forged.
   if (out.finish.reason === "tool_calls" && !out.parts.some((part) => part.type === "tool_call")) {
     return invalidRequest("Outcome with finish reason 'tool_calls' must contain at least one tool_call part");
   }
@@ -603,11 +574,6 @@ export function preflightOutcome(
   if (hasRefusalPart && out.finish.reason !== "refusal") {
     return invalidRequest("Outcome carries a refusal part but finish reason is not refusal");
   }
-  // A provider that emits both a refusal and tool calls in one outcome is
-  // malformed: no target wire can express a message that refuses and calls
-  // tools. The stream decoders enforce the same co-occurrence rule, so the
-  // complete path must reject it here rather than encode a self-inconsistent
-  // client message.
   if (hasRefusalPart && out.parts.some((p) => p.type === "tool_call")) {
     return invalidRequest("Outcome carries both a refusal part and tool_call parts");
   }
@@ -623,7 +589,6 @@ export function preflightOutcome(
     }
   }
 
-  // Response-side sidecar feasibility (shared with the stream pump).
   const wireOptionsFailure = outcomeWireOptionsFailure(facts.source, outcomeWireOptions);
   if (wireOptionsFailure !== undefined) return failure(wireOptionsFailure);
 
@@ -631,7 +596,6 @@ export function preflightOutcome(
   const clientIsChat = facts.source === "openai-chat";
   const clientIsResponses = facts.source === "openai-responses";
 
-  // Inspect output parts
   for (const part of out.parts) {
     if (part.type === "refusal") {
       if (!facts.isChatResponses) {
@@ -642,8 +606,6 @@ export function preflightOutcome(
       if (part.call.type === "custom" && clientIsMessages) {
         return unsupportedCapability("custom-text-tool");
       }
-      // A function call without parsed arguments cannot become a M tool_use
-      // block (input must be a JSON object); never forge one.
       if (part.call.type === "function" && clientIsMessages && part.call.arguments === undefined) {
         return invalidRequest("function call arguments must be a valid JSON object for an Anthropic Messages client");
       }

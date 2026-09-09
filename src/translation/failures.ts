@@ -1,34 +1,32 @@
+/**
+ * @fileoverview Normalized failure factories and diagnostic formatters for the translation layer.
+ *
+ * Constructs `NormalizedFailure` domain values for fail-closed capability rejections
+ * referencing matrix capability IDs, invalid request payloads, and oversized payloads.
+ * Also provides upstream error string bounding and Retry-After header parsing.
+ */
+
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { MatrixRowId } from "./matrix.ts";
 
-/**
- * Maximum characters copied from a single upstream error message or
- * code/type string into translated complete and stream failure responses.
- *
- * Gateway policy caps user-visible wire diagnostic strings at 1024 characters
- * to bound downstream payload overhead and prevent unbounded wire reflections;
- * the full, unredacted raw upstream bytes remain preserved in Trace.
- */
+/** Maximum character length permitted for upstream error messages reflected in failure envelopes. */
 export const PROVIDER_ERROR_STRING_LIMIT = 1024;
 
 /**
- * Truncates an upstream provider error string to {@link PROVIDER_ERROR_STRING_LIMIT}.
+ * Truncates an upstream provider error message to the gateway diagnostic character limit.
  *
- * @param value - Upstream message or code/type string.
- * @returns Value unchanged when within bound, otherwise the leading prefix.
+ * @param value - Raw upstream error or status message.
+ * @returns Bounded string with length at most {@link PROVIDER_ERROR_STRING_LIMIT}.
  */
 export function truncateProviderErrorString(value: string): string {
   return value.length > PROVIDER_ERROR_STRING_LIMIT ? value.slice(0, PROVIDER_ERROR_STRING_LIMIT) : value;
 }
 
 /**
- * Parses a Retry-After header string into non-negative whole seconds.
+ * Parses an HTTP standard `Retry-After` header string into a non-negative integer number of seconds.
  *
- * Used for complete-path responses where the downstream client expects an HTTP
- * standard Retry-After header value in whole seconds.
- *
- * @param rawRetry - Raw header value from upstream response headers.
- * @returns Non-negative integer delay in seconds, or undefined if absent or invalid.
+ * @param rawRetry - Raw header value received from upstream response headers.
+ * @returns Non-negative whole second delay, or `undefined` if absent or non-numeric.
  */
 export function parseRetryAfterHeaderSeconds(rawRetry?: string): number | undefined {
   if (rawRetry === undefined) return undefined;
@@ -37,14 +35,10 @@ export function parseRetryAfterHeaderSeconds(rawRetry?: string): number | undefi
 }
 
 /**
- * Creates a normalized failure for an unsupported cross-protocol capability.
+ * Constructs a non-retryable `NormalizedFailure` for an unsupported capability in a translation direction.
  *
- * This translation-local helper avoids importing `src/routing/failures.ts`
- * to maintain strict layer isolation and prevent dependency cycles.
- *
- * @param capabilityId - Owning matrix row ID; the compile-checked
- * {@link MatrixRowId} union guarantees the named row exists.
- * @param message - Optional human-readable message.
+ * @param capabilityId - Validated matrix row identifier that has no admitted translation mapping.
+ * @param message - Optional human-readable diagnostic detail.
  * @returns Normalized domain failure with category `unsupported_capability`.
  */
 export function unsupportedCapabilityFailure(capabilityId: MatrixRowId, message?: string): NormalizedFailure {
@@ -57,9 +51,9 @@ export function unsupportedCapabilityFailure(capabilityId: MatrixRowId, message?
 }
 
 /**
- * Creates a normalized failure for an invalid cross-protocol request format or payload.
+ * Constructs a non-retryable `NormalizedFailure` for a malformed payload or invariant violation.
  *
- * @param message - Description of the malformed payload or violated invariant.
+ * @param message - Human-readable description of the validation error.
  * @returns Normalized domain failure with category `invalid_request`.
  */
 export function invalidRequestFailure(message: string): NormalizedFailure {
@@ -71,9 +65,9 @@ export function invalidRequestFailure(message: string): NormalizedFailure {
 }
 
 /**
- * Creates a normalized failure for a payload exceeding configured size limits.
+ * Constructs a non-retryable `NormalizedFailure` for an input exceeding payload or media byte limits.
  *
- * @param message - Description of the exceeded limit.
+ * @param message - Human-readable description of the exceeded limit.
  * @returns Normalized domain failure with category `payload_too_large`.
  */
 export function payloadTooLargeFailure(message: string): NormalizedFailure {

@@ -1,7 +1,19 @@
+/**
+ * @fileoverview Semantic cross-reference checks for loaded configuration in the Aptus gateway.
+ *
+ * Validates cross-section integrity across providers, models, routes, and auth keys.
+ * Enforces global public name uniqueness (models, routes, aliases), verifies reference
+ * targets (model providers, route candidates, client allowlists), rejects forbidden headers,
+ * validates provider baseUrl constraints, and normalizes trailing slashes in place.
+ *
+ * Executed as stage five of config loading after structural schema parsing. Any semantic
+ * inconsistency produces structured `StartupError` records that abort startup.
+ */
+
 import { jsonPointer, type StartupError, startupError } from "./errors.ts";
 import type { AptusConfig } from "./types.ts";
 
-/** Hop-by-hop and authentication-related headers that provider static headers must never set. */
+/** Hop-by-hop and credential header names forbidden in provider static headers. */
 const FORBIDDEN_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -19,26 +31,19 @@ const FORBIDDEN_HEADERS = new Set([
 ]);
 
 /**
- * Validates cross-references, semantic uniqueness, URL structures, and security policies across the loaded configuration.
+ * Validates cross references, uniqueness constraints, address policy, and security rules across configuration.
  *
- * Checks performed:
- * 1. Provider name uniqueness across providers.
- * 2. Key name and resolved secret uniqueness within each provider's Key Pool.
- * 3. Unified global namespace uniqueness across models, routes, and aliases (first declaration wins).
- * 4. Model provider references resolve to configured providers.
- * 5. Route candidates reference canonical model names only (no aliases, no candidate duplicates in a route).
- * 6. Client key `allow` lists reference known public models or routes.
- * 7. Provider static headers exclude forbidden hop-by-hop / auth headers.
- * 8. Provider `baseUrl` validation: HTTP/HTTPS only, no userinfo, no query, no fragment, non-empty path; normalizes single trailing slash.
- * 9. `retryOn` and `fallbackOn` category lists have no duplicate members.
+ * Checks provider names, key pool uniqueness, global model/route namespace, reference validity,
+ * forbidden provider headers, provider URL shapes, and route retry/fallback category uniqueness.
+ * Normalizes provider `baseUrl` in place by stripping a single trailing slash.
  *
- * @param config - The parsed configuration object to validate (mutates `baseUrl` to normalize trailing slashes).
- * @returns Array of semantic {@link StartupError} issues found (empty if valid).
+ * @param config - Parsed configuration object satisfying structural schema.
+ * @returns An array of semantic {@link StartupError} records, or an empty array if valid.
  */
 export function validateCrossReferences(config: AptusConfig): readonly StartupError[] {
   const errors: StartupError[] = [];
 
-  // 1. Provider names must be unique across all providers.
+  // Check provider names first because later checks resolve provider references against this set.
   const providerNames = new Set<string>();
   config.providers.forEach((provider, providerIndex) => {
     if (providerNames.has(provider.name)) {
@@ -53,7 +58,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
       providerNames.add(provider.name);
     }
 
-    // 2. Key names and resolved secrets must be unique inside each Key Pool.
+    // Check key names and secrets inside each pool so one provider cannot hold two identical credentials.
     const keyNames = new Set<string>();
     const keySecrets = new Set<string>();
     provider.keys.forEach((key, keyIndex) => {
@@ -82,7 +87,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
     });
   });
 
-  // 3. Models, Routes, and all aliases share one unified global namespace; first declaration wins.
+  // Claim model names before route names so the first declaration wins across the shared namespace.
   const publicNames = new Set<string>();
   config.models.forEach((model, modelIndex) => {
     claimPublicName(publicNames, model.name, ["models", modelIndex, "name"], errors);
@@ -97,7 +102,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
     });
   });
 
-  // 4. Every model must reference a configured provider name.
+  // Check model provider references against the provider set collected in the first pass.
   config.models.forEach((model, modelIndex) => {
     if (!providerNames.has(model.provider)) {
       errors.push(
@@ -110,7 +115,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
     }
   });
 
-  // 5. Route candidates must reference canonical model names only (not aliases) without duplicates within a single route.
+  // Check route candidates against canonical model names so aliases can never appear as candidates.
   const canonicalModelNames = new Set(config.models.map((model) => model.name));
   config.routes.forEach((route, routeIndex) => {
     const candidates = new Set<string>();
@@ -137,7 +142,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
       }
     });
 
-    // 9. retryOn and fallbackOn have no duplicates; empty arrays are legal.
+    // Check retry and fallback lists for repeats, where empty lists are valid and mean no action.
     claimUniqueCategories(route.retryOn, ["routes", routeIndex, "retryOn"], "CONFIG_RETRY_ON_DUPLICATE", errors);
     claimUniqueCategories(
       route.fallbackOn,
@@ -147,7 +152,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
     );
   });
 
-  // 6. Each client allow entry must resolve to a valid canonical model or route name in the global namespace.
+  // Check client allow entries against the global namespace so keys cannot reference unknown names.
   config.auth.clientKeys.forEach((clientKey, clientKeyIndex) => {
     clientKey.allow?.forEach((allowed, allowIndex) => {
       if (!publicNames.has(allowed)) {
@@ -162,7 +167,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
     });
   });
 
-  // 7. Provider static headers must not configure hop-by-hop or auth headers.
+  // Check static headers and base addresses per provider, normalizing one trailing slash in place.
   config.providers.forEach((provider, providerIndex) => {
     for (const headerName of Object.keys(provider.headers)) {
       if (FORBIDDEN_HEADERS.has(headerName)) {
@@ -176,7 +181,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
       }
     }
 
-    // 8. baseUrl policy and normalization. URL constructor parses valid URLs validated by Zod.
+    // Parse with the address constructor, trusting the schema to have rejected unparseable text already.
     const url = new URL(provider.baseUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       errors.push(
@@ -214,7 +219,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
         ),
       );
     }
-    // Reject baseUrl that consists solely of root "/" with trailing slash, leaving no path.
+    // Reject a bare root slash path so normalization cannot produce an empty path downstream.
     if (url.pathname === "/" && provider.baseUrl.endsWith("/")) {
       errors.push(
         startupError(
@@ -224,7 +229,7 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
         ),
       );
     }
-    // In-place normalization: remove trailing slash.
+    // Normalize one trailing slash in place so address joining never produces a double slash.
     if (provider.baseUrl.endsWith("/")) {
       (provider as { baseUrl: string }).baseUrl = provider.baseUrl.slice(0, -1);
     }
@@ -234,7 +239,12 @@ export function validateCrossReferences(config: AptusConfig): readonly StartupEr
 }
 
 /**
- * Validates that a public model, route, or alias name is unique across the global namespace.
+ * Claims a public identifier in the shared global namespace, reporting duplicate conflicts.
+ *
+ * @param publicNames - Accumulated set of registered public names and aliases.
+ * @param name - Candidate public identifier to register.
+ * @param path - Path segments locating the identifier for error reporting.
+ * @param errors - Sink for duplicate name startup error records.
  */
 function claimPublicName(
   publicNames: Set<string>,
@@ -256,7 +266,12 @@ function claimPublicName(
 }
 
 /**
- * Validates that an array of failure categories has no duplicate entries.
+ * Verifies that a list of failure categories contains no duplicate entries.
+ *
+ * @param categories - Array of failure category strings to check.
+ * @param pathPrefix - Path segments locating the category list.
+ * @param code - Startup error code to report on duplication.
+ * @param errors - Sink for duplicate category error records.
  */
 function claimUniqueCategories(
   categories: readonly string[],

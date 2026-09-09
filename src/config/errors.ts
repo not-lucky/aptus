@@ -1,5 +1,19 @@
 /**
- * Startup error taxonomy codes identifying specific configuration loading, validation, and binding failures.
+ * @fileoverview Startup error taxonomy for configuration loading in the Aptus gateway.
+ *
+ * Defines structured startup error records and machine-readable failure codes emitted during
+ * gateway initialization prior to listener binding. Errors maintain RFC 6901 JSON Pointers
+ * to invalid configuration nodes and carry safe, bounded descriptions suitable for standard error output.
+ *
+ * All failures fail closed: any validation, YAML syntax, schema, secret resolution, or probe error
+ * aborts startup before traffic is admitted, ensuring a running gateway always serves a verified snapshot.
+ */
+
+/**
+ * Stable machine-readable code classifying startup configuration or binding failures.
+ *
+ * Categorizes failures across CLI parsing, YAML syntax, schema conformity, secret resolution,
+ * semantic integrity, route validation, trace probing, and listener binding.
  */
 export type StartupErrorCode =
   | "CONFIG_CLI_ARGUMENT"
@@ -35,50 +49,41 @@ export type StartupErrorCode =
   | "CONFIG_TRACE_PROBE";
 
 /**
- * Normalized startup configuration or binding error.
+ * Normalized startup configuration or listener binding failure record.
  *
- * Designed to be deterministic, safe, and easily machine-parseable. Messages never include
- * raw environment variable values, file paths containing secrets, or stack traces.
+ * Pairs a machine-readable failure code with an RFC 6901 pointer to the invalid node
+ * and a safe human-readable diagnostic message.
  */
 export interface StartupError {
-  /**
-   * Stable machine-readable error code.
-   */
+  /** Stable machine-readable classification code for the startup failure. */
   readonly code: StartupErrorCode;
 
-  /**
-   * RFC 6901 JSON pointer to the offending configuration value (or empty string `""` if not field-localizable).
-   */
+  /** RFC 6901 JSON Pointer locating the invalid configuration value, or `""` for document-level errors. */
   readonly pointer: string;
 
-  /**
-   * Bounded human-readable error description.
-   */
+  /** Bounded human-readable diagnostic description safe for CLI output without exposing secrets. */
   readonly message: string;
 }
 
 /**
- * Constructs a new {@link StartupError}.
+ * Constructs a structured startup error record.
  *
- * @param code - The startup error code.
- * @param pointer - The RFC 6901 JSON pointer identifying the failing configuration node.
- * @param message - Bounded, human-readable error description.
- * @returns A structured {@link StartupError} object.
+ * @param code - Machine-readable code classifying the failure.
+ * @param pointer - RFC 6901 JSON Pointer to the offending configuration node.
+ * @param message - Bounded diagnostic message safe for display.
+ * @returns A fresh immutable {@link StartupError} record.
  */
 export function startupError(code: StartupErrorCode, pointer: string, message: string): StartupError {
   return { code, pointer, message };
 }
 
 /**
- * Deterministically sorts a collection of startup errors.
+ * Deterministically sorts startup error records for consistent CLI output and test assertions.
  *
- * Sorting precedence:
- * 1. JSON pointer path (`pointer` ascending via localeCompare)
- * 2. Error code (`code` ascending)
- * 3. Human message (`message` ascending)
+ * Orders by RFC 6901 pointer first, then error code, and finally error message.
  *
- * @param errors - Collection of startup errors to sort.
- * @returns A new sorted array of {@link StartupError} instances.
+ * @param errors - Read-only collection of startup errors.
+ * @returns A new array of errors sorted in canonical order.
  */
 export function sortStartupErrors(errors: readonly StartupError[]): readonly StartupError[] {
   return [...errors].sort(
@@ -87,13 +92,14 @@ export function sortStartupErrors(errors: readonly StartupError[]): readonly Sta
 }
 
 /**
- * Formats a startup error into a single standard output line: `<CODE> <POINTER> <MESSAGE>`.
+ * Formats a startup error record as a single standard error output line.
  *
- * @param error - The startup error to format.
- * @returns Formatted single-line error string.
+ * @param error - Startup error to format.
+ * @returns Space-separated `<CODE> <POINTER> <MESSAGE>` string.
  */
 export function formatStartupError(error: StartupError): string {
   return `${error.code} ${error.pointer} ${error.message}`;
 }
 
+/** Re-exported RFC 6901 JSON Pointer encoder for configuration modules. */
 export { jsonPointer } from "../domain/json.ts";

@@ -1,3 +1,13 @@
+/**
+ * @fileoverview Egress reconstruction of request transcripts, finish reasons, and generation controls.
+ *
+ * Implements wire projections for OpenAI Chat (`messages`), OpenAI Responses (`input`), and
+ * associated envelope facts (generation controls, sidecar fields, outcome partitioning, and finish reasons).
+ *
+ * Shared between complete and streaming egress encoders to maintain structural parity across
+ * response delivery modes.
+ */
+
 import type { ProviderFileRef, RequestWireOptions } from "../../contracts.ts";
 import type {
   IrFinish,
@@ -12,6 +22,15 @@ import type {
   JsonValue,
 } from "../../ir.ts";
 
+/**
+ * Re-anchors prompt cache breakpoints from the sidecar onto projected wire parts.
+ *
+ * @param parts - Projected wire content parts to mutate in-place.
+ * @param itemIndex - Index of the parent IR item.
+ * @param markedItems - Set of item indexes flagged with cache breakpoints.
+ * @param requestWireOptions - Request sidecar containing breakpoint metadata.
+ * @param marker - Cache breakpoint marker object to attach.
+ */
 function attachPromptCacheBreakpoints(
   parts: Array<Record<string, unknown>>,
   itemIndex: number,
@@ -28,6 +47,12 @@ function attachPromptCacheBreakpoints(
   if (breakpoints.length === 0 && parts[0]) parts[0].prompt_cache_breakpoint = marker;
 }
 
+/**
+ * Projects a captured provider file reference into a Chat `file` content part.
+ *
+ * @param ref - Captured provider file reference.
+ * @returns Chat wire file part object.
+ */
 function chatFileRefPart(ref: ProviderFileRef): Record<string, unknown> {
   return {
     type: "file",
@@ -38,6 +63,12 @@ function chatFileRefPart(ref: ProviderFileRef): Record<string, unknown> {
   };
 }
 
+/**
+ * Projects a captured provider file reference into a Responses `input_image` or `input_file` part.
+ *
+ * @param ref - Captured provider file reference.
+ * @returns Responses wire content part object.
+ */
 function responsesFileRefPart(ref: ProviderFileRef): Record<string, unknown> {
   if (ref.mediaKind === "image") {
     return {
@@ -53,6 +84,12 @@ function responsesFileRefPart(ref: ProviderFileRef): Record<string, unknown> {
   };
 }
 
+/**
+ * Projects an IR input part (text, image, document) into a Chat wire content part.
+ *
+ * @param part - IR input part to project.
+ * @returns Chat wire content part, or `undefined` if unsupported on Chat.
+ */
 function chatPartToWire(part: IrInputPart): Record<string, unknown> | undefined {
   if (part.type === "text") return { type: "text", text: part.text };
   if (part.type === "image") {
@@ -79,8 +116,6 @@ function chatPartToWire(part: IrInputPart): Record<string, unknown> | undefined 
       type: "file",
       file: {
         file_data: part.source.base64,
-        // A document without a source name stays filename-less: inventing one
-        // would mislabel arbitrary bytes on the target wire.
         ...(part.name ? { filename: part.name } : {}),
       },
     };
@@ -88,6 +123,12 @@ function chatPartToWire(part: IrInputPart): Record<string, unknown> | undefined 
   return undefined;
 }
 
+/**
+ * Projects an IR message input part into a Responses wire input part (`input_text`, `input_image`, `input_file`).
+ *
+ * @param part - IR input part to project.
+ * @returns Responses wire part object, or `undefined` if unsupported.
+ */
 function responsesMessagePartToWire(part: IrInputPart): Record<string, unknown> | undefined {
   if (part.type === "text") return { type: "input_text", text: part.text };
   if (part.type === "image") {
@@ -117,8 +158,6 @@ function responsesMessagePartToWire(part: IrInputPart): Record<string, unknown> 
       return {
         type: "input_file",
         file_data: Buffer.from(part.source.text, "utf8").toString("base64"),
-        // A document without a source name stays filename-less: inventing one
-        // would mislabel arbitrary bytes on the target wire.
         ...(part.name ? { filename: part.name } : {}),
       };
     }
@@ -133,6 +172,12 @@ function responsesMessagePartToWire(part: IrInputPart): Record<string, unknown> 
   return undefined;
 }
 
+/**
+ * Projects an IR tool result input part into a Responses tool result wire part.
+ *
+ * @param part - IR input part from a tool result.
+ * @returns Responses wire part object, or `undefined` if unsupported.
+ */
 function responsesToolResultPartToWire(part: IrInputPart): Record<string, unknown> | undefined {
   if (part.type === "text") return { type: "input_text", text: part.text };
   if (part.type === "image") {
@@ -172,22 +217,15 @@ function responsesToolResultPartToWire(part: IrInputPart): Record<string, unknow
 }
 
 /**
- * Egress reconstruction of the three transcript shapes and the finish/usage
- * envelope facts that ride with them.
+ * Reconstructs the OpenAI Chat `messages` array from IR items and sidecar options.
  *
- * Every builder is shared verbatim by a protocol's complete egress encoder and
- * its streaming encoder, so complete-vs-stream wire parity is structural rather
- * than a convention the two paths have to keep in sync. IR item order is
- * preserved on every wire; coalescing rules (consecutive text parts, finish
- * reason narrowing) live here once instead of once per encoder.
- */
-
-/**
- * Builds the OpenAI Chat `messages` array from IR items: instructions keep
- * their authority role, user/assistant text parts concatenate per message,
- * tool calls attach to the issuing assistant message (synthesizing a
- * tool-only assistant message when none precedes), and tool results become
- * `role:"tool"` messages.
+ * Concatenates consecutive text parts, interleaves captured file references, attaches
+ * prompt cache breakpoints, and maps tool calls and results onto Chat message conventions.
+ *
+ * @param items - Semantic IR items in transcript order.
+ * @param markedItems - Set of item indexes bearing prompt cache breakpoints.
+ * @param requestWireOptions - Optional request sidecar carrying file references and breakpoints.
+ * @returns Array of Chat wire message objects.
  */
 export function buildChatMessages(
   items: readonly IrItem[],
@@ -291,10 +329,15 @@ export function buildChatMessages(
 }
 
 /**
- * Builds the OpenAI Responses `input` array from IR items (instructions keep
- * their authority role; user parts become `input_text`, assistant parts
- * `output_text`; tool calls become function_call/custom_tool_call items and
- * tool results the matching output items).
+ * Reconstructs the OpenAI Responses `input` array from IR items and sidecar options.
+ *
+ * Maps message turns to `input_text`/`output_text`, tool calls to `function_call`/`custom_tool_call`,
+ * and tool results to corresponding output items.
+ *
+ * @param items - Semantic IR items in transcript order.
+ * @param markedItems - Set of item indexes bearing prompt cache breakpoints.
+ * @param requestWireOptions - Optional request sidecar carrying file references and breakpoints.
+ * @returns Array of Responses wire input items.
  */
 export function buildResponsesInput(
   items: readonly IrItem[],
@@ -302,9 +345,7 @@ export function buildResponsesInput(
   requestWireOptions?: RequestWireOptions,
 ): JsonObject[] {
   const input: JsonObject[] = [];
-  // Result items name their call kind through the referenced call: a result
-  // for a custom call becomes custom_tool_call_output, otherwise
-  // function_call_output.
+  // Result items name their call kind through the referenced call.
   const callKindByCallId = new Map<string, "function" | "custom">();
   for (const item of items) {
     if (item?.type === "tool_call") callKindByCallId.set(item.call.callId, item.call.type);
@@ -413,9 +454,10 @@ export function buildResponsesInput(
 }
 
 /**
- * Projects IR generation controls onto Chat wire fields:
- * temperature / top_p / max_completion_tokens / stop / verbosity / reasoning_effort.
- * A single stop sequence round-trips in its scalar spelling; sets use the array form.
+ * Projects IR generation controls onto Chat request wire fields (`temperature`, `top_p`, `stop`, etc.).
+ *
+ * @param generation - IR generation controls specification.
+ * @returns Record of Chat wire generation fields.
  */
 export function chatGenerationFields(generation: IrGenerationControls | undefined): Record<string, JsonValue> {
   if (generation === undefined) return {};
@@ -432,8 +474,10 @@ export function chatGenerationFields(generation: IrGenerationControls | undefine
 }
 
 /**
- * Projects IR generation controls onto Responses wire fields:
- * temperature / top_p / max_output_tokens / reasoning.effort.
+ * Projects IR generation controls onto Responses request wire fields (`temperature`, `reasoning`, etc.).
+ *
+ * @param generation - IR generation controls specification.
+ * @returns Record of Responses wire generation fields.
  */
 export function responsesGenerationFields(generation: IrGenerationControls | undefined): Record<string, JsonValue> {
   if (generation === undefined) return {};
@@ -446,9 +490,10 @@ export function responsesGenerationFields(generation: IrGenerationControls | und
 }
 
 /**
- * Projects IR generation controls onto Messages wire fields: temperature /
- * top_p / stop_sequences. `max_tokens` is coordinator-resolved and deliberately
- * omitted here so the resolution rule lives in exactly one place.
+ * Projects IR generation controls onto Anthropic Messages request wire fields (`temperature`, `stop_sequences`).
+ *
+ * @param generation - IR generation controls specification.
+ * @returns Record of Messages wire generation fields.
  */
 export function messagesGenerationFields(generation: IrRequest["generation"]): Record<string, JsonValue> {
   if (generation === undefined) return {};
@@ -460,9 +505,10 @@ export function messagesGenerationFields(generation: IrRequest["generation"]): R
 }
 
 /**
- * Projects the T2 wire-only sidecar fields onto Messages wire fields: metadata
- * collapses to the single `user_id` entry (every other key and the legacy C/R
- * `user` string are declared loss), and only the `auto` service tier maps.
+ * Projects sidecar options (`metadata.user_id`, `service_tier: "auto"`) onto Messages request fields.
+ *
+ * @param options - Request sidecar containing wire-only options.
+ * @returns Record of Messages wire fields.
  */
 export function messagesWireOptionFields(options: RequestWireOptions | undefined): Record<string, JsonValue> {
   if (options === undefined) return {};
@@ -478,8 +524,8 @@ export function messagesWireOptionFields(options: RequestWireOptions | undefined
 }
 
 /**
- * One segment of a partitioned IR outcome: either a run of consecutive text
- * parts coalesced into one string, or a single tool call.
+ * Ordered segment of an IR outcome: consecutive text parts coalesced into a single string,
+ * a tool call, or a refusal.
  */
 export type OutcomeSegment =
   | { readonly type: "text"; readonly text: string }
@@ -487,10 +533,10 @@ export type OutcomeSegment =
   | { readonly type: "refusal"; readonly text: string };
 
 /**
- * Splits IR output parts into ordered segments, coalescing every maximal run
- * of consecutive text parts into one segment and keeping each tool call as its
- * own segment. Shared by all three complete egress encoders and the Chat
- * outcome encoder so every wire orders and coalesces output identically.
+ * Partitions IR output parts into ordered segments, coalescing contiguous text runs.
+ *
+ * @param parts - IR output parts in emission order.
+ * @returns Ordered array of OutcomeSegments.
  */
 export function partitionOutcomeParts(parts: readonly IrOutputPart[]): OutcomeSegment[] {
   const segments: OutcomeSegment[] = [];
@@ -519,19 +565,18 @@ export function partitionOutcomeParts(parts: readonly IrOutputPart[]): OutcomeSe
 }
 
 /**
- * Narrows an admitted IR finish reason onto the Chat `finish_reason` wire:
- * token-limit, tool-call, and content-filter finishes keep their own
- * spellings, a refusal narrows to the natural stop (Chat has no refusal
- * finish value), and `context_limit` throws as a precondition guard.
- * Shared verbatim by the complete egress and the client stream encoder so
- * complete-vs-stream parity is structural.
+ * Narrows an admitted IR finish reason into a Chat `finish_reason` wire string.
+ *
+ * @param reason - Admitted IR finish reason.
+ * @returns Chat wire finish reason (`stop`, `length`, `tool_calls`, `content_filter`).
+ * @throws {Error} If an unsupported finish reason reaches egress.
  */
 export function chatFinishReason(reason: IrFinishReason): "length" | "stop" | "tool_calls" | "content_filter" {
   switch (reason) {
     case "stop":
     case "refusal":
-      // Chat has no refusal finish value: the refusal text rides in the
-      // message `refusal` field and the finish is the natural stop.
+      // Chat has no refusal finish value: the refusal text rides in the message `refusal` field
+      // and the finish is the natural stop.
       return "stop";
     case "length":
       return "length";
@@ -540,30 +585,30 @@ export function chatFinishReason(reason: IrFinishReason): "length" | "stop" | "t
     case "content_filter":
       return "content_filter";
     case "context_limit":
-      // Unreachable in admitted directions: preflight rejects
-      // `finish-context-limit` before any Chat egress runs. The throw keeps
-      // an unadmitted value from silently narrowing to "stop".
+      // Unreachable in admitted directions: preflight rejects `finish-context-limit` before any
+      // Chat egress runs. The throw keeps an unadmitted value from silently narrowing to "stop".
+      // TODO(fix): The error message is missing the offending reason value; include `reason` in
+      // the template literal so the operator sees which value was unadmitted.
       throw new Error(`OpenAI Chat does not support finish reason `);
   }
 }
 
 /**
- * Narrows an admitted IR finish reason onto the Responses envelope status:
- * token-limit and content-filter map to `incomplete` (with `incomplete_details`)
- * and every other admitted reason to `completed`. Shared verbatim by the complete
- * egress and the client stream encoder so complete-vs-stream parity is structural.
+ * Maps an admitted IR finish reason to a Responses envelope status (`completed` or `incomplete`).
+ *
+ * @param reason - Admitted IR finish reason.
+ * @returns Responses envelope status.
  */
 export function responsesFinishStatus(reason: IrFinishReason): "completed" | "incomplete" {
   return reason === "length" || reason === "content_filter" ? "incomplete" : "completed";
 }
 
 /**
- * Maps an IR finish onto the Anthropic Messages `stop_reason` wire value: a
- * tool-call finish maps to `tool_use`, a matched stop sequence echoes with the
- * `stop_sequence` reason so the M framing stays valid, token-limit keeps its
- * own spelling, and every other admitted reason maps to the natural
- * end-of-turn. Shared verbatim by the complete egress and the client stream
- * encoder so complete-vs-stream parity is structural.
+ * Maps an IR finish descriptor to an Anthropic Messages `stop_reason` wire string.
+ *
+ * @param finish - IR finish descriptor.
+ * @returns Messages wire stop reason (`end_turn`, `max_tokens`, `stop_sequence`, `tool_use`).
+ * @throws {Error} If an unsupported finish reason reaches egress.
  */
 export function messagesStopReason(finish: IrFinish): string {
   if (finish.reason === "tool_calls") return "tool_use";

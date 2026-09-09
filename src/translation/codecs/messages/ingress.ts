@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Ingress decoding for the Anthropic Messages protocol.
+ *
+ * Translates Anthropic Messages requests and provider responses into the gateway's
+ * intermediate representation (IR). Request decoding extracts generation controls, tools,
+ * system instructions, and messages while capturing sidecar options such as prompt cache
+ * breakpoints and metadata.
+ *
+ * Enforces fail-closed handling for unsupported capabilities such as native thinking controls,
+ * container reuse, and top-k filtering. Shared request parsing is reused by streaming ingress.
+ */
+
 import type { HeaderMap, JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type {
@@ -28,6 +40,7 @@ import {
 } from "./content.ts";
 import { parseMessagesOutcome } from "./outcome.ts";
 
+/** Set of documented top-level Anthropic Messages request fields recognized by the decoder. */
 const RECOGNIZED_MESSAGES_REQUEST_FIELDS = new Set([
   "model",
   "max_tokens",
@@ -50,11 +63,10 @@ const RECOGNIZED_MESSAGES_REQUEST_FIELDS = new Set([
 ]);
 
 /**
- * Classifies the `thinking` request control into its matrix-row failure: a
- * `budget_tokens` sub-field is the `reasoning-budget` trigger; every other
- * shape (`display`, bare `{type}` objects such as `{type:"disabled"}`,
- * unrecognized sub-fields) is the `anthropic-thinking-display` trigger. The
- * control is never admitted, so this always yields a failure.
+ * Classifies the unsupported Messages `thinking` request control into its matrix row failure.
+ *
+ * @param value - Raw thinking configuration value.
+ * @returns Normalized failure distinguishing reasoning budget from display triggers.
  */
 function parseMessagesThinking(value: unknown): NormalizedFailure {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -67,8 +79,10 @@ function parseMessagesThinking(value: unknown): NormalizedFailure {
 }
 
 /**
- * Parses the Messages `output_config` request control: `effort` fails with
- * `reasoning-effort-common`; `format` is parsed into `IrOutputFormat`.
+ * Parses the Messages `output_config` control into an IR output format.
+ *
+ * @param value - Raw output configuration object.
+ * @returns Result containing the parsed IR output format or normalized failure.
  */
 function parseMessagesOutputConfig(value: unknown): Result<IrOutputFormat | undefined, NormalizedFailure> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -101,6 +115,7 @@ function parseMessagesOutputConfig(value: unknown): Result<IrOutputFormat | unde
   return invalidRequest("output_config must carry 'effort' or 'format'");
 }
 
+/** Documented caller tokens recognized for the Messages `allowed_callers` tool extension. */
 const MESSAGES_ALLOWED_CALLERS: ReadonlySet<string> = new Set([
   "direct",
   "code_execution_20250825",
@@ -108,6 +123,13 @@ const MESSAGES_ALLOWED_CALLERS: ReadonlySet<string> = new Set([
   "code_execution_20260521",
 ]);
 
+/**
+ * Rejects native-only Messages tool fields before generic grammar validation.
+ *
+ * @param raw - Raw tool definition object.
+ * @param context - Diagnostic path prefix for error attribution.
+ * @returns Normalized failure if native-only fields are present, or undefined.
+ */
 function rejectMessagesToolNative(raw: Record<string, unknown>, context: string): NormalizedFailure | undefined {
   const type = raw.type;
   if (type !== undefined && type !== "custom") {
@@ -126,6 +148,7 @@ function rejectMessagesToolNative(raw: Record<string, unknown>, context: string)
   return undefined;
 }
 
+/** Tool wire specification for Anthropic Messages tool definitions and tool choices. */
 const MESSAGES_TOOL_SPEC: ToolWireSpec = {
   shape: "messages",
   schemaField: "input_schema",
@@ -139,9 +162,13 @@ const MESSAGES_TOOL_SPEC: ToolWireSpec = {
 };
 
 /**
- * Parses a Messages request body shared verbatim by the complete ingress
- * decoder and the streaming request decoder. The cache-control, thinking,
- * and output_config rules also live here so both paths cannot drift.
+ * Parses an Anthropic Messages request body into an IR request and wire-options sidecar.
+ *
+ * Shared verbatim by complete and streaming request decoders to maintain semantic parity.
+ *
+ * @param body - Parsed Messages request JSON body.
+ * @param delivery - Expected delivery mode (`complete` or `stream`).
+ * @returns Result containing decoded IR request and request wire options or normalized failure.
  */
 export function parseMessagesRequestBody(
   body: JsonObject,
@@ -406,20 +433,30 @@ export function parseMessagesRequestBody(
 }
 
 /**
- * Ingress decoder for Anthropic Messages requests and responses.
+ * Ingress decoder for Anthropic Messages requests and provider responses.
  *
- * Request decoding delegates to {@link parseMessagesRequestBody}, which
- * projects admitted generation controls (including the required `max_tokens`
- * output limit) into the IR and captures the T2 wire-only facts
- * (metadata.user_id subset, service tier, cache-control breakpoints) into the
- * request wire-options sidecar; native-only state fails closed with its exact
- * matrix capability ID.
+ * Implements {@link IngressDecoder} for `anthropic-messages`. Reuses {@link parseMessagesRequestBody}
+ * for request parsing and delegates outcome decoding to {@link parseMessagesOutcome}.
  */
 export class MessagesIngressDecoder implements IngressDecoder {
+  /**
+   * Decodes an Anthropic Messages request body into an IR request and sidecar.
+   *
+   * @param body - Client request body to decode.
+   * @returns Result containing decoded IR request and request wire options.
+   */
   decodeRequest(body: JsonObject): Result<RequestDecodeResult, NormalizedFailure> {
     return parseMessagesRequestBody(body, body.stream === true ? "stream" : "complete");
   }
 
+  /**
+   * Decodes an Anthropic Messages response into an IR outcome and sidecar.
+   *
+   * @param status - Provider response HTTP status code.
+   * @param headers - Provider response HTTP headers.
+   * @param body - Provider response body.
+   * @returns Result containing decoded IR outcome and outcome wire options.
+   */
   decodeOutcome(status: number, headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
     return parseMessagesOutcome(status, body, headers);
   }

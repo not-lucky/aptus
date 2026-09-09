@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Anthropic Messages streaming codec: request decoding and encoding,
+ * provider stream decoding, and client stream encoding.
+ *
+ * Handles named-event SSE frames (`message_start`, `content_block_start`, `content_block_delta`,
+ * `content_block_stop`, `message_delta`, `message_stop`, `ping`, and `error`). Request handling
+ * delegates to shared complete-path helpers. Cross-protocol part tracking is delegated to
+ * {@link StreamShapeTracker} keyed by block index, while this module manages Messages wire
+ * dispatch, cumulative usage accounting, and stop-reason mapping.
+ */
+
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import { isPlainObject } from "../../../domain/json.ts";
 import { anthropicErrorType, type NormalizedFailure } from "../../../domain/operations.ts";
@@ -17,8 +28,8 @@ import type { IrFinishReason, IrRequest, IrStreamEvent } from "../../ir.ts";
 import { failure, invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 import type { SseFrame } from "../../sse.ts";
 import { buildMessagesRequestBody } from "../shared/messages-request.ts";
-import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
+import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { messagesStopReason } from "../shared/transcript.ts";
 import {
   accumulateMessagesUsage,
@@ -33,14 +44,19 @@ import {
   parseMessagesCitation,
 } from "./content.ts";
 import { parseMessagesRequestBody } from "./ingress.ts";
+
 /**
- * Decodes a streaming Anthropic Messages request.
+ * Decodes streaming Anthropic Messages requests into IR requests.
  *
- * Capability rejections (including the thinking/output_config splits), wire-only
- * sidecar capture, transcript items, and generation controls are shared
- * verbatim with the complete-path ingress.
+ * Delegates request body parsing to {@link parseMessagesRequestBody} with no stream-only options.
  */
 export class MessagesStreamRequestDecoder implements StreamRequestDecoder {
+  /**
+   * Decodes a streaming Messages request body into an {@link IrRequest}.
+   *
+   * @param body - The raw request body from the client.
+   * @returns Successful result with the IR request and wire options, or failure on invalid syntax.
+   */
   decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
     const parsed = parseMessagesRequestBody(body, "stream");
     if (!parsed.ok) return parsed;
@@ -52,6 +68,9 @@ export class MessagesStreamRequestDecoder implements StreamRequestDecoder {
   }
 }
 
+/**
+ * Validates and extracts a non-negative integer block index from a Messages stream event chunk.
+ */
 function parseContentBlockIndex(chunk: Record<string, unknown>): Result<number, NormalizedFailure> {
   if (typeof chunk.index !== "number" || !Number.isSafeInteger(chunk.index) || chunk.index < 0) {
     return invalidRequest("Messages stream event index must be a non-negative integer");
@@ -60,11 +79,20 @@ function parseContentBlockIndex(chunk: Record<string, unknown>): Result<number, 
 }
 
 /**
- * Encodes an {@link IrRequest} into target Anthropic Messages stream request
- * JSON, sharing body assembly, generation-control projection, sidecar
- * projection, and breakpoint re-anchoring with the complete-path encoder.
+ * Encodes an {@link IrRequest} into an Anthropic Messages streaming request body.
+ *
+ * Reuses {@link buildMessagesRequestBody} with the stream flag enabled.
  */
 export class MessagesStreamRequestEncoder implements StreamRequestEncoder {
+  /**
+   * Encodes an IR request into a Messages streaming request body.
+   *
+   * @param request - The IR request to encode.
+   * @param targetModel - The resolved model identifier for the Messages target.
+   * @param _wireOptions - Unused; Messages defines no stream-only request options.
+   * @param requestWireOptions - Optional request-side sidecar options captured at ingress.
+   * @returns The encoded request body JSON object.
+   */
   encodeRequest(
     request: IrRequest,
     targetModel: string,
@@ -78,32 +106,49 @@ export class MessagesStreamRequestEncoder implements StreamRequestEncoder {
 /**
  * Decodes an upstream Anthropic Messages SSE stream into semantic IR stream events.
  *
- * Wire dispatch only: event-name matching, block validation, stop-reason
- * mapping, and cumulative usage accounting are Messages-specific; all part
- * shape, block-index dedup, argument budget, and terminal-once bookkeeping is
- * delegated to the shared {@link StreamShapeTracker} keyed by block index.
- *
- * Provider-owned reasoning blocks fail closed at discovery. The matched stop
- * sequence reported on `message_delta` is captured into
- * `response_end.finish.stopSequence` (echoed only by the M client encoder), and
- * cumulative usage collapses into `response_end.usage`.
+ * Handles named-event matching, block validation, cumulative usage accumulation across
+ * `message_start` and `message_delta`, and stop-reason mapping. Delegates part state
+ * and budget tracking to {@link StreamShapeTracker}.
  */
 export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "anthropic-messages" as const;
+  /** Shared shape bookkeeping for this session, keyed by `block:<index>` slots. */
   private readonly tracker: StreamShapeTracker;
+  /** Cumulative usage across `message_start` and `message_delta`, collapsed at `message_stop`. */
   private readonly usageState: MessagesUsageAccumulator = { sawUsage: false };
+  /** The finish reason recorded from `message_delta`, required before `message_stop`. */
   private recordedFinish: IrFinishReason | undefined;
+  /** The matched stop string recorded beside a `stop_sequence` finish, echoed to M clients. */
   private recordedStopSequence: string | undefined;
+  /** Last-write-wins capture of the response-side sidecar facts seen on usage records. */
   private outcomeWireOptions: OutcomeWireOptions = {};
 
+  /**
+   * Creates a decoder bound to one stream session.
+   *
+   * @param session - Stream session providing response and part identifiers.
+   * @param maxArgumentBytes - Optional override for the streamed tool argument budget.
+   */
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.tracker = new StreamShapeTracker({ session, maxArgumentBytes, wireLabel: "Messages" });
   }
 
+  /**
+   * Returns response-side sidecar facts captured from usage records during the stream.
+   */
   getOutcomeWireOptions(): OutcomeWireOptions {
     return this.outcomeWireOptions;
   }
 
+  /**
+   * Processes a single Messages SSE frame into zero or more IR stream events.
+   *
+   * Dispatches by named event (`message_start`, `content_block_start`, `content_block_delta`,
+   * `content_block_stop`, `message_delta`, `message_stop`, `ping`, `error`).
+   *
+   * @param frame - The incoming server-sent events frame.
+   * @returns Successful result containing decoded IR events, or a normalized failure.
+   */
   push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure> {
     // The success terminator already went out on message_stop; any later frame
     // is a misbehaving provider stream and fails closed instead of re-emitting
@@ -383,6 +428,11 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
     return unsupportedCapability("unknown-stream-event");
   }
 
+  /**
+   * Validates that the stream terminated cleanly with `message_stop` or an in-band error.
+   *
+   * @returns Empty array on clean finish, or `stream_interrupted` failure if closed prematurely.
+   */
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
     if (!this.tracker.isTerminal()) {
       return failure({
@@ -398,35 +448,48 @@ export class MessagesProviderStreamDecoder implements ProviderStreamDecoder {
 /**
  * Encodes semantic IR stream events into client-native Anthropic Messages SSE frames.
  *
- * The terminal `message_delta` reconstructs M usage accounting from the IR
- * totals (`input_tokens = input - cacheRead - cacheWrite`) with the cache
- * subdivisions and thinking breakdown, and echoes a matched stop sequence with
- * the `stop_sequence` stop reason.
+ * Reconstructs Messages usage accounting at `message_delta`, maps tool-call arguments,
+ * and emits appropriate named events.
  */
 export class MessagesClientStreamEncoder implements ClientStreamEncoder {
   readonly protocol = "anthropic-messages" as const;
+  /** Stream session providing response ID and model name for lifecycle frames. */
   private readonly session: StreamSession;
+  /** Budget guarding re-serialized tool arguments emitted at function-part close. */
   private readonly budget: StreamToolArgumentsBudget;
+  /** Function parts announced by `part_start` but deferred until arguments are complete. */
   private readonly deferredFunctionParts = new Map<string, { callId: string; name: string }>();
+  /** IR part identifiers mapped to Messages block indexes. */
   private readonly partIndices = new Map<string, number>();
+  /** Next Messages block index; the wire correlates blocks by position. */
   private nextPartIndex = 0;
+  /** Whether the lifecycle `message_start` frame has been emitted. */
   private emittedMessageStart = false;
 
+  /**
+   * Creates an encoder bound to one stream session.
+   *
+   * @param session - Stream session providing response ID and model name.
+   * @param maxArgumentBytes - Optional override for tool argument budget.
+   */
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.session = session;
     this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
   }
 
   /**
-   * No-op by contract: the M wire has no outcome-side sidecar surface.
-   * Moderation results destined for an M client fail closed before encoding,
-   * and M-touching service-tier echoes are stripped as declared loss during
-   * normalization, so the pump never delivers non-empty options here.
+   * No-op: Messages client wire does not support outcome sidecars.
    */
   setOutcomeWireOptions(_options: OutcomeWireOptions): void {
     // Intentionally empty — see doc comment above.
   }
 
+  /**
+   * Encodes an IR stream event into one or more Messages SSE frames.
+   *
+   * @param event - The IR stream event to encode.
+   * @returns Array of encoded SSE frames, or a normalized failure.
+   */
   encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure> {
     const id = this.session.responseId.startsWith("msg_") ? this.session.responseId : `msg_${this.session.responseId}`;
     const frames: SseFrame[] = [];
@@ -615,15 +678,20 @@ export class MessagesClientStreamEncoder implements ClientStreamEncoder {
     return unsupportedCapability("unknown-stream-event");
   }
 
+  /**
+   * Concludes the client stream.
+   *
+   * @returns Empty array; stream termination is handled by `response_end`.
+   */
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
     return ok([]);
   }
 
   /**
-   * Emits the lifecycle-opening `message_start` frame carrying the session
-   * `Message` object in its pre-content state. The `response_start` arm and
-   * the first-frame error arm share this helper so an error-before-start
-   * stream opens the same lifecycle shape as a clean one.
+   * Emits the lifecycle-opening `message_start` frame carrying the session `Message` object.
+   *
+   * @param id - Normalized message identifier (`msg_...`).
+   * @param frames - Target frame array to append the start frame to.
    */
   private messageStartFrame(id: string, frames: SseFrame[]): void {
     this.emittedMessageStart = true;

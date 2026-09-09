@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Translated streaming attempt execution with pre-header bootstrap decoding.
+ *
+ * Coordinates cross-protocol streaming dispatches: prepares and executes upstream streaming
+ * requests, binds tickets to translation sessions, executes pre-header chunk bootstrapping
+ * via {@link bootstrapTranslatedStream} to catch early protocol errors before committing
+ * client HTTP headers, settles key health, and hands live stream pumps over to the relay.
+ */
+
 import type { AttemptObservation, GatewayRequest, GatewayResult, ProviderResponse } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { Direction, TranslationCoordinator } from "../translation/contracts.ts";
@@ -6,9 +16,7 @@ import type { CandidateDescriptor } from "./candidates.ts";
 import { createTranslatedPreparer } from "./translated-preparer.ts";
 import { bootstrapTranslatedStream, relayTranslatedStream } from "./translated-stream-relay.ts";
 
-/**
- * Outcome of one cross-protocol streaming attempt.
- */
+/** Outcome variants resulting from a translated streaming attempt execution. */
 export type TranslatedStreamAttemptOutcome =
   | { readonly kind: "key_unavailable" }
   | { readonly kind: "deadline_exceeded" }
@@ -28,18 +36,13 @@ export type TranslatedStreamAttemptOutcome =
     };
 
 /**
- * Executes a streaming translated attempt with pre-header bootstrap decoding.
+ * Executes a translated streaming attempt with pre-header chunk bootstrap verification.
  *
- * Dispatch mechanics (lease, dispatch, classify) are owned by the shared
- * `dispatchOneAttempt` core; pump plus sink creation and the pre-header loop
- * are owned by the relay module's `bootstrapTranslatedStream`. This module
- * only binds the translation ticket to a session and settles the single key
- * observation.
- *
- * Pre-dispatch decode/validation/preflight failures return with zero lease and
- * zero dispatch. Early decode/frame errors before client headers are emitted
- * are treated as dispatch failures, permitting normal candidate retry and
- * fallback.
+ * @param candidate - Selected candidate descriptor.
+ * @param request - Inbound gateway request.
+ * @param ctx - Attempt execution context.
+ * @param translation - Translation coordinator managing session tickets.
+ * @returns Streaming attempt outcome ready for candidate runner orchestration.
  */
 export async function executeTranslatedStreamAttempt(
   candidate: CandidateDescriptor,
@@ -56,7 +59,7 @@ export async function executeTranslatedStreamAttempt(
   }
   const { response, observation, lease, attemptNumber, dispatchDurationMs } = dispatched;
 
-  // Non-2xx response head follows normal retry/fallback policy (decided by Gateway).
+  // Non-2xx response head: settle key observation and return for retry/fallback handling.
   if (observation.result !== "success") {
     const cooldownMs = finishAttempt(
       ctx,
@@ -72,9 +75,7 @@ export async function executeTranslatedStreamAttempt(
     return { kind: "response", response, observation, cooldownMs, attemptNumber };
   }
 
-  // 2xx success: bind the ticket carried in the dispatched payload to a
-  // session, then hand pump ownership to the relay module for pre-header
-  // bootstrap.
+  // 2xx response head: bind session ticket and bootstrap initial chunks before committing client headers.
   const sessionBundle = translation.createTicketSession(dispatched.pre);
 
   const bootstrap = await bootstrapTranslatedStream({
@@ -98,8 +99,7 @@ export async function executeTranslatedStreamAttempt(
     return { kind: "dispatch_failed", failure: bootstrap.failure };
   }
 
-  // Bootstrap succeeded: single success observation, then transfer byte
-  // ownership to the relay.
+  // Bootstrap succeeded without client exposure: settle key observation as success and hand off to relay.
   finishAttempt(
     ctx,
     request,

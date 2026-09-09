@@ -1,3 +1,12 @@
+/**
+ * @fileoverview Lifecycle validator for private intermediate representation stream events.
+ *
+ * Enforces normative event ordering for streaming translations: exactly one opening
+ * `response_start`, zero or more fully closed parts (`part_start` / `part_end`), and
+ * exactly one terminal event (`response_end` or `error`). Rejects out-of-order,
+ * duplicate, or capability-incompatible stream events fail-closed.
+ */
+
 import type { Result } from "../domain/contracts.ts";
 import { isPlainObject } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
@@ -6,52 +15,66 @@ import type { IrStreamEvent } from "./ir.ts";
 import { directionFacts, refusalFinishCapability } from "./preflight.ts";
 import { invalidRequest, ok, unsupportedCapability } from "./result.ts";
 import { validateUsage } from "./validate.ts";
+
 /**
- * Options for configuring an {@link IrStreamStateMachine}.
+ * Configuration options for the stream lifecycle validator.
  */
 export interface IrStreamStateMachineOptions {
-  /** Expected coordinator-owned response ID. */
+  /** Expected coordinator-assigned response identifier. */
   readonly expectedResponseId?: string;
-  /** Expected logical model ID. */
+
+  /** Expected logical model name. */
   readonly expectedModel?: string;
-  /** Translation direction if active cross-protocol attempt. */
+
+  /** Directed translation path for capability-gated checks. */
   readonly direction?: Direction;
-  /** Whether the direction stays between OpenAI Chat and Responses. */
+
+  /** Whether translation stays within OpenAI Chat <-> Responses profile. */
   readonly isChatResponses?: boolean;
 }
 
 /**
- * Validates the normative stream lifecycle and invariants for Private IR stream events.
- *
- * Lifecycle:
- * `response_start -> (part_start -> (text_delta | tool_arguments_delta)* -> part_end)* -> response_end`
- *
- * Invariants:
- * - Exactly one `response_start` first.
- * - Every `part_start` uses the stream `responseId` and an unused `partId`.
- * - Admitted parts include text (`{ type: "text" }`) and function tools (`{ type: "function_call", callId, name }`).
- * - All open parts must be closed before `response_end`.
- * - Clean terminal is `response_end(stop|length|tool_calls)` on directions that
- *   admit the finish reason; refusal and content-filter terminals are gated by
- *   the shared refusal/content-filter capability (C/R directions admit them,
- *   Messages-involving directions reject fail-closed).
- * - `error` is terminal and excludes `response_end`.
- * - No events permitted after terminal state.
+ * Stateful validator tracking stream lifecycle boundaries, active parts, and terminal invariants.
  */
 export class IrStreamStateMachine {
+  /** Current lifecycle phase of the active stream. */
   private phase: "awaiting_start" | "streaming" | "terminal" = "awaiting_start";
+
+  /** Bound response identifier from the opening event. */
   private responseId: string | undefined;
+
+  /** Expected response identifier configured at construction. */
   private readonly expectedResponseId: string | undefined;
+
+  /** Expected model name configured at construction. */
   private readonly expectedModel: string | undefined;
+
+  /** Directed translation path for terminal capability gating. */
   private readonly direction: Direction | undefined;
+
+  /** Flag indicating OpenAI-only stream capability profile. */
   private readonly isChatResponses: boolean;
 
+  /** Set of all part IDs opened during the stream to detect duplicates. */
   private readonly seenPartIds = new Set<string>();
+
+  /** Set of all function call IDs opened during the stream to ensure uniqueness. */
   private readonly seenCallIds = new Set<string>();
+
+  /** Map of currently active unclosed parts tracking type and call binding. */
   private readonly openParts = new Map<string, { partType: string; callId?: string }>();
+
+  /** Count of successfully closed function call parts for tool finish validation. */
   private closedFunctionPartCount = 0;
+
+  /** Tracks whether a refusal part was opened during the stream. */
   private sawRefusalPart = false;
 
+  /**
+   * Initializes a new stream lifecycle state machine.
+   *
+   * @param options - Optional stream expectations and translation direction.
+   */
   constructor(options?: IrStreamStateMachineOptions) {
     this.expectedResponseId = options?.expectedResponseId;
     this.expectedModel = options?.expectedModel;
@@ -61,14 +84,30 @@ export class IrStreamStateMachine {
       (options?.direction !== undefined ? directionFacts(options.direction).isChatResponses : false);
   }
 
+  /**
+   * Checks whether the machine has reached a terminal outcome state.
+   *
+   * @returns True if stream reached terminal completion or error.
+   */
   isTerminal(): boolean {
     return this.phase === "terminal";
   }
 
+  /**
+   * Returns a snapshot of identifiers for all currently active unclosed parts.
+   *
+   * @returns Readonly set of active part identifiers.
+   */
   getOpenPartIds(): ReadonlySet<string> {
     return new Set(this.openParts.keys());
   }
 
+  /**
+   * Validates an incoming stream event against lifecycle ordering and invariant rules.
+   *
+   * @param event - Semantic IR stream event to validate.
+   * @returns Ok if event transition is valid; otherwise normalized failure.
+   */
   feed(event: IrStreamEvent): Result<void, NormalizedFailure> {
     if (this.phase === "terminal") {
       return invalidRequest("IrStreamEvent received after terminal state");
@@ -112,7 +151,6 @@ export class IrStreamStateMachine {
       return ok(undefined);
     }
 
-    // Phase is "streaming"
     if (event.type === "response_start") {
       return invalidRequest("Duplicate 'response_start' received during active stream");
     }
@@ -132,7 +170,6 @@ export class IrStreamStateMachine {
         return invalidRequest(`Duplicate partId '${event.partId}' in part_start`);
       }
 
-      // Plain-text streaming profile gating
       if (event.part.type === "refusal") {
         if (!this.isChatResponses) {
           return unsupportedCapability("refusal-content");
@@ -273,7 +310,6 @@ export class IrStreamStateMachine {
         return invalidRequest(`response_end received while parts [${remaining}] remain open`);
       }
 
-      // Finish reason gating
       const reason = event.finish.reason;
       if (this.sawRefusalPart && reason !== "refusal") {
         return invalidRequest("response_end saw a refusal part but finish reason is not refusal");
@@ -309,9 +345,6 @@ export class IrStreamStateMachine {
         reason !== "refusal" &&
         reason !== "content_filter"
       ) {
-        // Unreachable through the closed IrFinishReason union today, but an
-        // unknown finish reason must fail closed as an unknown finish, never
-        // as a generic invalid request.
         return unsupportedCapability("finish-other-unknown");
       }
 
@@ -331,7 +364,10 @@ export class IrStreamStateMachine {
 }
 
 /**
- * Creates an {@link IrStreamStateMachine} instance.
+ * Creates an initialized {@link IrStreamStateMachine} for validating an IR event stream.
+ *
+ * @param options - Optional stream expectations and translation direction.
+ * @returns Initialized stream state machine.
  */
 export function createIrStreamStateMachine(options?: IrStreamStateMachineOptions): IrStreamStateMachine {
   return new IrStreamStateMachine(options);

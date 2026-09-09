@@ -1,46 +1,45 @@
+/**
+ * @fileoverview
+ * Same-candidate retry, route fallback, and jittered backoff policies.
+ *
+ * Evaluates pure routing decisions during failure recovery: determines whether a failed attempt
+ * may be retried against the same candidate via {@link shouldRetry}, or if execution should advance
+ * to the next candidate in route order via {@link shouldFallback}. Also calculates jittered cooldown
+ * durations for rate-limited keys via {@link calculateRetryDelay}.
+ */
+
 import type { KeyPoolConfig } from "../config/types.ts";
 import type { IrFailureCategory } from "../domain/operations.ts";
 import type { RandomSource } from "./timing.ts";
 
-/**
- * Explicit HTTP statuses eligible for same-candidate retry.
- *
- * Status 529 is included as retryable on all protocols (Anthropic Overloaded).
- */
+/** HTTP statuses permitted for same-candidate retries: 429 (rate limit), 500/503 (server errors), 529 (overload). */
 export const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 500, 503, 529]);
 
-/**
- * Maximum number of same-candidate retries permitted after the first attempt.
- */
+/** Maximum number of retry attempts permitted per candidate (yielding up to 3 total attempts). */
 export const MAX_SAME_CANDIDATE_RETRIES = 2;
 
-/**
- * Inputs for evaluating same-candidate retry eligibility.
- */
+/** Contextual facts required to evaluate a same-candidate retry decision. */
 export interface RetryDecisionInput {
-  /** Explicit HTTP status code returned by the provider, if available. */
+  /** HTTP status code returned by the provider, if a response head was received. */
   readonly status?: number;
-  /** Normalized failure category of the attempt outcome. */
+  /** Classified failure category of the attempt. */
   readonly category: IrFailureCategory | "success" | "client_cancelled";
-  /** Whether no response bytes have been exposed to the downstream client yet. */
+  /** Whether no response bytes have yet been emitted to the downstream client. */
   readonly beforeClientBytes: boolean;
-  /** Number of attempts executed so far for this candidate (1 after first attempt). */
+  /** Number of attempts executed so far for this candidate (starting at 1). */
   readonly candidateAttemptCount: number;
-  /** Configured retry-eligible failure categories for this candidate / route. */
+  /** Configured retry-eligible failure categories for the active route. */
   readonly retryOn: readonly IrFailureCategory[];
 }
 
 /**
- * Pure decision evaluating whether a failed attempt may retry on the same candidate.
+ * Evaluates whether a failed provider attempt may be retried on the same candidate.
  *
- * Rules:
- * - Must be an explicit pre-body HTTP status in `{429, 500, 503, 529}`.
- * - No client bytes written yet (`beforeClientBytes: true`).
- * - At most 2 retries after the first attempt (`candidateAttemptCount <= 2`).
- * - Normalized failure category is present in `retryOn`.
+ * Requires that no response bytes have reached the client, the status is retryable,
+ * the per-candidate retry cap has not been exceeded, and the category is in `retryOn`.
  *
- * @param input - Decision facts.
- * @returns `true` if retry is allowed; otherwise `false`.
+ * @param input - Attempt status, failure category, byte state, and route retry policy.
+ * @returns Whether the attempt can be retried on the current candidate.
  */
 export function shouldRetry(input: RetryDecisionInput): boolean {
   if (!input.beforeClientBytes) {
@@ -58,30 +57,26 @@ export function shouldRetry(input: RetryDecisionInput): boolean {
   return input.retryOn.includes(input.category);
 }
 
-/**
- * Inputs for evaluating candidate fallback eligibility.
- */
+/** Contextual facts required to evaluate a route candidate fallback decision. */
 export interface FallbackDecisionInput {
-  /** Normalized failure category of the attempt outcome or candidate terminal condition. */
+  /** Classified failure category of the exhausted candidate. */
   readonly category: IrFailureCategory | "success" | "client_cancelled";
-  /** Whether no response bytes have been exposed to the downstream client yet. */
+  /** Whether no response bytes have yet been emitted to the downstream client. */
   readonly beforeClientBytes: boolean;
-  /** Whether an eligible subsequent candidate exists in the resolved route order. */
+  /** Whether another candidate exists in the configured route sequence. */
   readonly hasNextCandidate: boolean;
   /** Configured fallback-eligible failure categories for the active route. */
   readonly fallbackOn: readonly IrFailureCategory[];
 }
 
 /**
- * Pure decision evaluating whether execution may fall back to the next candidate in route order.
+ * Evaluates whether routing may fall back to the next candidate in the configured route order.
  *
- * Rules:
- * - No client bytes written yet (`beforeClientBytes: true`).
- * - Subsequent candidate exists (`hasNextCandidate: true`).
- * - Normalized failure category is present in `fallbackOn`.
+ * Requires that no client response bytes have been emitted, a subsequent candidate is available,
+ * and the failure category is explicitly listed in `fallbackOn`.
  *
- * @param input - Decision facts.
- * @returns `true` if fallback is allowed; otherwise `false`.
+ * @param input - Failure category, client delivery state, candidate availability, and fallback policy.
+ * @returns Whether execution may advance to the next candidate.
  */
 export function shouldFallback(input: FallbackDecisionInput): boolean {
   if (!input.beforeClientBytes) {
@@ -97,16 +92,15 @@ export function shouldFallback(input: FallbackDecisionInput): boolean {
 }
 
 /**
- * Calculates backoff wait duration in milliseconds with uniform random jitter.
+ * Calculates a jittered backoff delay in milliseconds for rate-limited provider keys.
  *
- * Formula:
- * `base = min(delay ?? rateLimitFallbackMs, maxRetryAfterMs)`
- * `wait = base + uniform(0, jitterRatio * base)`
+ * Clamps the upstream `Retry-After` delay (or fallback) to `maxRetryAfterMs` and adds
+ * uniform random jitter scaled by `jitterRatio`.
  *
- * @param delay - Optional delay from Retry-After or provider reset in milliseconds.
- * @param config - Key pool timing configuration.
- * @param random - Random source for jitter calculation.
- * @returns Total wait duration in milliseconds.
+ * @param delay - Optional retry delay advertised by the upstream provider in milliseconds.
+ * @param config - Key pool timing configuration for ceilings and fallback durations.
+ * @param random - Random number source for jitter calculation.
+ * @returns Total cooldown duration in milliseconds.
  */
 export function calculateRetryDelay(delay: number | undefined, config: KeyPoolConfig, random: RandomSource): number {
   const rawDelay = delay ?? config.rateLimitFallbackMs;

@@ -1,6 +1,17 @@
+/**
+ * @fileoverview
+ * Token usage extraction and stream termination verification for provider responses.
+ *
+ * Extracts raw provider token counts and projects them into normalized {@link Usage} structures
+ * for cost accounting and billing across OpenAI Chat, OpenAI Responses, and Anthropic Messages protocols.
+ * Provides {@link extractCompleteUsage} for buffered JSON payloads and {@link createStreamUsageCollector}
+ * for incremental SSE stream parsing, handling terminal sentinels and split Anthropic usage chunks.
+ */
+
 import type { JsonObject, JsonValue, Protocol } from "../domain/contracts.ts";
 import type { Usage } from "../domain/usage.ts";
 
+/** Shared text decoder and encoder instances for stream decoding and usage bounds inspection. */
 const decoder = new TextDecoder();
 const usageEncoder = new TextEncoder();
 
@@ -14,35 +25,44 @@ const MAX_USAGE_PROPERTIES = 64;
 const MAX_USAGE_BYTES = 16 * 1024;
 
 /**
- * Result of extracting token usage and framing markers from a provider response.
+ * Result of extracting token usage and stream framing markers from a provider response.
  */
 export interface UsageExtractionResult {
-  /** Bounded raw usage JSON object from provider. */
+  /** Raw provider usage object as decoded, bounded against excess depth and size. */
   readonly rawUsage?: JsonObject;
-  /** Normalized Usage object for cost computation. */
+  /** Normalized billing usage with cached tokens split from input counts. */
   readonly normalizedUsage?: Usage;
-  /** Whether the stream concluded with a valid protocol-mandated terminal marker. */
+  /** Whether the stream concluded with a valid protocol terminal marker. */
   readonly hasValidTerminal: boolean;
-  /** Whether the stream concluded with a provider in-band error event. */
+  /** Whether the stream concluded with an in-band provider error event. */
   readonly isProviderError: boolean;
 }
 
 /**
- * Incremental parser for tracking SSE chunk boundaries, stream terminals, and token usage.
+ * Incremental SSE stream parser for tracking chunk boundaries, terminal sentinels, and token usage.
  */
 export interface StreamUsageCollector {
-  /** Ingests one incoming stream chunk. */
+  /**
+   * Feeds an incoming network chunk into the incremental parser.
+   *
+   * @param chunk - Raw byte buffer from the network stream.
+   */
   feed(chunk: Uint8Array): void;
-  /** Finalizes parsing and produces usage and framing facts. */
+
+  /**
+   * Finalizes parsing and extracts the completed usage metrics and terminal markers.
+   *
+   * @returns Aggregated usage extraction result.
+   */
   finish(): UsageExtractionResult;
 }
 
 /**
- * Extracts raw usage and normalized cost usage from a complete parsed JSON body.
+ * Extracts raw and normalized usage from a complete parsed JSON response body.
  *
- * @param protocol - The provider protocol.
- * @param body - The complete parsed JSON response object.
- * @returns Extracted raw usage and normalized usage, if available.
+ * @param protocol - Wire protocol of the provider response.
+ * @param body - Complete parsed JSON response payload.
+ * @returns Object containing raw and normalized usage if present and valid.
  */
 export function extractCompleteUsage(
   protocol: Protocol,
@@ -60,8 +80,11 @@ export function extractCompleteUsage(
 /**
  * Creates an incremental SSE parser for capturing streaming token usage and verifying protocol termination.
  *
- * @param protocol - Target provider protocol.
- * @returns A {@link StreamUsageCollector}.
+ * Handles `[DONE]` sentinels (OpenAI Chat), lifecycle events (OpenAI Responses), and `message_start` /
+ * `message_delta` split usage reassembly (Anthropic Messages).
+ *
+ * @param protocol - Target provider wire protocol.
+ * @returns Stream usage collector instance.
  */
 export function createStreamUsageCollector(protocol: Protocol): StreamUsageCollector {
   let buffer = "";
@@ -210,7 +233,11 @@ export function createStreamUsageCollector(protocol: Protocol): StreamUsageColle
 }
 
 /**
- * Dispatches raw usage normalization to the protocol-specific projection.
+ * Normalizes a raw usage object into standard {@link Usage} billing counters based on protocol.
+ *
+ * @param protocol - Source provider protocol.
+ * @param raw - Bounded raw usage object.
+ * @returns Normalized usage record, or undefined if counter validation fails.
  */
 function normalizeUsage(protocol: Protocol, raw: JsonObject): Usage | undefined {
   if (protocol === "anthropic-messages") return normalizeAnthropicUsage(raw);
@@ -219,7 +246,10 @@ function normalizeUsage(protocol: Protocol, raw: JsonObject): Usage | undefined 
 }
 
 /**
- * Normalizes OpenAI Chat Completions token counts into non-overlapping billing counters.
+ * Normalizes OpenAI Chat Completions usage into non-overlapping billing counters.
+ *
+ * @param raw - Bounded raw usage object.
+ * @returns Normalized usage record, or undefined if invalid.
  */
 function normalizeOpenAiUsage(raw: JsonObject): Usage | undefined {
   const promptTokens = raw.prompt_tokens;
@@ -250,11 +280,10 @@ function normalizeOpenAiUsage(raw: JsonObject): Usage | undefined {
 }
 
 /**
- * Normalizes OpenAI Responses token counts into non-overlapping billing counters.
+ * Normalizes OpenAI Responses API usage into non-overlapping billing counters.
  *
- * The Responses API reports `input_tokens`/`output_tokens` (unlike Chat's
- * `prompt_tokens`/`completion_tokens`) with cache details nested under
- * `input_tokens_details` (`cached_tokens`, `cache_write_tokens`).
+ * @param raw - Bounded raw usage object.
+ * @returns Normalized usage record, or undefined if invalid.
  */
 function normalizeResponsesUsage(raw: JsonObject): Usage | undefined {
   const inputTokens = raw.input_tokens;
@@ -287,7 +316,10 @@ function normalizeResponsesUsage(raw: JsonObject): Usage | undefined {
 }
 
 /**
- * Normalizes Anthropic Messages token counts into non-overlapping billing counters.
+ * Normalizes Anthropic Messages usage into non-overlapping billing counters.
+ *
+ * @param raw - Bounded raw usage object.
+ * @returns Normalized usage record, or undefined if invalid.
  */
 function normalizeAnthropicUsage(raw: JsonObject): Usage | undefined {
   const inputTokens = raw.input_tokens;
@@ -314,10 +346,10 @@ function normalizeAnthropicUsage(raw: JsonObject): Usage | undefined {
 }
 
 /**
- * `true` when a raw usage object stays within the explicit depth, property, and
- * byte limits. Oversized or deeply nested provider usage is omitted from logs
- * and terminal output and suppresses cost rather than failing or resizing the
- * request path.
+ * Validates that a raw usage object stays within maximum depth, property count, and byte size bounds.
+ *
+ * @param raw - Usage JSON object to validate.
+ * @returns Whether the object is within safety bounds.
  */
 function isBoundedUsage(raw: JsonObject): boolean {
   let properties = 0;

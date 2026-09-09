@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Assembly of the Anthropic Messages request body from the semantic request.
+ *
+ * Implements Messages-specific request layout rules: extraction of leading instructions into
+ * the top-level `system` field, adjacent turn merging for same-role messages, and re-anchoring
+ * prompt cache breakpoints onto concrete content blocks.
+ *
+ * Used by Messages egress and streaming client encoders to synthesize compliant wire payloads
+ * from provider-independent intermediate representations (IR).
+ */
+
 import type { RequestWireOptions } from "../../contracts.ts";
 import type { IrBinarySource, IrDocumentSource, IrRequest, JsonObject, JsonValue } from "../../ir.ts";
 import { messagesOutputConfigFields } from "./output-format.ts";
@@ -5,12 +16,11 @@ import { messagesToolFields } from "./tool-fields.ts";
 import { messagesGenerationFields, messagesWireOptionFields } from "./transcript.ts";
 
 /**
- * Maps an IR media source onto the Anthropic wire spelling. The gateway_file
- * arm is unreachable for admitted requests: preflight rejects gateway-file
- * references into Messages before any egress runs (capability
- * gateway-file-reference), so reaching it means the preflight invariant is
- * broken. Failing loudly there beats silently dropping the part or fabricating
- * content on the upstream wire.
+ * Maps an IR binary media source to an Anthropic wire image source object.
+ *
+ * @param source - IR binary media source.
+ * @returns Anthropic wire image source object.
+ * @throws {Error} If an unsupported `gateway_file` source arrives past preflight.
  */
 function messagesImageSource(source: IrBinarySource): Record<string, unknown> {
   switch (source.type) {
@@ -23,7 +33,13 @@ function messagesImageSource(source: IrBinarySource): Record<string, unknown> {
   }
 }
 
-/** Maps an IR document source onto the Anthropic wire spelling (see {@link messagesImageSource}). */
+/**
+ * Maps an IR document source to an Anthropic wire document source object.
+ *
+ * @param source - IR document source.
+ * @returns Anthropic wire document source object.
+ * @throws {Error} If an unsupported `gateway_file` source arrives past preflight.
+ */
 function messagesDocumentSource(source: IrDocumentSource): Record<string, unknown> {
   switch (source.type) {
     case "url":
@@ -38,9 +54,17 @@ function messagesDocumentSource(source: IrDocumentSource): Record<string, unknow
 }
 
 /**
- * Builds the Anthropic Messages request body. The assembler is separate from
- * transcript builders because it performs M-specific system extraction,
- * adjacent-turn merging, and per-block cache marker attachment.
+ * Assembles a complete Anthropic Messages request body from an IR request.
+ *
+ * Extracts leading instructions to `system`, merges consecutive same-role turns,
+ * converts tool calls and results, re-anchors prompt cache breakpoints, and
+ * spreads generation and output configuration fields.
+ *
+ * @param request - Semantic IR request to project.
+ * @param targetModel - Provider model identifier for the Messages target.
+ * @param stream - Whether the request is streaming.
+ * @param requestWireOptions - Optional sidecar carrying prompt cache breakpoints and wire fields.
+ * @returns Serialized Anthropic Messages request body JSON object.
  */
 export function buildMessagesRequestBody(
   request: IrRequest,
@@ -53,6 +77,8 @@ export function buildMessagesRequestBody(
   const blocksByAnchor = new Map<string, Record<string, unknown>>();
   let scanningLeadingInstructions = true;
 
+  // Walk items in order. Collect leading instructions into top-level system blocks until
+  // the first non-instruction item; later instructions are treated as standard turns.
   for (let itemIndex = 0; itemIndex < request.items.length; itemIndex++) {
     const item = request.items[itemIndex];
     if (item === undefined) continue;
@@ -86,6 +112,8 @@ export function buildMessagesRequestBody(
         contentBlocks.push(block);
         blocksByAnchor.set(`${itemIndex}:${partIndex}`, block);
       }
+      // Adjacent-turn merging: messages matching the preceding role append content blocks
+      // to satisfy the Messages turn-alternation invariant.
       const lastMessage = messages[messages.length - 1] as { role: unknown; content: unknown } | undefined;
       if (lastMessage !== undefined && lastMessage.role === item.role) {
         (lastMessage.content as Array<Record<string, unknown>>).push(...contentBlocks);
@@ -115,6 +143,7 @@ export function buildMessagesRequestBody(
     }
 
     if (item.type === "tool_result") {
+      // Single text results emit as a bare string; multipart results emit as a block array.
       const block: Record<string, unknown> = { type: "tool_result", tool_use_id: item.callId };
       if (item.isError === true) block.is_error = true;
       if (item.content.length === 1 && item.content[0]?.type === "text") {
@@ -135,6 +164,7 @@ export function buildMessagesRequestBody(
         });
       }
       blocksByAnchor.set(`${itemIndex}`, block);
+      // Tool results belong to user turns and merge into preceding user message if present.
       const lastMessage = messages[messages.length - 1] as { role: unknown; content: unknown } | undefined;
       if (lastMessage !== undefined && lastMessage.role === "user") {
         (lastMessage.content as Array<Record<string, unknown>>).push(block);
@@ -144,6 +174,7 @@ export function buildMessagesRequestBody(
     }
   }
 
+  // Re-anchor captured prompt cache breakpoints onto generated wire blocks.
   for (const anchor of requestWireOptions?.promptCacheBreakpoints ?? []) {
     const block =
       (anchor.partIndex !== undefined ? blocksByAnchor.get(`${anchor.itemIndex}:${anchor.partIndex}`) : undefined) ??

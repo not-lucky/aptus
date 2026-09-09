@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Delivery and backpressure management for cross-protocol translated SSE streams.
+ *
+ * Implements the streaming relay pipeline: {@link bootstrapTranslatedStream} reads initial provider
+ * chunks and drives the pump before client HTTP headers commit (preserving retry/fallback capabilities),
+ * while {@link relayTranslatedStream} drives incremental streaming with strict client backpressure,
+ * recording raw provider chunks, intermediate IR events, and finalizing terminal lifecycle facts.
+ */
+
 import type {
   GatewayResult,
   HeaderMap,
@@ -19,20 +29,19 @@ import type { Clock } from "./timing.ts";
 
 const utf8Encoder = new TextEncoder();
 
-/**
- * Input for bootstrapping a translated stream before client headers commit.
- *
- * The relay module owns pump plus sink creation and the pre-header read loop
- * wholly behind its seam; the attempt module retains key-lease observation
- * and only consumes the ready pump/reader or the pre-header failure.
- */
+/** Input parameters for bootstrapping a translated stream before committing client headers. */
 export interface TranslatedStreamBootstrapInput {
+  /** Active trace session for sink creation. */
   readonly trace: TraceSession;
+  /** Provider response holding the readable stream body. */
   readonly response: ProviderResponse;
+  /** Stream session bundle providing decoders, state machine, and client encoders. */
   readonly sessionBundle: StreamSessionBundle;
+  /** Cross-protocol translation direction (e.g. `openai-chat->anthropic-messages`). */
   readonly direction: Direction;
 }
 
+/** Result of pre-header bootstrap decoding. */
 export type TranslatedStreamBootstrap =
   | { readonly kind: "failure"; readonly failure: NormalizedFailure }
   | {
@@ -46,12 +55,10 @@ export type TranslatedStreamBootstrap =
     };
 
 /**
- * Creates the stream pump and trace sinks and reads until the first client
- * chunk (or terminal) without committing client headers.
+ * Initializes the stream pump and reads initial provider chunks before committing client headers.
  *
- * Zero-byte failures return `failure` for the caller to observe before client
- * bytes (retryable across candidates). Success transfers pump/reader/sink
- * ownership to `relayTranslatedStream`.
+ * @param input - Trace session, provider response, session bundle, and direction.
+ * @returns Bootstrap outcome: ready pump bundle on success, or normalized failure on error.
  */
 export async function bootstrapTranslatedStream(
   input: TranslatedStreamBootstrapInput,
@@ -107,9 +114,7 @@ export async function bootstrapTranslatedStream(
       initialClientChunks.push(...finishResult.value);
 
       const pumpFailure = pump.getFailure();
-      // Zero-prior-bytes split: headers are not sent yet, so an in-band
-      // failure here stays pre-header (retryable across candidates).
-      // Once client bytes exist the relay owns the stream instead.
+      // Zero-prior-bytes split: headers are not sent yet, so an in-band failure stays pre-header.
       if (pumpFailure !== undefined && initialClientChunks.length === 0) {
         await discardTraceSinks();
         return { kind: "failure", failure: pumpFailure };
@@ -145,31 +150,47 @@ export async function bootstrapTranslatedStream(
   return { kind: "ready", reader, pump, providerSink, irEventsSink, initialClientChunks, isInitialComplete };
 }
 
-/**
- * Context dependencies for relaying a translated stream.
- */
+/** Dependencies and state required for relaying a bootstrapped translated stream. */
 export interface TranslatedStreamRelayContext {
+  /** Terminal coordinator tracking request lifecycle. */
   readonly coordinator: TerminalCoordinator;
+  /** Monotonic and wall clock source. */
   readonly clock: Clock;
+  /** Monotonic millisecond timestamp when request processing began. */
   readonly started: number;
+  /** Cumulative attempt count executed for this request. */
   readonly attemptCount: number;
+  /** Wire protocol spoken by the upstream provider. */
   readonly targetProtocol: Protocol;
-  /** Client protocol owning the response envelope; maps failure categories to status. */
+  /** Client protocol owning the downstream response. */
   readonly clientProtocol: Protocol;
+  /** Provider identifier producing the stream. */
   readonly providerName: string;
+  /** Canonical model or route name requested by client. */
   readonly canonicalName: string;
+  /** Model pricing configuration for cost estimation. */
   readonly pricing: PricingConfig | null;
+  /** Inbound request abort signal. */
   readonly requestSignal: AbortSignal;
+  /** Provider stream reader transferred from bootstrap. */
   readonly reader: ReadableStreamDefaultReader<Uint8Array>;
+  /** Translation pump instance transferred from bootstrap. */
   readonly pump: TranslatedStreamPump;
+  /** Trace sink receiving raw upstream provider bytes. */
   readonly providerSink: TraceByteSink;
+  /** Trace sink receiving intermediate-representation stream events. */
   readonly irEventsSink: TraceByteSink;
+  /** Buffered client chunks produced during the bootstrap phase. */
   readonly initialClientChunks: readonly Uint8Array[];
+  /** Whether the provider stream concluded during bootstrap. */
   readonly isInitialComplete: boolean;
 }
 
 /**
- * Relays an active translated SSE stream with strict backpressure and ordered trace sinks.
+ * Relays an active translated SSE stream to the client with backpressure management.
+ *
+ * @param context - Stream reader, translation pump, trace sinks, and lifecycle context.
+ * @returns Gateway streaming result with standard SSE headers.
  */
 export function relayTranslatedStream(context: TranslatedStreamRelayContext): GatewayResult {
   const { reader, pump, providerSink, irEventsSink } = context;
@@ -187,6 +208,7 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
     connection: "keep-alive",
   };
 
+  /** Finalizes a clean stream completion, recording token usage and cost metrics. */
   async function finalizeCleanSuccess(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
     if (isClosed()) return;
     ownership = { kind: "closed", reason: "complete" };
@@ -244,6 +266,7 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
     controller.close();
   }
 
+  /** Finalizes an in-band failure emitted politely as SSE error frames. */
   async function finalizeInBandError(
     controller: ReadableStreamDefaultController<Uint8Array>,
     failure: NormalizedFailure,
@@ -254,9 +277,6 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
     await providerSink.complete().catch(() => undefined);
     await irEventsSink.complete().catch(() => undefined);
 
-    // The wire status is already 200 once headers are sent; this status is
-    // Trace bookkeeping derived from the failure category exactly like the
-    // pre-header path via statusFromCategory.
     const status = statusFromCategory(failure.category, context.clientProtocol);
     deliver = async (durationMs) => {
       await context.coordinator.finalize({
@@ -278,6 +298,7 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
     controller.close();
   }
 
+  /** Concludes relay once all queues drain and provider stream is exhausted. */
   async function finishRelay(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
     const failure = pump.getFailure();
     if (failure !== undefined) {
@@ -287,6 +308,7 @@ export function relayTranslatedStream(context: TranslatedStreamRelayContext): Ga
     }
   }
 
+  /** Finalizes an exceptional mid-stream failure by erroring the stream controller. */
   async function finalizeFailure(
     controller: ReadableStreamDefaultController<Uint8Array>,
     failure: NormalizedFailure,

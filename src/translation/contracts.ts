@@ -1,10 +1,22 @@
+/**
+ * @fileoverview Type contracts for the cross-protocol translation layer.
+ *
+ * Defines the core interfaces, codecs, and data shapes that mediate translation between
+ * OpenAI Chat, OpenAI Responses, and Anthropic Messages protocols. Semantic content maps
+ * into the protocol-neutral Intermediate Representation (IR), while protocol-specific wire
+ * concerns are carried in typed sidecars (`RequestWireOptions` and `OutcomeWireOptions`).
+ *
+ * The translation coordinator encapsulates decode, validate, preflight, encode, and dispatch
+ * preparation behind branded `TranslatedTicket` values to enforce valid pipeline sequencing.
+ */
 import type { HeaderMap, JsonObject, PreparedProviderRequest, Protocol, Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { IrOutcome, IrRequest, IrStreamEvent, IrTool } from "./ir.ts";
 import type { SseFrame } from "./sse.ts";
 
 /**
- * Six directed cross-protocol translation paths.
+ * The six directed cross-protocol translation paths between supported protocols.
+ * Same-protocol requests bypass translation and do not use a direction.
  */
 export type Direction =
   | "openai-chat->openai-responses"
@@ -15,197 +27,227 @@ export type Direction =
   | "anthropic-messages->openai-responses";
 
 /**
- * Decode result for a request body: the semantic IR request plus the wire-only
- * option sidecar captured from protocol-specific fields that stay out of the IR.
+ * Result of decoding an inbound request: the semantic IR request plus any protocol-specific
+ * options preserved in the wire options sidecar.
  */
 export interface RequestDecodeResult {
+  /** The request projected into the semantic intermediate representation. */
   readonly irRequest: IrRequest;
+
+  /** Request-side wire options captured verbatim at ingress. */
   readonly requestWireOptions: RequestWireOptions;
 }
 
 /**
- * Decode result for an outcome body: the semantic IR outcome plus the wire-only
- * response-side sidecar (moderation result, service-tier echo).
+ * Result of decoding an upstream provider response: the semantic IR outcome plus any
+ * response-side wire options (such as moderation results or service tier echoes).
  */
 export interface OutcomeDecodeResult {
+  /** The response outcome projected into the semantic intermediate representation. */
   readonly irOutcome: IrOutcome;
+
+  /** Response-side wire options captured from the provider response envelope. */
   readonly outcomeWireOptions: OutcomeWireOptions;
 }
 
 /**
- * Anchor of a prompt-cache breakpoint on a semantic IR position.
- *
- * `itemIndex` is the index of the anchored item in `IrRequest.items` and
- * `partIndex` the index of the anchored content part within that item's message
- * content (omitted for instruction items, which have no part list). Anchoring to
- * IR positions lets every target egress re-anchor markers onto its own
- * reconstructed parts/blocks without knowing the source wire layout. Only
- * explicit per-part/per-block markers are admitted today, so every anchor is an
- * explicit marker by construction.
+ * Anchors an explicit prompt-cache breakpoint to a semantic position in the IR request,
+ * enabling target egress encoders to reconstruct cache markers in their native wire format.
  */
 export interface PromptCacheBreakpoint {
+  /** Zero-based index of the anchored item in `IrRequest.items`. */
   readonly itemIndex: number;
+
+  /** Zero-based index of the anchored part within the item's content parts, or undefined if item-scoped. */
   readonly partIndex?: number;
 }
 
 /**
- * Wire-only provider file/image reference captured from source wire payloads.
- * Preserved for C↔R pass-through via sidecar; rejected into M.
+ * Wire-only provider file or image reference preserved when a client references hosted files
+ * by identifier rather than passing raw payload bytes.
  */
 export interface ProviderFileRef {
+  /** IR item index where the reference was captured, used for re-emission ordering. */
   readonly itemIndex: number;
+
+  /** IR part index within the item, used to interleave the reference with decoded parts. */
   readonly partIndex: number;
+
+  /** Media kind distinguishing whether the reference came from an image or document wire format. */
   readonly mediaKind: "image" | "document";
+
+  /** Upstream provider file identifier, preserved verbatim without local resolution. */
   readonly fileId: string;
+
+  /** Optional filename captured alongside the file identifier. */
   readonly filename?: string;
+
+  /** Optional image detail level hint (`"auto"` | `"low"` | `"high"`). */
   readonly detail?: "auto" | "low" | "high";
 }
 
 /**
- * Wire-only request options traveling beside the IR.
- *
- * Matrix-admitted semantic fields (storage, prompt-cache key/mode/ttl/breakpoints,
- * metadata/legacy user, safety identifier, moderation param, service tier,
- * allowed-tool subset control, per-tool allowed callers) are
- * protocol-shaped but deliberately NOT represented in `IrRequest` — they ride in
- * this closed, typed sidecar so the IR stays protocol-neutral. Source ingress
- * captures them verbatim; direction feasibility is enforced by preflight and
- * target egress projects them per the matrix tiers. Never an extension bag.
+ * Wire-only request options traveling alongside the IR request.
+ * Captures protocol-specific controls (caching, metadata, moderation, service tiers)
+ * that are evaluated during preflight and projected at egress per capability matrix tiers.
  */
 export interface RequestWireOptions {
-  /** `responses-storage`: explicit server-side storage flag (never a fabricated default). */
+  /** Explicit server-side storage request flag (`store`), preserved verbatim when present. */
   readonly store?: boolean;
-  /** `prompt-cache-key`: cache-bucketing key (C/R only). */
+
+  /** Cache-bucketing key for prompt caching, admitted on OpenAI Chat and Responses. */
   readonly promptCacheKey?: string | null;
-  /** `prompt-cache-mode`: implicit or explicit breakpoint management (C/R only). */
+
+  /** Prompt cache breakpoint management mode (`"implicit"` | `"explicit"`). */
   readonly promptCacheMode?: "implicit" | "explicit";
-  /** `prompt-cache-ttl`: C/R support only "30m". */
+
+  /** Prompt cache retention window; only `"30m"` is supported on OpenAI wires. */
   readonly promptCacheTtl?: "30m";
-  /**
-   * `prompt-cache-breakpoint`: per-part explicit breakpoints anchored to IR positions.
-   * C↔R direct; into/out of M marker-only with declared TTL loss.
-   */
+
+  /** Explicit prompt-cache breakpoint anchors mapped to IR positions. */
   readonly promptCacheBreakpoints?: ReadonlyArray<PromptCacheBreakpoint>;
-  /** `request-metadata` kv subset (C/R limits: ≤16 entries, key ≤64, value ≤512). */
+
+  /** Request-level metadata key-value pairs (max 16 entries, key <= 64 chars, value <= 512 chars). */
   readonly metadata?: Readonly<Record<string, string>>;
-  /** C/R legacy `user` identifier — C↔R passthrough only, declared loss into M. */
+
+  /** Legacy user identifier string; preserved across Chat and Responses, declared loss into Messages. */
   readonly user?: string;
-  /** `safety-identifier` (C/R only). */
+
+  /** Safety identifier for abuse monitoring, admitted on OpenAI Chat and Responses. */
   readonly safetyIdentifier?: string | null;
-  /** `moderation-policy-result` request param `{model, policy?}`, verbatim (C/R only). */
+
+  /** Moderation policy specification (`{model, policy?}`), admitted on Chat and Responses. */
   readonly moderation?: JsonObject | null;
-  /** `service-tier` request param; into/out of M only "auto" maps (preflight enforces). */
+
+  /** Requested service tier parameter (only `"auto"` admitted across Anthropic Messages boundaries). */
   readonly serviceTier?: string | null;
-  /**
-   * `allowed-tool-subset`: C↔R wire-only subset control. Elements are parsed
-   * as `IrTool` definitions at ingress and re-emitted in the target wire shape
-   * at egress (nested C vs flat R); never admitted into M.
-   */
+
+  /** Wire-only allowed tool subset control for Chat-to-Responses translations. */
   readonly allowedToolSubset?: { readonly mode: "auto" | "required"; readonly tools: readonly IrTool[] };
-  /**
-   * `allowed-callers`: names of tools whose source `allowed_callers` array
-   * contained only `"direct"`. Decode rejects every other documented caller
-   * with the `allowed-callers` row, so this normalized name list is sufficient
-   * for the only R↔M intersection; Chat has no caller surface and is gated by
-   * preflight.
-   */
+
+  /** Tool names whose source `allowed_callers` allowed direct callers. */
   readonly toolAllowedCallers?: ReadonlyArray<string>;
-  /** `legacy-json-object`: legacy JSON-object mode (C↔R only). */
+
+  /** Legacy JSON object mode flag (`type: "json_object"`), pass-through between Chat and Responses. */
   readonly legacyJsonObject?: boolean;
-  /** `provider-file-id` / `provider-image-id`: C↔R passthrough file/image resource handles. */
+
+  /** Wire-only provider file or image references captured from the source request. */
   readonly providerFileRefs?: ReadonlyArray<ProviderFileRef>;
 }
 
 /**
- * Wire-only response-side options traveling beside `IrOutcome`.
- *
- * Carried in the SOURCE protocol's normal form: the moderation result is stored
- * unwrapped ({input, output}, each holding one singular verdict) regardless of
- * source wrapper shape; the service-tier echo is the source's verbatim value.
- * The target egress re-wraps the moderation verdicts to its own wire shape, and
- * emits the tier echo only when the value belongs to its own vocabulary.
+ * Wire-only response options traveling alongside the IR outcome.
+ * Holds response metadata such as moderation verdict objects and service-tier echoes.
  */
 export interface OutcomeWireOptions {
-  /** `moderation-policy-result` response result in normal (unwrapped) form. */
+  /** Unwrapped moderation verdicts (`{input, output}`) captured from the provider response. */
   readonly moderation?: JsonObject;
-  /** `service-tier` response echo, verbatim from the source wire. */
+
+  /** Verbatim service-tier string echoed by the provider response. */
   readonly serviceTier?: string;
 }
 
 /**
- * Protocol-specific ingress decoder contract for transforming raw client/provider
- * wire payloads into the private IR representation alongside the wire-only
- * option sidecars.
+ * Protocol-specific ingress decoder contract for transforming raw client requests and provider
+ * responses into intermediate representation shapes and wire options sidecars.
  */
 export interface IngressDecoder {
   /**
-   * Decodes a validated JSON request body into an {@link IrRequest} plus the
-   * captured {@link RequestWireOptions} sidecar.
+   * Decodes a parsed JSON request body into an {@link IrRequest} and wire options sidecar.
+   *
+   * @param body - Client request body parsed as JSON.
+   * @returns Successful result containing decoded request and sidecar, or a normalized failure.
    */
   decodeRequest(body: JsonObject): Result<RequestDecodeResult, NormalizedFailure>;
 
   /**
-   * Decodes an upstream provider HTTP response into an {@link IrOutcome} plus the
-   * captured {@link OutcomeWireOptions} sidecar.
+   * Decodes an upstream provider HTTP response into an {@link IrOutcome} and wire options sidecar.
+   *
+   * @param status - Provider HTTP response status code.
+   * @param headers - Provider HTTP response headers.
+   * @param body - Provider response body parsed as JSON.
+   * @returns Successful result containing decoded outcome and sidecar, or a normalized failure.
    */
   decodeOutcome(status: number, headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure>;
 }
 
 /**
- * Protocol-specific egress encoder contract for transforming private IR representations
- * into target provider or client wire payloads.
+ * Protocol-specific egress encoder contract for transforming intermediate representation
+ * shapes into provider request payloads or client response envelopes.
  */
 export interface EgressEncoder {
   /**
-   * Encodes an {@link IrRequest} into the target provider JSON request body,
-   * projecting any admitted {@link RequestWireOptions} onto target wire fields.
+   * Encodes an {@link IrRequest} into target provider JSON, projecting admitted wire options.
    *
-   * @param request - Semantic IR request.
-   * @param targetModel - The resolved upstream provider model name.
-   * @param requestWireOptions - Wire-only options captured by the source ingress.
+   * @param request - Semantic IR request to encode.
+   * @param targetModel - Upstream model identifier to emit on the wire.
+   * @param requestWireOptions - Optional request-side wire options captured at ingress.
+   * @returns Target provider request payload as a JSON object.
    */
   encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject;
 
   /**
-   * Encodes an {@link IrOutcome} into the client-native JSON response representation,
-   * projecting any admitted {@link OutcomeWireOptions} onto client wire fields.
+   * Encodes an {@link IrOutcome} into client-native response status, headers, and body.
+   *
+   * @param outcome - Semantic IR outcome to encode.
+   * @param outcomeWireOptions - Optional response-side wire options captured from provider.
+   * @returns Response envelope containing status, headers, and body.
    */
   encodeOutcome(
     outcome: IrOutcome,
     outcomeWireOptions?: OutcomeWireOptions,
   ): {
+    /** Client HTTP status code. */
     readonly status: number;
+    /** Client HTTP response headers. */
     readonly headers: HeaderMap;
+    /** Client-native response JSON body. */
     readonly body: JsonObject;
   };
 }
 
 /**
- * Wire-level options discovered on a stream request that are outside the private IR.
+ * Wire-level options parsed from streaming create requests that fall outside the IR.
  */
 export interface StreamWireOptions {
+  /** Whether the client requested an explicit usage chunk on streaming responses. */
   readonly includeUsage?: boolean;
 }
 
 /**
- * Decode result for a streaming create request: IR, stream wire options, and the
- * request wire-options sidecar.
+ * Decode result for a streaming request: IR request, stream options, and wire options sidecar.
  */
 export interface StreamRequestDecodeResult extends RequestDecodeResult {
+  /** Stream-specific options parsed from the inbound request. */
   readonly sourceWireOptions: StreamWireOptions;
 }
 
 /**
- * Decodes a streaming create request into an {@link IrRequest} and wire options.
+ * Protocol-specific decoder for parsing streaming request payloads.
  */
 export interface StreamRequestDecoder {
+  /**
+   * Decodes an inbound streaming request body.
+   *
+   * @param body - Inbound JSON request payload.
+   * @returns Decoded request, stream wire options, and request sidecar, or normalized failure.
+   */
   decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure>;
 }
 
 /**
- * Encodes a semantic {@link IrRequest} and resolved wire options into target provider JSON with stream: true.
+ * Protocol-specific encoder for serializing streaming provider requests.
  */
 export interface StreamRequestEncoder {
+  /**
+   * Encodes an IR request and stream wire options into a provider JSON payload with streaming enabled.
+   *
+   * @param request - Semantic IR request to encode.
+   * @param targetModel - Upstream provider model identifier.
+   * @param wireOptions - Stream options decoded from client request.
+   * @param requestWireOptions - Optional request wire options captured at ingress.
+   * @returns Target provider streaming request JSON body.
+   */
   encodeRequest(
     request: IrRequest,
     targetModel: string,
@@ -215,61 +257,112 @@ export interface StreamRequestEncoder {
 }
 
 /**
- * Decodes one provider protocol stream into semantic IR events.
+ * Stateful decoder transforming upstream provider SSE frames into semantic IR stream events.
  */
 export interface ProviderStreamDecoder {
-  /** Provider Protocol accepted by this decoder. */
+  /** Upstream provider protocol handled by this decoder. */
   readonly protocol: Protocol;
-  /** Accepts one strict SSE frame. */
-  push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure>;
-  /** Validates EOF and protocol terminal state. */
-  finish(): Result<readonly IrStreamEvent[], NormalizedFailure>;
+
   /**
-   * Outcome-side wire-only options discovered on the stream so far (moderation
-   * result, service-tier echo). Read by the stream pump when it reaches the
-   * terminal event, before the client encoder encodes the final frame.
+   * Consumes one SSE frame and returns any yielded IR stream events.
+   *
+   * @param frame - Incoming SSE frame from the provider stream.
+   * @returns Ordered IR stream events yielded by this frame, or normalized failure.
+   */
+  push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure>;
+
+  /**
+   * Validates terminal stream state upon upstream connection closure.
+   *
+   * @returns Final IR stream events if cleanly terminated, or normalized failure if truncated.
+   */
+  finish(): Result<readonly IrStreamEvent[], NormalizedFailure>;
+
+  /**
+   * Retrieves response-side wire options captured across the stream up to this point.
+   *
+   * @returns Captured outcome wire options.
    */
   getOutcomeWireOptions(): OutcomeWireOptions;
 }
 
 /**
- * Encodes semantic IR events as one client protocol stream.
+ * Stateful encoder serializing semantic IR stream events into client-native SSE frames.
  */
 export interface ClientStreamEncoder {
-  /** Client Protocol emitted by this encoder. */
+  /** Client protocol emitted by this encoder. */
   readonly protocol: Protocol;
-  /** Encodes one ordered semantic event into target SSE frames. */
-  encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure>;
-  /** Emits only the protocol codec's legal final framing. */
-  finish(): Result<readonly SseFrame[], NormalizedFailure>;
+
   /**
-   * Receives outcome-side wire-only options (normalized for the direction)
-   * before the terminal event is encoded. Encoders whose protocol has no
-   * outcome-side wire surface implement this as a documented no-op — the pump
-   * only ever calls it with non-empty options, so an unimplemented setter
-   * could silently drop captured facts.
+   * Encodes one IR stream event into zero or more client SSE frames.
+   *
+   * @param event - Semantic IR stream event to serialize.
+   * @returns Client SSE frames, or normalized failure if inexpressible.
+   */
+  encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure>;
+
+  /**
+   * Emits any trailing framing required by the client protocol upon stream completion.
+   *
+   * @returns Final client SSE frames, or normalized failure.
+   */
+  finish(): Result<readonly SseFrame[], NormalizedFailure>;
+
+  /**
+   * Receives normalized outcome wire options before emitting terminal stream events.
+   *
+   * @param options - Outcome wire options captured from the provider stream.
    */
   setOutcomeWireOptions(options: OutcomeWireOptions): void;
 }
 
 /**
- * Stream session metadata identifying the opaque response ID and logical model.
+ * Metadata and identifier generation scope for a streaming translation session.
  */
 export interface StreamSession {
+  /** Unique response identifier stamped on every emitted stream event. */
   readonly responseId: string;
+
+  /** Logical or target model name stamped on streaming protocol envelopes. */
   readonly model: string;
+
+  /** Factory generating unique content part identifiers within this stream session. */
   readonly createPartId: () => string;
 }
 
 /**
- * Codec registry mapping every supported protocol to its decoder and encoder implementations.
+ * Registry of protocol codecs used by the translation coordinator.
  */
 export interface TranslationCodecs {
+  /** Complete-path ingress decoders keyed by protocol for request and outcome decoding. */
   readonly ingress: Readonly<Record<Protocol, IngressDecoder>>;
+
+  /** Complete-path egress encoders keyed by protocol for request and outcome encoding. */
   readonly egress: Readonly<Record<Protocol, EgressEncoder>>;
+
+  /** Streaming request decoders keyed by protocol. */
   readonly streamRequestDecoders: Readonly<Record<Protocol, StreamRequestDecoder>>;
+
+  /** Streaming request encoders keyed by protocol. */
   readonly streamRequestEncoders: Readonly<Record<Protocol, StreamRequestEncoder>>;
+
+  /**
+   * Creates a fresh stateful provider stream decoder for a streaming session.
+   *
+   * @param protocol - Upstream provider protocol.
+   * @param session - Streaming session context.
+   * @returns New provider stream decoder instance.
+   */
   readonly createProviderStreamDecoder: (protocol: Protocol, session: StreamSession) => ProviderStreamDecoder;
+
+  /**
+   * Creates a fresh stateful client stream encoder for a streaming session.
+   *
+   * @param protocol - Client protocol format.
+   * @param session - Streaming session context.
+   * @param wireOptions - Stream wire options decoded from client request.
+   * @returns New client stream encoder instance.
+   */
   readonly createClientStreamEncoder: (
     protocol: Protocol,
     session: StreamSession,
@@ -278,198 +371,347 @@ export interface TranslationCodecs {
 }
 
 /**
- * Input arguments for the unified request translation entry point.
- *
- * A single `stream` selector replaces the former complete/stream variant
- * split, so calling the wrong variant for the admitted `request.stream`
- * becomes unrepresentable. `targetDefaultMaxTokens` carries the candidate
- * model default for `anthropic-messages` targets (which must inject
- * `max_tokens`); it is ignored for other targets.
+ * Input arguments for unified request translation.
  */
 export interface TranslateRequestInput {
+  /** Inbound client protocol format. */
   readonly sourceProtocol: Protocol;
+
+  /** Outbound upstream provider protocol format. */
   readonly targetProtocol: Protocol;
+
+  /** Inbound client request body parsed as JSON. */
   readonly sourceBody: JsonObject;
+
+  /** Inbound logical model key requested by the client. */
   readonly logicalModel: string;
+
+  /** Upstream concrete model name resolved by candidate selection. */
   readonly targetModel: string;
+
+  /** Delivery mode: `true` for server-sent events stream, `false` for complete response. */
   readonly stream: boolean;
+
+  /** Default output token limit injected for `anthropic-messages` targets when omitted. */
   readonly targetDefaultMaxTokens?: number;
 }
 
 /**
- * Opaque ticket proving a request passed decode, validate, preflight, encode,
- * and target finalization in order.
- *
- * Callers cannot fabricate a body, mismatch the `stream` flag, swap protocols,
- * or drop `sourceWireOptions`: `prepareTicketRequest` and
- * `createTicketSession` only accept this ticket — never raw bodies.
- *
- * The string brand keeps construction cast-free: only the coordinator builds
- * tickets, and callers holding a ticket can neither forge one by accident nor
- * bypass the ordered pipeline.
+ * Opaque branded ticket proving an inbound request successfully completed decode,
+ * validation, preflight, and target encoding in ordered sequence.
  */
 export interface TranslatedTicket {
+  /** Brand discriminator ensuring tickets cannot be forged outside the coordinator. */
   readonly __brand: "TranslatedTicket";
+
+  /** Inbound client protocol format captured at ticket creation. */
   readonly sourceProtocol: Protocol;
+
+  /** Target provider protocol format for which the body was encoded. */
   readonly targetProtocol: Protocol;
+
+  /** Logical model key requested by the client. */
   readonly logicalModel: string;
+
+  /** Upstream concrete model name resolved by candidate selection. */
   readonly targetModel: string;
+
+  /** Delivery mode: `true` for streaming, `false` for complete response. */
   readonly stream: boolean;
+
+  /** Fully encoded and validated target provider request body. */
   readonly body: JsonObject;
+
+  /** Semantic intermediate representation of the request. */
   readonly irRequest: IrRequest;
+
+  /** Stream wire options decoded from the client request. */
   readonly sourceWireOptions: StreamWireOptions;
 }
 
 /**
- * Network-only inputs for preparing a ticketed provider request.
- * Body, stream flag, and target protocol come from the ticket itself.
+ * Network connection and timeout parameters for dispatching a ticketed provider request.
  */
 export interface PrepareTicketRequestInput {
-  /** Configured provider name for metrics and traces. */
+  /** Configured provider name for telemetry and metric labeling. */
   readonly providerName: string;
+
+  /** Base URL of the upstream provider endpoint. */
   readonly baseUrl: string;
+
+  /** Safe-to-forward client request headers filtered during admission. */
   readonly clientHeaders: HeaderMap;
+
+  /** Static headers configured for this provider, taking precedence over client headers. */
   readonly providerHeaders: HeaderMap;
+
+  /** Resolved provider API credential for upstream request authorization. */
   readonly providerSecret: string;
+
+  /** Total request deadline timeout in milliseconds. */
   readonly deadlineMs: number;
+
+  /** Idle timeout in milliseconds between incoming stream chunks. */
   readonly streamIdleMs: number;
 }
 
 /**
- * Input arguments for translating an admitted cross-protocol complete request.
+ * Input arguments for translating complete (non-streaming) requests.
  */
 export interface TranslateCompleteInput {
+  /** Inbound client protocol format. */
   readonly sourceProtocol: Protocol;
+
+  /** Outbound upstream provider protocol format. */
   readonly targetProtocol: Protocol;
+
+  /** Inbound client request body parsed as JSON. */
   readonly sourceBody: JsonObject;
+
+  /** Logical model key requested by the client. */
   readonly logicalModel: string;
+
+  /** Upstream concrete model name resolved by candidate selection. */
   readonly targetModel: string;
+
+  /** Default output token limit injected for `anthropic-messages` targets when omitted. */
   readonly targetDefaultMaxTokens?: number;
 }
 
 /**
- * Result of complete request translation containing target provider body and the private IR request.
+ * Result of translating a complete request: encoded target body and IR request.
  */
 export interface TranslateCompleteRequestResult {
+  /** Encoded target provider request body. */
   readonly body: JsonObject;
+
+  /** Semantic IR request preserved for telemetry and outcome correlation. */
   readonly irRequest: IrRequest;
 }
 
 /**
- * Input arguments for translating an admitted cross-protocol stream request.
+ * Input arguments for translating streaming requests.
  */
 export interface TranslateStreamRequestInput {
+  /** Inbound client protocol format. */
   readonly sourceProtocol: Protocol;
+
+  /** Outbound upstream provider protocol format. */
   readonly targetProtocol: Protocol;
+
+  /** Inbound client request body parsed as JSON. */
   readonly sourceBody: JsonObject;
+
+  /** Logical model key requested by the client. */
   readonly logicalModel: string;
+
+  /** Upstream concrete model name resolved by candidate selection. */
   readonly targetModel: string;
+
+  /** Default output token limit injected for `anthropic-messages` targets when omitted. */
   readonly targetDefaultMaxTokens?: number;
 }
 
 /**
- * Result of stream request translation containing target provider body, IR request, and source wire options.
+ * Result of translating a streaming request: encoded target body, IR request, and stream options.
  */
 export interface TranslateStreamRequestResult {
+  /** Encoded target provider streaming request body. */
   readonly body: JsonObject;
+
+  /** Semantic IR request preserved for session binding and telemetry. */
   readonly irRequest: IrRequest;
+
+  /** Stream options decoded from client request for session forwarding. */
   readonly sourceWireOptions: StreamWireOptions;
 }
 
 /**
- * Input arguments for translating an upstream provider outcome back to client-native format.
+ * Input arguments for translating an upstream provider outcome into client format.
  */
 export interface TranslateCompleteOutcomeInput {
+  /** Protocol format of the upstream provider response. */
   readonly sourceProtocol: Protocol;
+
+  /** Protocol format expected by the client. */
   readonly targetProtocol: Protocol;
+
+  /** Upstream provider HTTP response status code. */
   readonly status: number;
+
+  /** Upstream provider HTTP response headers. */
   readonly headers: HeaderMap;
+
+  /** Upstream provider JSON response body. */
   readonly body: JsonObject;
+
+  /** Logical model key requested by the client. */
   readonly logicalModel: string;
 }
 
 /**
- * Result of outcome translation containing client response envelope and the private IR outcome.
+ * Result of translating a complete outcome: client response envelope and IR outcome.
  */
 export interface TranslateCompleteOutcomeResult {
+  /** HTTP status code to return to the client. */
   readonly status: number;
+
+  /** HTTP response headers to return to the client. */
   readonly headers: HeaderMap;
+
+  /** Client-native response JSON body. */
   readonly body: JsonObject;
+
+  /** Semantic IR outcome preserved for telemetry and usage accounting. */
   readonly irOutcome: IrOutcome;
 }
 
 /**
- * Input arguments for preparing the translated outbound provider request with headers and auth.
+ * Input arguments for preparing translated provider requests without ticket verification.
  */
 export interface PrepareTranslatedRequestInput {
-  /** Configured provider name for metrics and traces. */
+  /** Configured provider name for telemetry and metric labeling. */
   readonly providerName: string;
+
+  /** Target provider protocol format. */
   readonly targetProtocol: Protocol;
+
+  /** Base URL of the upstream provider endpoint. */
   readonly baseUrl: string;
+
+  /** Safe-to-forward client request headers filtered during admission. */
   readonly clientHeaders: HeaderMap;
+
+  /** Static headers configured for this provider, taking precedence over client headers. */
   readonly providerHeaders: HeaderMap;
+
+  /** Resolved provider API credential for upstream request authorization. */
   readonly providerSecret: string;
+
+  /** Encoded target provider request body. */
   readonly body: JsonObject;
+
+  /** Total request deadline timeout in milliseconds. */
   readonly deadlineMs: number;
+
+  /** Idle timeout in milliseconds between incoming stream chunks. */
   readonly streamIdleMs: number;
+
+  /** Whether the outbound request is streaming. */
   readonly stream?: boolean;
 }
 
 /**
- * Input arguments for creating a streaming translation session.
+ * Input arguments for creating a streaming translation session without a ticket.
  */
 export interface CreateStreamSessionInput {
+  /** Protocol format of the upstream provider stream. */
   readonly sourceProtocol: Protocol;
+
+  /** Protocol format expected by the client stream. */
   readonly targetProtocol: Protocol;
+
+  /** Logical model key requested by the client. */
   readonly logicalModel: string;
+
+  /** Optional response identifier override; generated if omitted. */
   readonly responseId?: string;
+
+  /** Optional factory for part identifiers; defaults to monotonic counter. */
   readonly createPartId?: () => string;
+
+  /** Stream options decoded from client request. */
   readonly sourceWireOptions?: StreamWireOptions;
 }
 
 /**
- * Stream session bundle containing session metadata and instantiated stream codecs.
+ * Streaming session bundle containing session context and initialized stream codecs.
  */
 export interface StreamSessionBundle {
+  /** Session metadata and identifier generators. */
   readonly session: StreamSession;
+
+  /** Stateful provider stream decoder for incoming SSE frames. */
   readonly providerDecoder: ProviderStreamDecoder;
+
+  /** Stateful client stream encoder for outgoing SSE frames. */
   readonly clientEncoder: ClientStreamEncoder;
 }
 
 /**
- * Bundled translation coordinator providing request translation, outcome translation,
- * streaming session management, and outbound provider request preparation.
- *
- * Deep module: `translateRequest` owns the full decode, validate, preflight,
- * encode, and target-finalize order behind one seam. Codecs stay pure adapters
- * behind it. Ticketed `prepareTicketRequest` / `createTicketSession` make
- * skipped checks unrepresentable: only a ticket from `translateRequest` can be
- * prepared or bound to a stream session.
+ * Unified translation coordinator managing request translation, outcome translation,
+ * streaming sessions, and outbound provider dispatch preparation.
  */
 export interface TranslationCoordinator {
   /**
-   * Unified request translation: decodes, validates, preflights, encodes, and
-   * finalizes one admitted request for either delivery mode.
+   * Unified request translation pipeline: decodes, validates, preflights, and encodes
+   * an inbound request into a verified `TranslatedTicket`.
+   *
+   * @param input - Request parameters including protocols, body, models, and delivery mode.
+   * @returns Successful result containing verified ticket, or normalized failure from failing stage.
    */
   translateRequest(input: TranslateRequestInput): Result<TranslatedTicket, NormalizedFailure>;
+
   /**
-   * Prepares a ticketed outbound provider request. The body, stream flag, and
-   * target protocol are taken from the ticket — callers supply only network facts.
+   * Prepares a ticketed provider request for HTTP dispatch.
+   *
+   * @param ticket - Verified ticket from successful request translation.
+   * @param input - Connection, authentication, and timeout parameters.
+   * @returns Prepared provider request ready for HTTP dispatch.
    */
   prepareTicketRequest(ticket: TranslatedTicket, input: PrepareTicketRequestInput): PreparedProviderRequest;
+
   /**
-   * Binds a streaming ticket to a stream session. Requires a streaming ticket;
-   * the ticket's sidecar is threaded to the client encoder by construction.
+   * Creates a streaming translation session bound to a verified streaming ticket.
+   *
+   * @param ticket - Verified streaming ticket from request translation.
+   * @param input - Optional session identifier or part generator overrides.
+   * @returns Streaming session bundle with initialized codecs.
    */
   createTicketSession(
     ticket: TranslatedTicket,
     input?: { readonly responseId?: string; readonly createPartId?: () => string },
   ): StreamSessionBundle;
+
+  /**
+   * Translates a complete request through decode, validate, preflight, and encode stages.
+   *
+   * @param input - Request parameters including protocols, body, and models.
+   * @returns Encoded provider body and IR request, or normalized failure.
+   */
   translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure>;
+
+  /**
+   * Translates an upstream provider response back into client-native format.
+   *
+   * @param input - Response parameters including status, headers, body, and protocols.
+   * @returns Client response envelope and IR outcome, or normalized failure.
+   */
   translateCompleteOutcome(
     input: TranslateCompleteOutcomeInput,
   ): Result<TranslateCompleteOutcomeResult, NormalizedFailure>;
+
+  /**
+   * Translates a streaming request through decode, validate, preflight, and encode stages.
+   *
+   * @param input - Request parameters including protocols, body, and models.
+   * @returns Encoded streaming body, IR request, and stream options, or normalized failure.
+   */
   translateStreamRequest(input: TranslateStreamRequestInput): Result<TranslateStreamRequestResult, NormalizedFailure>;
+
+  /**
+   * Creates a streaming session bundle from legacy parameters.
+   *
+   * @param input - Protocols, model, and optional identifier overrides.
+   * @returns Streaming session bundle with initialized codecs.
+   */
   createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle;
+
+  /**
+   * Prepares an outbound provider request from legacy parameters.
+   *
+   * @param input - Connection, authentication, body, and timeout parameters.
+   * @returns Prepared provider request ready for HTTP dispatch.
+   */
   prepareTranslatedProviderRequest(input: PrepareTranslatedRequestInput): PreparedProviderRequest;
 }

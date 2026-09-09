@@ -1,3 +1,12 @@
+/**
+ * @fileoverview Application composition root and startup sequence.
+ *
+ * Instantiates concrete infrastructure components—Undici HTTP dispatcher, file trace
+ * recorder, LogTape logging, Prometheus metrics, protocol adapters, and the translation
+ * coordinator—and wires them into Express applications (client and operations).
+ * Manages port binding with rollback on failure and initializes graceful shutdown.
+ */
+
 import type { Sink } from "@logtape/logtape";
 import type express from "express";
 import { type StartupError, startupError } from "../config/errors.ts";
@@ -23,7 +32,7 @@ import { createDefaultTranslationCoordinator } from "../translation/index.ts";
 import { createGracefulShutdown, type GracefulShutdown } from "./shutdown.ts";
 
 /**
- * Running server runtime handle containing bound HTTP listeners and shutdown coordinator.
+ * Running server runtime handle containing bound HTTP listeners and the shutdown coordinator.
  */
 export interface Runtime {
   /** Unauthenticated operations listener (`/health`, `/metrics`). */
@@ -45,13 +54,12 @@ export interface StartRuntimeOptions {
 /**
  * Concrete application composition root.
  *
- * This is the only module that imports concrete adapters and wires them behind
- * domain interfaces. It builds the real Gateway (Chat native path), the Undici
- * dispatcher, the protected/no-op trace recorder, and the LogTape + Prometheus
- * observability seam, then binds the operations and client listeners.
+ * Wires concrete adapters, Undici dispatcher, trace recorder, and observability pipelines
+ * behind domain interfaces, binds operations and client listeners, and starts retention scheduling.
  *
- * @param config - Deep-frozen verified configuration snapshot.
+ * @param config - Verified configuration snapshot.
  * @param revision - SHA-256 revision hash of the active configuration.
+ * @param options - Startup options including optional log sink overrides.
  * @returns Result containing the running {@link Runtime} or startup errors.
  */
 export async function startRuntime(
@@ -59,7 +67,7 @@ export async function startRuntime(
   revision: string,
   options: StartRuntimeOptions = {},
 ): Promise<Result<Runtime, readonly StartupError[]>> {
-  // Trace readiness starts true because the startup probe passed during loadConfig.
+  // Trace readiness starts true because startup probe passed during loadConfig.
   const state: RuntimeState = { draining: false, traceReady: true };
 
   configureLogging(config.logging, options.logSink);
@@ -79,9 +87,7 @@ export async function startRuntime(
   const secrets = collectSecrets(config);
   const redactor = createRedactor(secrets);
 
-  // The trace recorder degrades readiness on write failure and recovers on a
-  // later successful write. The failure hook also emits the trace-failure log
-  // and metric through the shared observer.
+  // File recorder degrades readiness on write failure and recovers on subsequent success.
   const traceRecorder = config.tracing.enabled
     ? createFileTraceRecorder({
         root: config.tracing.root,
@@ -153,7 +159,7 @@ export async function startRuntime(
     return client;
   }
 
-  // 3. Start retention scheduler after both listeners are bound and startup Trace probe passed.
+  // 3. Start retention scheduler after both listeners are bound and trace probe passed.
   let retentionScheduler: TraceRetentionScheduler | undefined;
   if (config.tracing.enabled) {
     const retention = createTraceRetention({
@@ -202,6 +208,9 @@ export async function startRuntime(
 
 /**
  * Collects every resolved client and provider secret for trace redaction.
+ *
+ * @param config - Verified configuration snapshot.
+ * @returns The set of secret strings to redact from traces.
  */
 function collectSecrets(config: AptusConfig): ReadonlySet<string> {
   const secrets = new Set<string>();
@@ -214,6 +223,14 @@ function collectSecrets(config: AptusConfig): ReadonlySet<string> {
 
 /**
  * Binds an Express application factory to a host:port TCP address.
+ *
+ * Converts binding failures into structured {@link StartupError} entries for clean reporting.
+ *
+ * @param host - TCP host address to bind (e.g. `127.0.0.1` or `0.0.0.0`).
+ * @param port - TCP port to bind (0 indicates an ephemeral port).
+ * @param app - Factory producing the Express application.
+ * @param pointer - Config pointer identifying the failing listener on error.
+ * @returns Result containing the bound listener or a binding startup error.
  */
 async function bind(
   host: string,

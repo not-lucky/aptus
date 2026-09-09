@@ -1,57 +1,84 @@
+/**
+ * @fileoverview Age and size eviction for completed filesystem trace directories.
+ *
+ * Scans the trace storage directory and deletes completed request traces that exceed
+ * the configured maximum retention age or cumulative byte budget. Oldest completed
+ * traces are evicted first during size-based cleanup.
+ *
+ * Invariants: Incomplete traces and active staging files are never deleted to prevent
+ * corrupting in-flight requests. Symbolic links are never followed. Target directories
+ * are revalidated immediately prior to deletion to prevent race conditions.
+ */
+
 import { lstat, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { RetentionResult, TraceRetention, TraceTerminal } from "../../domain/operations.ts";
 
 /**
- * Anchored regex matching canonical trace directory names:
- * `YYYY-MM-DDTHH-mm-ss.SSS±HHMM_<UUID-v4>`
+ * Anchored pattern matching canonical trace directory names:
+ * `YYYY-MM-DDTHH-mm-ss.SSS±HHMM_<UUID-v4>`.
  */
 const TRACE_DIR_REGEX =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})\.(\d{3})([+-])(\d{2})(\d{2})_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
 /**
- * Options for constructing {@link TraceRetention}.
+ * Configuration options for the filesystem trace retention sweeper.
  */
 export interface TraceRetentionOptions {
-  /** Root directory containing request trace subdirectories. */
+  /** Root directory that holds one subdirectory per request trace. */
   readonly root: string;
-  /** Maximum retention age in milliseconds before deletion. */
+  /** Maximum retention age in milliseconds before a completed trace is deleted. */
   readonly maxAgeMs: number;
-  /** Maximum total disk space in bytes for completed traces. */
+  /** Maximum total disk usage in bytes for completed traces before size eviction. */
   readonly maxBytes: number;
-  /** Optional callback invoked when a completed directory is deleted. */
+  /** Optional callback invoked once per deleted completed directory with eviction reason. */
   readonly onDeleted?: (reason: "age" | "size") => void;
 }
 
 /**
- * Internal metadata for an evaluated candidate directory.
+ * Inspected metadata for a candidate trace directory discovered during a sweep.
  */
 interface DirectoryCandidate {
+  /** Bare directory name matching {@link TRACE_DIR_REGEX}. */
   readonly name: string;
+  /** Absolute filesystem path to the candidate directory. */
   readonly fullPath: string;
+  /** Request start time in Unix milliseconds, parsed from the directory name. */
   readonly timestampMs: number;
+  /** Total size in bytes of regular files found inside the directory. */
   readonly totalBytes: number;
+  /** Whether the directory contains a valid terminal marker and no staging files. */
   readonly isCompleted: boolean;
 }
 
 /**
  * Creates the filesystem trace retention scanner and cleanup executor.
  *
- * @param options - Storage root, age/size limits, and metrics callback.
+ * @param options - Storage root, retention limits, and optional deletion callback.
  * @returns A {@link TraceRetention} instance.
  */
 export function createTraceRetention(options: TraceRetentionOptions): TraceRetention {
   const { root, maxAgeMs, maxBytes, onDeleted } = options;
 
   return {
+    /**
+     * Executes one retention sweep over the configured trace storage root.
+     *
+     * Scans child directories, evicts completed traces exceeding the age budget,
+     * and trims oldest completed traces until cumulative size fits the byte budget.
+     *
+     * @param nowMs - Current wall-clock time in Unix milliseconds.
+     * @returns Promise resolving to a {@link RetentionResult} summarizing cleanup counts.
+     * @throws {Error} If the root directory does not exist or is not a directory.
+     */
     async run(nowMs: number): Promise<RetentionResult> {
-      // 1. Verify root directory without following symlinks.
+      // First, verify that the root is a real directory without following symbolic links.
       const rootStat = await lstat(root);
       if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
         throw new Error(`Trace retention root is not a real directory: ${root}`);
       }
 
-      // 2. Read direct children of root.
+      // Second, read the direct children of the root directory.
       const entries = await readdir(root, { withFileTypes: true });
 
       const completedCandidates: DirectoryCandidate[] = [];
@@ -59,7 +86,8 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
       let skippedCount = 0;
 
       for (const entry of entries) {
-        // Skip non-directories, symlinks, hidden files/dirs, and malformed directory names.
+        // Skip entries that cannot be trace directories: plain files, symbolic links, hidden names, and names
+        // outside the canonical pattern are never request traces, so they stay untouched.
         if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) {
           continue;
         }
@@ -80,7 +108,7 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
           continue;
         }
 
-        // Recursively inspect the directory for total file bytes, staging files, and terminal.
+        // Measure this directory: sum its regular file bytes and check for staging files and a valid terminal.
         const inspection = await inspectDirectory(fullPath);
 
         if (inspection.isCompleted) {
@@ -97,7 +125,8 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
         }
       }
 
-      // 3. Sort completed candidates deterministically by parsed timestamp ascending, then directory name ascending.
+      // Third, order the completed candidates deterministically by parsed timestamp and then by directory name.
+      // The name tiebreaker keeps oldest-first deletion stable when two requests share a millisecond.
       completedCandidates.sort((a, b) => {
         if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
         return a.name.localeCompare(b.name);
@@ -107,7 +136,7 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
       let deletedForSize = 0;
       const survivingCompleted: DirectoryCandidate[] = [];
 
-      // 4. Age-based eviction: delete completed traces older than maxAgeMs.
+      // Fourth, evict by age: delete each completed trace whose age exceeds the configured maximum age.
       for (const candidate of completedCandidates) {
         const ageMs = nowMs - candidate.timestampMs;
         if (ageMs > maxAgeMs) {
@@ -116,7 +145,7 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
             deletedForAge++;
             onDeleted?.("age");
           } else {
-            // Became incomplete or invalid; update accounting.
+            // The directory changed under the sweep, so recount it on the incomplete path instead of dropping it.
             const reinspection = await inspectDirectory(candidate.fullPath).catch(() => ({
               totalBytes: 0,
               isCompleted: false,
@@ -129,7 +158,7 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
         }
       }
 
-      // 5. Size-based eviction: delete oldest completed traces until remaining completed bytes <= maxBytes.
+      // Fifth, evict by size: delete the oldest completed traces until the survivors fit the byte budget.
       let remainingBytes = survivingCompleted.reduce((sum, c) => sum + c.totalBytes, 0);
 
       while (remainingBytes > maxBytes && survivingCompleted.length > 0) {
@@ -163,13 +192,24 @@ export function createTraceRetention(options: TraceRetentionOptions): TraceReten
 }
 
 /**
- * Inspects a directory to count regular file bytes and determine if it has a valid completed terminal.
+ * Inspects a candidate directory, calculating regular file bytes and checking completion status.
+ *
+ * A directory is considered completed only if it contains a valid terminal marker (`999_terminal.json`
+ * with kind `complete`, `failed`, `cancelled`, or `dry_run`) and no active staging files.
+ *
+ * @param dirPath - Absolute path to the candidate directory.
+ * @returns Promise resolving to the total byte size and completion flag.
  */
 async function inspectDirectory(dirPath: string): Promise<{ totalBytes: number; isCompleted: boolean }> {
   let totalBytes = 0;
   let hasStaging = false;
   let terminalContent: string | undefined;
 
+  /**
+   * Recursively walks the directory tree to sum file sizes and detect staging or terminal files.
+   *
+   * @param currentPath - Current directory path being inspected.
+   */
   async function walk(currentPath: string): Promise<void> {
     const entries = await readdir(currentPath, { withFileTypes: true });
     for (const entry of entries) {
@@ -213,15 +253,20 @@ async function inspectDirectory(dirPath: string): Promise<{ totalBytes: number; 
       }
     }
   } catch {
-    // Malformed terminal
+    // A terminal that fails to parse is treated as incomplete, so the directory survives this sweep.
   }
 
   return { totalBytes, isCompleted: false };
 }
 
 /**
- * Re-validates directory state immediately before deletion.
- * Returns `true` if directory was still valid and deleted; `false` if skipped.
+ * Deletes a trace directory after verifying it remains a regular, completed directory.
+ *
+ * Re-validates the directory immediately before removal to guard against symlink swaps
+ * or concurrent status changes.
+ *
+ * @param dirPath - Absolute path to the directory targeted for deletion.
+ * @returns Promise resolving to `true` if deleted, or `false` if skipped or changed.
  */
 async function deleteIfStillCompleted(dirPath: string): Promise<boolean> {
   const initialStat = await lstat(dirPath).catch(() => undefined);
@@ -232,7 +277,7 @@ async function deleteIfStillCompleted(dirPath: string): Promise<boolean> {
   if (!inspection.isCompleted) {
     return false;
   }
-  // Re-lstat immediately before rm to defeat symlink swap (TOCTOU)
+  // Stat once more immediately before removal so that a symbolic link swapped in after the first check is caught.
   const finalStat = await lstat(dirPath).catch(() => undefined);
   if (finalStat === undefined || !finalStat.isDirectory() || finalStat.isSymbolicLink()) {
     return false;
@@ -242,7 +287,10 @@ async function deleteIfStillCompleted(dirPath: string): Promise<boolean> {
 }
 
 /**
- * Parses timestamp from regex match groups into UTC milliseconds.
+ * Parses the ISO-like timestamp from a canonical trace directory name regex match.
+ *
+ * @param match - RegExp exec result matching {@link TRACE_DIR_REGEX}.
+ * @returns Unix epoch timestamp in milliseconds, or NaN if unparseable.
  */
 function parseDirectoryTimestamp(match: RegExpExecArray): number {
   const year = Number.parseInt(match[1] as string, 10);

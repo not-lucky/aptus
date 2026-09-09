@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Protocol-native serialization of normalized domain failures into HTTP responses.
+ *
+ * Translates domain {@link NormalizedFailure} records into protocol-specific error envelopes
+ * matching the wire formats expected by OpenAI Chat, OpenAI Responses, and Anthropic Messages clients.
+ * Handles HTTP status mapping, header construction (including `retry-after` and request IDs),
+ * and UTF-8 JSON payload serialization for both identified requests and early admission rejections.
+ */
+
 import type { Protocol } from "../domain/contracts.ts";
 import { filterInboundHeaders } from "../domain/headers.ts";
 import {
@@ -10,15 +20,22 @@ import {
 import type { AptusRequestId } from "../domain/request-id.ts";
 import { statusFromCategory } from "../routing/failures.ts";
 
+/** Shared text encoder for serializing error envelopes to response bytes. */
 const encoder = new TextEncoder();
 
 /**
- * Creates the protocol-native error encoder for converting normalized domain failures into client response envelopes.
+ * Creates an error encoder instance implementing the {@link ErrorEncoder} gateway contract.
  *
- * @returns An {@link ErrorEncoder} instance.
+ * @returns Error encoder capable of formatting failures across all supported client protocols.
  */
 export function createErrorEncoder(): ErrorEncoder {
   return {
+    /**
+     * Encodes a normalized failure into the wire envelope format of the target protocol.
+     *
+     * @param input - Protocol, failure details, and request ID to encode.
+     * @returns Encoded failure containing status code, headers, and serialized body bytes.
+     */
     encode(input) {
       return encodeFailure(input.protocol, input.failure, input.aptusRequestId);
     },
@@ -26,40 +43,44 @@ export function createErrorEncoder(): ErrorEncoder {
 }
 
 /**
- * Encodes a pre-admission failure (such as invalid JSON body or missing content-type)
- * before an Aptus request ID has been minted.
+ * Encodes a pre-admission failure occurring before a request ID has been assigned.
  *
- * @param protocol - The target client protocol.
- * @param failure - Normalized failure details.
- * @returns An {@link EncodedFailure} ready for HTTP response serialization.
+ * @param protocol - Client protocol expected on the receiving endpoint.
+ * @param failure - Normalized failure description to encode.
+ * @returns Encoded HTTP failure response without request identifier headers or fields.
  */
 export function encodeUnidentifiedFailure(protocol: Protocol, failure: NormalizedFailure): EncodedFailure {
   return encodeFailure(protocol, failure);
 }
 
 /**
- * Encodes an unexpected internal 500 error after an Aptus request ID has been minted.
+ * Encodes an unexpected internal server error for an identified request.
  *
- * @param protocol - The target client protocol.
- * @param aptusRequestId - Unique request identifier for traceability.
- * @returns An {@link EncodedFailure} representing an internal server error.
+ * @param protocol - Client protocol expected on the receiving endpoint.
+ * @param aptusRequestId - Unique request identifier to correlate in headers and envelopes.
+ * @returns Encoded 500 error envelope with safe generic error messaging.
  */
 export function encodeInternalFailure(protocol: Protocol, aptusRequestId: AptusRequestId): EncodedFailure {
   return encodeEnvelope(protocol, "internal", "internal server error", "internal_error", 500, aptusRequestId);
 }
 
 /**
- * Encodes an unexpected internal 500 error before an Aptus request ID was minted.
+ * Encodes an unexpected internal server error occurring before request identity assignment.
  *
- * @param protocol - The target client protocol.
- * @returns An {@link EncodedFailure} representing an internal server error without a request ID.
+ * @param protocol - Client protocol expected on the receiving endpoint.
+ * @returns Encoded 500 error envelope without request identifier metadata.
  */
 export function encodeUnidentifiedInternalFailure(protocol: Protocol): EncodedFailure {
   return encodeEnvelope(protocol, "internal", "internal server error", "internal_error", 500);
 }
 
 /**
- * Internal helper to format failure envelope, assign status, and attach Retry-After headers if present.
+ * Formats a failure envelope with category-to-status mapping and optional `retry-after` header.
+ *
+ * @param protocol - Client protocol expected on the receiving endpoint.
+ * @param failure - Normalized failure details.
+ * @param aptusRequestId - Optional request identifier.
+ * @returns Encoded failure ready for HTTP transmission.
  */
 function encodeFailure(
   protocol: Protocol,
@@ -82,9 +103,15 @@ function encodeFailure(
 }
 
 /**
- * Constructs protocol-specific error payload shapes:
- * - Anthropic: `{ type: "error", error: { type, message }, request_id? }`
- * - OpenAI: `{ error: { message, type, param: null, code } }`
+ * Constructs protocol-specific wire JSON bodies and attaches standard headers.
+ *
+ * @param protocol - Target client protocol determining the JSON schema.
+ * @param category - Failure category or internal error marker.
+ * @param message - Client-safe error message.
+ * @param code - Optional provider or application error code.
+ * @param status - HTTP status code.
+ * @param aptusRequestId - Optional request identifier to attach.
+ * @returns Serialized encoded failure record.
  */
 function encodeEnvelope(
   protocol: Protocol,
@@ -115,7 +142,10 @@ function encodeEnvelope(
 }
 
 /**
- * Maps failure categories to OpenAI error types.
+ * Maps an IR failure category or internal error marker to its OpenAI error type string.
+ *
+ * @param category - Failure category to map.
+ * @returns OpenAI-compatible error type identifier.
  */
 function openAiErrorType(category: IrFailureCategory | "internal"): string {
   switch (category) {
@@ -137,4 +167,5 @@ function openAiErrorType(category: IrFailureCategory | "internal"): string {
   }
 }
 
+/** Inbound response header filter shared with the relay path. */
 export const filterResponseHeaders = filterInboundHeaders;

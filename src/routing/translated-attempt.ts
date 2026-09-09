@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Translated complete request execution and dry-run preview workflows.
+ *
+ * Implements end-to-end execution for cross-protocol non-streaming requests: translates
+ * client requests to target provider format, leases a key, dispatches to upstream, spools
+ * response payload bodies, and translates response outcomes back to the client format.
+ * Also provides {@link executeTranslatedDryRun} for previewing translation and key selection.
+ */
+
 import type {
   AttemptObservation,
   DryRunProviderRequest,
@@ -18,11 +28,10 @@ import { dispatchFailure, failureJson, unavailableFailure } from "./failures.ts"
 import { spoolResponseBody } from "./spool.ts";
 import { createTranslatedPreparer } from "./translated-preparer.ts";
 
+/** Shared UTF-8 decoder for converting provider response buffers into JSON strings. */
 const utf8Decoder = new TextDecoder();
 
-/**
- * Outcome of one cross-protocol translation attempt.
- */
+/** Outcome variants for a cross-protocol complete attempt execution. */
 export type TranslatedAttemptOutcome =
   | { readonly kind: "key_unavailable" }
   | { readonly kind: "deadline_exceeded" }
@@ -45,16 +54,13 @@ export type TranslatedAttemptOutcome =
     };
 
 /**
- * Executes a translated attempt: translates request into IR and target format,
- * acquires a key, dispatches to provider, spools 2xx body, and translates outcome.
+ * Executes a cross-protocol complete attempt, translating request and response bodies.
  *
- * Pre-dispatch decode/validation/preflight failures return with zero lease and zero dispatch.
- *
- * @param candidate - Target candidate.
- * @param request - Admitted client gateway request.
- * @param ctx - Attempt context.
- * @param translation - Translation coordinator bundle.
- * @returns Translated attempt outcome for Gateway orchestration.
+ * @param candidate - Selected candidate descriptor.
+ * @param request - Inbound gateway request.
+ * @param ctx - Attempt execution context.
+ * @param translation - Translation coordinator handling protocol transformations.
+ * @returns Translated attempt outcome for candidate runner orchestration.
  */
 export async function executeTranslatedAttempt(
   candidate: CandidateDescriptor,
@@ -69,8 +75,7 @@ export async function executeTranslatedAttempt(
   }
   const { response, observation, lease, attemptNumber, dispatchDurationMs } = dispatched;
 
-  // Non-2xx response head follows normal retry/fallback policy (decided by Gateway).
-  // Single key observation with the head category.
+  // Non-2xx response head: settle key observation and return for retry/fallback handling.
   if (observation.result !== "success") {
     const cooldownMs = finishAttempt(
       ctx,
@@ -86,7 +91,7 @@ export async function executeTranslatedAttempt(
     return { kind: "response", response, observation, cooldownMs, attemptNumber };
   }
 
-  // 2xx success: spool body and translate outcome (single observation below).
+  // 2xx response head: spool the body and translate the outcome into client protocol envelope.
   let body: OwnedBody;
   try {
     body = await spoolResponseBody(response.body);
@@ -137,8 +142,6 @@ export async function executeTranslatedAttempt(
   try {
     rawOutcomeBody = parsedJson ?? (JSON.parse(utf8Decoder.decode(await body.bytes())) as JsonObject);
   } catch {
-    // A 2xx body that is not valid JSON is a provider protocol violation.
-    // Finish the attempt and surface a provider failure rather than an internal fault.
     const failure = {
       category: "provider" as const,
       message: "provider returned non-JSON response body",
@@ -206,21 +209,21 @@ export async function executeTranslatedAttempt(
   };
 }
 
+/** Outcome variants for a translated dry-run preview evaluation. */
 export type TranslatedDryRunOutcome =
   | { readonly kind: "dry_run"; readonly result: DryRunResult }
   | { readonly kind: "skipped"; readonly failure: NormalizedFailure }
   | { readonly kind: "key_unavailable"; readonly failure: NormalizedFailure };
 
 /**
- * Executes a translated dry-run: translates request into IR and target format,
- * previews the key without leasing, redacts secrets, and returns DryRunResult.
+ * Previews translated request construction and credential selection without issuing network traffic.
  *
- * @param candidate - Target candidate.
- * @param request - Admitted client gateway request.
- * @param ctx - Attempt context.
- * @param translation - Translation coordinator bundle.
- * @param redactor - Field-aware secret redactor.
- * @returns Dry run evaluation outcome.
+ * @param candidate - Target candidate descriptor.
+ * @param request - Inbound gateway request.
+ * @param ctx - Attempt execution context.
+ * @param translation - Translation coordinator.
+ * @param redactor - Redactor for scrubbing credentials from preview payloads.
+ * @returns Dry-run preview result or skipping failure.
  */
 export async function executeTranslatedDryRun(
   candidate: CandidateDescriptor,

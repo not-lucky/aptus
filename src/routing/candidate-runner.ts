@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Per-candidate attempt loop execution and retry/fallback policy evaluation.
+ *
+ * Implements the core attempt loop driving a single candidate: dispatches attempts via a
+ * {@link CandidateStrategy}, processes terminal conditions (cancellations, deadlines, preparation
+ * faults, key unavailability), evaluates same-candidate retries and route fallbacks, and executes
+ * response spooling and relay handoffs.
+ */
+
 import type { AttemptObservation, GatewayRequest, GatewayResult, OwnedBody, Protocol } from "../domain/contracts.ts";
 import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
@@ -11,43 +21,44 @@ import type { Clock } from "./timing.ts";
 import type { TranslatedAttemptOutcome } from "./translated-attempt.ts";
 import type { TranslatedStreamAttemptOutcome } from "./translated-stream-attempt.ts";
 
-/**
- * Normalized attempt outcome across the three execution paths.
- *
- * Native, translated-complete, and translated-stream outcomes share the
- * `cancelled | deadline_exceeded | prepare_failed | key_unavailable |
- * dispatch_failed | response` prefix and differ only on success
- * (`response+streamRequested` vs `translated_response` vs `stream_ready`).
- */
+/** Normalized attempt outcome across native, translated complete, and translated streaming paths. */
 export type RunnerAttemptOutcome = AttemptOutcome | TranslatedAttemptOutcome | TranslatedStreamAttemptOutcome;
 
 /**
- * Per-path mechanics adapter. Policy lives in {@link runCandidate};
- * each strategy only produces the next attempt outcome.
+ * Strategy contract providing per-path attempt execution mechanics.
  */
 export interface CandidateStrategy {
+  /** Strategy discriminator indicating the execution mode. */
   readonly kind: "native" | "translated-complete" | "translated-stream";
+  /** Executes the next attempt iteration. */
   execute(): Promise<RunnerAttemptOutcome>;
 }
 
 /**
- * Policy dependencies supplied by the Gateway. The Gateway keeps outer
- * iteration, dry-run, and the translation gate; the runner owns the outcome
- * switch, retry, fallback, and terminal wiring.
+ * Policy dependencies and lifecycle callbacks supplied by the gateway orchestrator.
  */
 export interface RunnerShared {
+  /** Active inbound gateway request. */
   readonly request: GatewayRequest;
+  /** Telemetry observer for lifecycle logging and metrics. */
   readonly observer: GatewayObservability;
+  /** Monotonic and wall clock source. */
   readonly clock: Clock;
+  /** Monotonic millisecond timestamp when request processing started. */
   readonly started: number;
+  /** Factory creating relay context for a given candidate and attempt count. */
   readonly relayContextFor: (candidate: CandidateDescriptor, attempts: number) => RelayContext;
+  /** Helper constructing a terminal failure result. */
   readonly terminalFailure: (failure: NormalizedFailure, candidate?: CandidateDescriptor) => GatewayResult;
+  /** Handler finalizing a cancelled request and emitting cancellation telemetry. */
   readonly handleCancellation: (
     stream: boolean,
     targetProtocol?: Protocol,
     provider?: string,
   ) => Promise<GatewayResult>;
+  /** Emits skip telemetry and trace stages when a candidate is bypassed. */
   readonly emitCandidateSkip: (candidate: CandidateDescriptor, failure: NormalizedFailure) => Promise<void>;
+  /** Evaluates fallback policy and emits fallback telemetry if permitted. */
   readonly tryFallback: (
     candidate: CandidateDescriptor,
     candidateIndex: number,
@@ -55,9 +66,7 @@ export interface RunnerShared {
   ) => Promise<boolean>;
 }
 
-/**
- * Result of running one candidate to a policy decision.
- */
+/** Result of executing a candidate loop: either a terminal gateway result or a fallback instruction. */
 export type RunnerResult =
   | { readonly kind: "returned"; readonly result: GatewayResult }
   | { readonly kind: "nextCandidate"; readonly failure: NormalizedFailure };
@@ -65,17 +74,13 @@ export type RunnerResult =
 export type { AttemptContext };
 
 /**
- * Runs one candidate's attempt loop to a policy decision.
+ * Executes the attempt loop for a candidate until a response relays, a terminal failure occurs, or fallback is triggered.
  *
- * Single owner of the outcome switch — cancelled, deadline, prepare-failed,
- * key-unavailable, response, success — with retry/fallback/terminal wiring.
- * Success mechanics stay per-path via the strategy kind and relay helpers.
- *
- * @param candidate - The candidate being attempted.
- * @param candidateIndex - Index in route order for fallback emission.
- * @param shared - Gateway-owned policy dependencies.
- * @param strategy - Per-path attempt producer.
- * @returns Either a terminal GatewayResult or a request to advance candidates.
+ * @param candidate - Selected candidate descriptor.
+ * @param candidateIndex - Zero-based index of the candidate in the route sequence.
+ * @param shared - Gateway-provided policy dependencies and callbacks.
+ * @param strategy - Per-path attempt strategy instance.
+ * @returns Final gateway result or request to advance to the next candidate.
  */
 export async function runCandidate(
   candidate: CandidateDescriptor,
@@ -133,8 +138,6 @@ export async function runCandidate(
           outcome.observation,
           outcome.attemptNumber,
           outcome.cooldownMs,
-          // Native terminal falls through to spool + relay, so the body
-          // must stay readable; translated terminals never relay the body.
           strategy.kind !== "native",
         );
         if (decision === "retry") continue;
@@ -142,12 +145,8 @@ export async function runCandidate(
         if (strategy.kind !== "native") {
           return { kind: "returned", result: shared.terminalFailure(decision.failure, candidate) };
         }
-        // Native terminal: fall through to spool + relayComplete so the
-        // upstream error body relays unchanged (terminal recorded on delivery).
       }
 
-      // Success complete, or native non-success with no retry/fallback:
-      // spool the full body, then relay.
       let body: OwnedBody;
       try {
         body = await spoolResponseBody(outcome.response.body);
@@ -208,13 +207,18 @@ export async function runCandidate(
 }
 
 /**
- * Shared response-failure policy: same-candidate retry, else fallback, else
- * terminal. Previously duplicated between the translated loops (helper) and
- * the native loop (inlined copy).
+ * Evaluates retry and fallback policies following an unsuccessful provider attempt response.
  *
- * @param cancelTerminalBody - Cancel the body on the terminal path. False for
- * native terminals, which fall through to spool + relay and must keep the
- * body readable; true for translated terminals, which never relay the body.
+ * @param shared - Gateway-owned policy dependencies.
+ * @param candidate - Candidate descriptor attempted.
+ * @param candidateIndex - Candidate position in route order.
+ * @param candidateAttemptCount - Attempts made on this candidate so far.
+ * @param response - Response object carrying readable body stream.
+ * @param observation - Attempt result observation.
+ * @param attemptNumber - Global attempt count.
+ * @param cooldownMs - Optional cooldown scheduled for the key.
+ * @param cancelTerminalBody - Whether to cancel the response body when terminal.
+ * @returns Decision indicating retry, fallback, or terminal failure.
  */
 async function handleResponseFailure(
   shared: RunnerShared,

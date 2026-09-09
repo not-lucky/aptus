@@ -1,3 +1,14 @@
+/**
+ * @fileoverview
+ * Authenticated client-facing Express application for the Aptus gateway.
+ *
+ * Exposes the client create endpoints (`/chat/completions`, `/responses`, `/messages`, and their
+ * `/v1` prefixed aliases) alongside the model catalog listing (`/models`, `/v1/models`).
+ *
+ * Coordinates authentication, admission, cancellation propagation across client disconnects and
+ * deadlines, gateway dispatch, and streaming delivery backpressure with terminal lifecycle accounting.
+ */
+
 import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import express, { type Request, type Response } from "express";
@@ -26,9 +37,19 @@ import { authorizedCatalogEntries } from "./catalog.ts";
 import { encodeInternalFailure, encodeUnidentifiedInternalFailure, filterResponseHeaders } from "./error-encoder.ts";
 import type { RequestCancellationRegistry } from "./request-cancellation.ts";
 
+// Re-exported so callers of this module can name the endpoint label type
+// without importing from ./admission-request.ts directly.
 export type { ClientEndpoint };
 
-/** Lifecycle outcome of a client request for telemetry. */
+/**
+ * Lifecycle outcome of a client request for telemetry.
+ *
+ * `complete` means the response was fully written (or an error envelope was
+ * delivered), `failed` means an internal fault was emitted, and
+ * `cancelled` means the client or the server cut the request before
+ * delivery finished. The observer's request lifecycle metrics bucket on
+ * this value.
+ */
 export type ClientOutcome = "complete" | "failed" | "cancelled";
 
 /**
@@ -61,6 +82,11 @@ export interface ClientAppOptions {
   readonly shutdownSignal?: AbortSignal;
 }
 
+/**
+ * The three create endpoint paths, used as a discriminator when building
+ * the per-endpoint controller (which endpoint accepted the request decides
+ * the client protocol and the admission shape).
+ */
 type CreateEndpoint = "/chat/completions" | "/responses" | "/messages";
 
 /**
@@ -72,8 +98,12 @@ type CreateEndpoint = "/chat/completions" | "/responses" | "/messages";
  * - `POST /messages` & `POST /v1/messages`: Anthropic messages API
  * - `GET /models` & `GET /v1/models`: Model catalog listing
  *
- * @param options - Application construction options.
- * @returns Configured Express application.
+ * @param options - The application construction options; see
+ *   {@link ClientAppOptions} for each dependency, including which ones
+ *   default to configuration-derived implementations when omitted.
+ * @returns The configured Express application, ready to be bound by the
+ *   listener helper. The factory is synchronous and performs no I/O; it
+ *   wires routes and closes over the supplied dependencies.
  */
 export function createClientApp(options: ClientAppOptions): express.Express {
   const app = express();
@@ -123,7 +153,28 @@ export function createClientApp(options: ClientAppOptions): express.Express {
 }
 
 /**
- * Mounts a POST create endpoint across alias paths.
+ * Mounts a POST create endpoint across its alias paths (bare and
+ * `/v1`-prefixed).
+ *
+ * A small helper that exists so {@link createClientApp} states each
+ * endpoint once with its protocol, label, and authentication purpose,
+ * instead of repeating the five-parameter mount for every path alias. It
+ * returns nothing and has the side effect of registering the route on the
+ * app, which is the normal Express mounting pattern.
+ *
+ * @param app - The Express application to register the route on.
+ * @param options - Forwarded to {@link createController}.
+ * @param limiter - The shared admission limiter for all endpoints.
+ * @param nameIndex - The model and route name index for resolution.
+ * @param modelsByName - The set of public model names, for validation.
+ * @param paths - The path aliases to mount, such as
+ *   `["/chat/completions", "/v1/chat/completions"]`.
+ * @param protocol - The client wire protocol this endpoint speaks.
+ * @param endpoint - The endpoint path discriminator.
+ * @param label - The telemetry label reported for requests on this
+ *   endpoint.
+ * @param authPurpose - The authentication purpose required for this
+ *   endpoint, which selects which client keys may call it.
  */
 function mountCreate(
   app: express.Express,
@@ -416,6 +467,16 @@ function catalogController(
   };
 }
 
+/**
+ * Builds the shared authentication failure for the catalog endpoints.
+ *
+ * A tiny factory so the catalog controller and the create controllers
+ * report invalid credentials with the identical category and message.
+ * It is synchronous, pure, and never throws.
+ *
+ * @returns A non-retryable authentication failure with a generic message
+ *   that does not reveal why the credentials were rejected.
+ */
 function authenticationFailure(): import("../domain/operations.ts").NormalizedFailure {
   return { category: "authentication", message: "invalid authentication credentials", retryable: false };
 }
@@ -559,7 +620,18 @@ async function writeGatewayResult(
 }
 
 /**
- * Writes an encoded error envelope to the response if headers have not yet been committed.
+ * Writes an encoded error envelope to the response if headers have not yet
+ * been committed.
+ *
+ * The guard matters during streaming: once SSE headers are on the wire the
+ * status can no longer change, so a late error must not attempt a second
+ * status write (Express would warn and the client would see corrupted
+ * framing). Callers use it as a best-effort terminal write that silently
+ * does nothing when the response is already committed.
+ *
+ * @param response - The Express response to write to.
+ * @param encoded - The pre-encoded error envelope: status, headers, and
+ *   serialized body bytes.
  */
 function writeEncoded(
   response: Response,

@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Strict wire parsing rules for individual generation controls and sub-objects.
+ *
+ * Defines singular parsing rules for generation controls, enumerations, and tool fields across
+ * incoming provider requests. Presence remains distinguishable from absence, malformed values fail
+ * closed as `invalid_request`, and out-of-range values fail closed with matrix capability identifiers
+ * rather than being clamped.
+ *
+ * Used primarily during ingress decoding across OpenAI Chat, OpenAI Responses, and Anthropic Messages
+ * to normalize wire fields into provider-independent intermediate representations (IR).
+ */
+
 import type { Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type { NonEmpty } from "../../ir.ts";
@@ -13,41 +25,42 @@ import type { MatrixRowId } from "../../matrix.ts";
 import { invalidRequest, ok, unsupportedCapability } from "../../result.ts";
 
 /**
- * Strict wire-parsing rules for individual values and wire sub-objects.
+ * Native-only reasoning effort literals that the IR excludes.
  *
- * Every admitted generation control has exactly one parsing rule, defined
- * here once: presence is distinguishable from absence, malformed values fail
- * closed as `invalid_request`, out-of-IR-range values fail closed with their
- * matrix capability ID (never clamped), and valid-but-non-admitted native
- * literals fail closed with their own capability ID. The per-protocol codecs
- * stay thin projections over these helpers.
- */
-
-/**
- * Valid C/R reasoning-effort literals the IR deliberately excludes. They fail
- * closed with `reasoning-effort-common` — never `invalid_request`, never a
- * silent drop — because they are native-only capabilities, not malformed input.
+ * Chat and Responses document `none` and `minimal`, which fail closed under the
+ * `reasoning-effort-common` capability ID rather than malformed request errors.
  */
 const NATIVE_ONLY_EFFORT_LITERALS: ReadonlySet<string> = new Set(["none", "minimal"]);
 
-/** M request service-tier enum (`standard|priority|batch` are response-only echoes). */
+/**
+ * Messages request service tier literals admitted during ingress decoding.
+ * Response-only echoes (`standard`, `priority`, `batch`) are deliberately excluded.
+ */
 export const MESSAGES_SERVICE_TIERS: ReadonlySet<string> = new Set(["auto", "standard_only"]);
 
-/** Custom-tool grammar syntax literals shared by the Chat and Responses wires. */
+/** Grammar syntax literals shared by Chat and Responses custom tools. */
 const GRAMMAR_SYNTAXES: ReadonlySet<GrammarSyntax> = new Set(GRAMMAR_SYNTAX_VALUES);
 
-/** Chat wire constraint on function tool names (decode and C-target preflight, also structured output). */
+/** Regex enforcing Chat function tool name constraints (1-64 alphanumeric characters, underscores, or dashes). */
 export const CHAT_TOOL_NAME_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
-/** Returns the value when it is a finite number; otherwise undefined. Never NaN/±Infinity. */
+/**
+ * Narrows an unknown wire value to a finite number without coercion.
+ *
+ * @param value - The raw wire value to inspect.
+ * @returns The finite numeric value, or `undefined` if non-numeric, infinite, or NaN.
+ */
 export function asFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /**
- * Normalizes a custom tool call's wire input onto the IR `inputText` string:
- * strings pass through verbatim and plain objects compact-stringify once;
- * anything else is malformed wire.
+ * Normalizes custom tool call input into canonical JSON string text.
+ * Strings pass through verbatim, while plain objects are compact-stringified.
+ *
+ * @param value - Raw input value from the tool call.
+ * @param context - Contextual path for error reporting.
+ * @returns The normalized JSON string, or an `invalid_request` failure.
  */
 export function parseCustomCallInput(value: unknown, context: string): Result<string, NormalizedFailure> {
   if (typeof value === "string") return ok(value);
@@ -58,10 +71,12 @@ export function parseCustomCallInput(value: unknown, context: string): Result<st
 }
 
 /**
- * Parses the two wire grammar fields shared by the Chat and Responses custom
- * tool formats: `syntax` must be a documented literal and `definition` a
- * non-empty string. The wires differ only in how they nest the pair — Chat
- * nests it under `grammar`, Responses keeps it flat.
+ * Parses syntax and definition fields for custom tool grammars.
+ *
+ * @param syntax - Raw syntax identifier to validate against admitted grammars.
+ * @param definition - Raw grammar definition string.
+ * @param context - Contextual path for error reporting.
+ * @returns Validated syntax and definition pair, or an `invalid_request` failure.
  */
 export function parseGrammarFields(
   syntax: unknown,
@@ -80,14 +95,14 @@ export function parseGrammarFields(
 }
 
 /**
- * Parses one tool's `allowed_callers` wire array against the source
- * protocol's documented caller literals: `ok(false)` when the field is absent,
- * `ok(true)` when it is a non-empty array of `"direct"` entries.
+ * Parses a tool's `allowed_callers` wire array against documented protocol literals.
+ * Only `direct` callers are currently supported across providers; other documented callers
+ * fail closed under the `allowed-callers` capability identifier.
  *
- * An undocumented literal is malformed wire (`invalid_request`); any other
- * documented caller is the `allowed-callers` row. "direct" is the only caller
- * any target wire can carry, so every other caller fails closed here instead
- * of riding the sidecar into a direction gate that would reject it anyway.
+ * @param value - Raw `allowed_callers` value to validate.
+ * @param documented - Set of valid caller literals for the source protocol.
+ * @param context - Contextual path for error reporting.
+ * @returns `true` if restricted to direct callers, `false` if absent, or a failure result.
  */
 export function parseAllowedCallers(
   value: unknown,
@@ -110,25 +125,26 @@ export function parseAllowedCallers(
 }
 
 /**
- * The first key of a decoded wire object that is not in the documented field
- * set; `undefined` when every key is documented.
+ * Returns the first key in a decoded object not present in the allowed list, or `undefined`.
+ * Used across strict wire decoders to reject undocumented fields.
  *
- * Undocumented fields never vanish silently, so every strict wire sub-object
- * runs this and fails `invalid_request` naming the field it rejected.
+ * @param obj - Object to scan for unrecognized keys.
+ * @param allowed - List of documented keys permitted on the object.
+ * @returns The first unrecognized key found, or `undefined` if all keys are permitted.
  */
 export function firstUnknownKey(obj: Record<string, unknown>, allowed: readonly string[]): string | undefined {
   return Object.keys(obj).find((key) => !allowed.includes(key));
 }
 
 /**
- * Parses a generation control bounded to the IR range [0, 1].
+ * Parses a generation control bounded to the interval [0, 1].
+ * Absent values pass through as `undefined`. Values outside [0, 1] fail closed with
+ * the control's capability ID rather than being clamped.
  *
- * Absent passes through as undefined; a present but non-finite value (string,
- * null, NaN, ±Infinity) fails `invalid_request` — explicit null included,
- * because a sampling control has no meaningful null state and present-but-
- * unusable values must never be silently coerced to undefined; an out-of-range
- * value fails closed with the control's capability ID rather than ever being
- * clamped.
+ * @param field - Field name for error attribution.
+ * @param value - Raw wire value to validate.
+ * @param capabilityId - Capability ID associated with out-of-range rejections.
+ * @returns The parsed number, `undefined` if absent, or a failure result.
  */
 export function parseUnitIntervalControl(
   field: string,
@@ -147,9 +163,12 @@ export function parseUnitIntervalControl(
 }
 
 /**
- * Parses a positive safe integer control such as the output token limit.
- * Absent or explicit null passes through as undefined (the field is nullable on
- * its admitting schemas); any other non-integer value fails `invalid_request`.
+ * Parses a positive safe integer control, such as max output tokens.
+ * Absent and explicit null values pass through as `undefined`.
+ *
+ * @param field - Field name for error attribution.
+ * @param value - Raw wire value to validate.
+ * @returns The parsed positive integer, `undefined` if absent/null, or an `invalid_request` failure.
  */
 export function parsePositiveSafeInteger(field: string, value: unknown): Result<number | undefined, NormalizedFailure> {
   if (value === undefined || value === null) return ok(undefined);
@@ -159,7 +178,12 @@ export function parsePositiveSafeInteger(field: string, value: unknown): Result<
   return ok(value);
 }
 
-/** Parses the admitted `low|medium|high` verbosity literal; anything else fails `invalid_request`. */
+/**
+ * Parses the admitted `low | medium | high` verbosity literal.
+ *
+ * @param value - Raw wire value to validate.
+ * @returns The parsed Verbosity, `undefined` if absent/null, or an `invalid_request` failure.
+ */
 export function parseVerbosity(value: unknown): Result<Verbosity | undefined, NormalizedFailure> {
   if (value === undefined || value === null) return ok(undefined);
   if (typeof value === "string" && (VERBOSITY_VALUES as readonly string[]).includes(value)) {
@@ -169,10 +193,12 @@ export function parseVerbosity(value: unknown): Result<Verbosity | undefined, No
 }
 
 /**
- * Parses the common reasoning-effort literal. Admitted IR values pass through;
- * the C/R-native `none|minimal` literals fail closed with the
- * `reasoning-effort-common` capability; every other value (non-admitted string
- * or non-string) fails `invalid_request`.
+ * Parses the common reasoning-effort literal.
+ * Admitted IR values pass through; native-only `none | minimal` literals fail closed
+ * under `reasoning-effort-common`; other values fail as `invalid_request`.
+ *
+ * @param value - Raw wire value to validate.
+ * @returns Parsed ReasoningEffort, `undefined` if absent/null, or a failure result.
  */
 export function parseReasoningEffort(value: unknown): Result<ReasoningEffort | undefined, NormalizedFailure> {
   if (value === undefined || value === null) return ok(undefined);
@@ -191,9 +217,12 @@ export function parseReasoningEffort(value: unknown): Result<ReasoningEffort | u
 }
 
 /**
- * Parses stop-sequence entries shared by the Chat `stop` array and Messages
- * `stop_sequences`. Every entry must be a non-empty string; empty entries fail
- * `invalid_request`. Callers decide protocol-specific count limits.
+ * Parses stop sequence entries shared between Chat and Messages requests.
+ * Each entry must be a non-empty string.
+ *
+ * @param field - Field name for error attribution.
+ * @param entries - Raw stop sequence array.
+ * @returns Parsed array of stop strings, or an `invalid_request` failure.
  */
 export function parseStopSequenceEntries(
   field: string,
@@ -209,10 +238,13 @@ export function parseStopSequenceEntries(
 }
 
 /**
- * Parses a plain-string wire field against a closed literal set.
- * Absent passes through; membership violations fail `invalid_request`.
- * Generic over the literal type so callers get narrowed values back
- * without re-assertions.
+ * Parses a string wire field against an allowed literal set.
+ * Absent values pass through as `undefined`.
+ *
+ * @param field - Field name for error attribution.
+ * @param value - Raw wire value to validate.
+ * @param allowed - Set of admitted literal strings.
+ * @returns The narrowed literal, `undefined` if absent, or an `invalid_request` failure.
  */
 export function parseEnumLiteral<T extends string>(
   field: string,
@@ -226,7 +258,12 @@ export function parseEnumLiteral<T extends string>(
   return ok(value as T);
 }
 
-/** Narrows a validated stop list into the IR `NonEmpty<string>` shape. */
+/**
+ * Narrows a validated stop sequence array into the IR NonEmpty<string> shape.
+ *
+ * @param stops - Array of stop sequence strings.
+ * @returns NonEmpty stop array, or `undefined` if empty.
+ */
 export function asNonEmptyStopSequences(stops: readonly string[]): NonEmpty<string> | undefined {
   return stops.length > 0 ? (stops as unknown as NonEmpty<string>) : undefined;
 }

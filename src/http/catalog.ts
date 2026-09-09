@@ -1,20 +1,26 @@
+/**
+ * @fileoverview Authorized model catalog for model listing endpoints.
+ *
+ * Filters configured models and routes against the authenticated client's whitelist,
+ * projects entries into the target wire protocol's metadata representation, and returns
+ * a stably sorted list of authorized models.
+ */
+
 import type { AptusConfig, CatalogMetadata } from "../config/types.ts";
 import type { JsonObject, ModelListEntry, Protocol } from "../domain/contracts.ts";
 import type { NameIndex } from "../routing/resolution.ts";
 
 /**
- * Returns a sorted list of canonical model and route catalog entries authorized for the specified client key.
+ * Returns authorized catalog entries for an authenticated client, projected to target protocol metadata.
  *
- * Invariants:
- * - Only models and routes permitted by the client's `allow` whitelist are returned (or all if `allow` is omitted).
- * - Catalog entries are projected into the target protocol format (OpenAI vs Anthropic).
- * - Entries are sorted lexicographically by canonical `id`.
+ * Filters models and routes by client whitelist (or includes all if unconstrained), projects
+ * metadata for OpenAI or Anthropic listing schemas, and sorts alphabetically by model/route name.
  *
- * @param config - Active configuration snapshot.
- * @param nameIndex - Precomputed name and client allowlist index.
- * @param clientKeyName - Name of the authenticated client key.
- * @param protocol - Target protocol format for catalog metadata projection.
- * @returns Sorted array of {@link ModelListEntry} instances.
+ * @param config - Verified runtime configuration.
+ * @param nameIndex - Precomputed authorization index mapping client keys to allowed models.
+ * @param clientKeyName - Authenticated client key name.
+ * @param protocol - Target wire protocol for metadata shaping (`anthropic-messages`, `openai-chat`, etc.).
+ * @returns Lexicographically sorted array of authorized {@link ModelListEntry} objects.
  */
 export function authorizedCatalogEntries(
   config: AptusConfig,
@@ -31,7 +37,7 @@ export function authorizedCatalogEntries(
 }
 
 /**
- * Extracts protocol-specific metadata dictionary from multi-protocol catalog configuration.
+ * Projects internal multi-protocol catalog metadata into the target protocol's public schema.
  */
 function catalogMetadata(metadata: CatalogMetadata, protocol: Protocol): JsonObject {
   if (protocol === "anthropic-messages") {
@@ -43,5 +49,8 @@ function catalogMetadata(metadata: CatalogMetadata, protocol: Protocol): JsonObj
       max_output_tokens: metadata.anthropic.maxOutputTokens,
     };
   }
-  return { created: metadata.openai.created, owned_by: metadata.openai.ownedBy };
+  return {
+    created: metadata.openai.created,
+    owned_by: metadata.openai.ownedBy,
+  };
 }

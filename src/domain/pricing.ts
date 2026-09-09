@@ -1,51 +1,46 @@
+/**
+ * @fileoverview Exact decimal cost estimation for token usage.
+ *
+ * Calculates US Dollar costs from observed {@link Usage} counters and configured per-model
+ * {@link PricingConfig} rates. Uses fixed-point `bigint` arithmetic to avoid floating-point
+ * rounding errors, returning exact decimal strings for metrics and trace manifests.
+ */
+
 import type { Usage } from "./usage.ts";
 
 /**
- * A non-negative decimal USD amount per one million tokens, represented as text to preserve exact precision.
- *
- * Pattern: Non-negative integer or fixed-point decimal (e.g., `"2.50"`, `"0.15"`).
+ * Decimal string representing US dollars per one million tokens (e.g. `"2.50"`).
+ * Preserves exact decimal precision without IEEE-754 floating-point inaccuracies.
  */
 export type DecimalUsdPerMillion = string;
 
 /**
- * Pricing rates per one million tokens used for post-request cost accounting and telemetry.
+ * Per-model pricing configuration across input, output, and prompt cache tiers.
  */
 export interface PricingConfig {
-  /**
-   * Price in USD per 1,000,000 un-cached input tokens.
-   */
+  /** Cost per million uncached input tokens. */
   readonly inputUsdPerMillionTokens: DecimalUsdPerMillion;
 
-  /**
-   * Price in USD per 1,000,000 output tokens.
-   */
+  /** Cost per million output / completion tokens. */
   readonly outputUsdPerMillionTokens: DecimalUsdPerMillion;
 
-  /**
-   * Price in USD per 1,000,000 cached input read tokens, or `null` if the provider does not charge or discount for cache reads.
-   */
+  /** Cost per million cached input read tokens. Null if provider does not charge or discount cache reads. */
   readonly cacheReadUsdPerMillionTokens: DecimalUsdPerMillion | null;
 
-  /**
-   * Price in USD per 1,000,000 cached input write tokens, or `null` if the provider does not charge for cache writes.
-   */
+  /** Cost per million cached input write tokens. Null if provider does not charge for cache writes. */
   readonly cacheWriteUsdPerMillionTokens: DecimalUsdPerMillion | null;
 }
 
 /**
- * Computes an estimated request cost in USD based on observed token usage counts and configured pricing rates.
+ * Computes exact estimated USD cost for a completed request.
  *
- * @param pricing - Configured token unit pricing rates for the resolved model.
- * @param usage - Measured token usage counters reported by the provider or calculated from stream chunks.
- * @returns Exact decimal string representation of the total estimated cost in USD.
+ * Multiplies observed {@link Usage} token counts by the model's {@link PricingConfig}
+ * rates using fixed-point `bigint` arithmetic, yielding an exact decimal string without
+ * floating-point rounding. Missing counters or null cache rates evaluate to zero cost.
  *
- * @remarks
- * The computation uses exact decimal fixed-point integer arithmetic (BigInt), never IEEE-754
- * floating point, so the returned string is the exact decimal value with no scientific-notation
- * or rounding artifacts. Each rate is parsed into integer digits plus its decimal-place count;
- * the four terms are scaled to the widest decimal width, summed as integers, and the per-million
- * normalization is applied as a final power-of-ten division. If cache pricing fields are `null`
- * or usage counters are missing, their contribution is computed as zero.
+ * @param pricing - Configured model pricing rates per million tokens.
+ * @param usage - Observed token counts from the provider or stream accumulator.
+ * @returns Exact decimal dollar string without exponent notation (e.g. `"0.00425"`).
  */
 export function estimateCostUsd(pricing: PricingConfig, usage: Usage): string {
   const terms = [
@@ -56,26 +51,30 @@ export function estimateCostUsd(pricing: PricingConfig, usage: Usage): string {
   ];
   const maxDecimalPlaces = Math.max(...terms.map((term) => term.rate.decimalPlaces));
 
-  // Sum token * rate with every rate scaled to the widest decimal width, as integers.
+  // Scale every rate to the widest decimal width and sum integer products
   let numerator = 0n;
   for (const term of terms) {
     const scale = 10n ** BigInt(maxDecimalPlaces - term.rate.decimalPlaces);
     numerator += term.tokens * term.rate.integer * scale;
   }
 
-  // cost = numerator / 10^(maxDecimalPlaces + 6); the +6 is the per-million normalization.
+  // Denominator is 10^(maxDecimalPlaces + 6), where 10^6 accounts for per-million rate normalization
   return formatDecimal(numerator, maxDecimalPlaces + 6);
 }
 
-/** A rate parsed into its integer digits and decimal-place count. */
+/**
+ * Internal intermediate representation of a parsed decimal rate.
+ */
 interface ParsedRate {
+  /** Rate value converted to an integer with the decimal point removed. */
   readonly integer: bigint;
+  /** Number of decimal places in the original string. */
   readonly decimalPlaces: number;
 }
 
 /**
- * Parses a non-negative decimal rate string into integer digits and its decimal-place
- * count. A `null` cache price contributes zero.
+ * Parses a decimal rate string into an integer and decimal-place count.
+ * Returns a zero rate if the input is null.
  */
 function parseRate(rate: string | null): ParsedRate {
   if (rate === null) return { integer: 0n, decimalPlaces: 0 };
@@ -91,8 +90,8 @@ function parseRate(rate: string | null): ParsedRate {
 }
 
 /**
- * Formats `numerator / 10^denominatorPower` as a plain decimal string without
- * scientific notation or trailing fractional zeros.
+ * Formats a scaled integer numerator divided by 10^denominatorPower into a decimal string,
+ * omitting scientific notation and trimming trailing fractional zeros.
  */
 function formatDecimal(numerator: bigint, denominatorPower: number): string {
   const divisor = 10n ** BigInt(denominatorPower);

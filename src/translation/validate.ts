@@ -1,3 +1,16 @@
+/**
+ * @fileoverview Normative invariant validation for intermediate representations.
+ *
+ * Ingress decoders parse wire payloads into intermediate representations (IR),
+ * but semantic coherence requires additional verification. This module validates
+ * normative invariants for {@link validateIrRequest} and {@link validateIrOutcome}
+ * (bounded sampling controls, tool correlation, unique identifiers, and usage accounting)
+ * before capability preflight or provider egress.
+ *
+ * Checks are synchronous, pure, and IR-centric, consulting wire options only where
+ * mandated by protocol semantics (such as legacy JSON object mode mutual exclusion).
+ */
+
 import type { Result } from "../domain/contracts.ts";
 import { isPlainObject, jsonEqual } from "../domain/json.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
@@ -25,6 +38,7 @@ import {
 } from "./ir.ts";
 import { invalidRequest, ok } from "./result.ts";
 
+/** Admitted finish reasons for an {@link IrOutcome} checked during outcome validation. */
 const FINISH_REASONS = new Set(["stop", "length", "tool_calls", "refusal", "content_filter", "context_limit"]);
 
 // Admitted control literals are defined once beside the codec parsers so the
@@ -34,10 +48,23 @@ const VERBOSITY_LITERALS = new Set<string>(VERBOSITY_VALUES);
 const REASONING_EFFORT_LITERALS = new Set<string>(REASONING_EFFORT_VALUES);
 const GRAMMAR_SYNTAX_LITERALS = new Set<string>(GRAMMAR_SYNTAX_VALUES);
 
+/**
+ * Asserts that a value is a non-negative safe integer.
+ *
+ * @param n - The value to test.
+ * @returns True when `n` is a non-negative safe integer.
+ */
 function isNonNegativeSafeInteger(n: unknown): n is number {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 }
 
+/**
+ * Validates structured output constraints and mutual exclusion with legacy JSON mode.
+ *
+ * @param output - The optional output format descriptor to validate.
+ * @param requestWireOptions - Ingress wire options checked for conflicting legacy flags.
+ * @returns An ok result if valid, or an `invalid_request` failure.
+ */
 function validateOutputFormat(
   output: IrOutputFormat | undefined,
   requestWireOptions?: RequestWireOptions,
@@ -74,10 +101,14 @@ function validateOutputFormat(
 }
 
 /**
- * Validates a function tool call's authoritative argument text and optional
- * parsed object. Invalid JSON remains representable for OpenAI targets, but an
- * `arguments` field is legal only when the complete text parses to the same
- * non-null, non-array JSON object.
+ * Validates a function tool call's argument text and parsed object representation.
+ *
+ * When an `arguments` object is present, verifies that `argumentsText` parses
+ * to a deeply identical plain JSON object.
+ *
+ * @param call - The function tool call to inspect.
+ * @param context - Path prefix used in failure messages.
+ * @returns An ok result if arguments are consistent, or an `invalid_request` failure.
  */
 function validateFunctionCallArguments(
   call: Extract<IrToolCall, { type: "function" }>,
@@ -103,7 +134,13 @@ function validateFunctionCallArguments(
   return ok(undefined);
 }
 
-/** Validates one sampling control as a finite number within the IR range [0, 1]. */
+/**
+ * Validates that a numeric sampling parameter falls within the unit interval [0, 1].
+ *
+ * @param value - The numeric candidate to validate.
+ * @param fieldName - Target field name for diagnostic messages.
+ * @returns An ok result if within range, or an `invalid_request` failure.
+ */
 function validateUnitInterval(value: unknown, fieldName: string): Result<void, NormalizedFailure> {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
     return invalidRequest(`IrRequest.generation.${fieldName} must be a finite number within [0, 1]`);
@@ -112,10 +149,10 @@ function validateUnitInterval(value: unknown, fieldName: string): Result<void, N
 }
 
 /**
- * Validates the normative invariants of decoded generation controls: sampling
- * controls are bounded to the IR range [0, 1], output limits are positive safe
- * integers, stop sequences are non-empty strings, and the verbosity/effort
- * unions carry only their admitted literals.
+ * Validates generation controls including sampling parameters, token limits, and stop sequences.
+ *
+ * @param generation - Optional generation configuration on the request.
+ * @returns An ok result if valid, or an `invalid_request` failure.
  */
 function validateGenerationControls(generation: IrRequest["generation"]): Result<void, NormalizedFailure> {
   if (generation === undefined) return ok(undefined);
@@ -157,6 +194,13 @@ function validateGenerationControls(generation: IrRequest["generation"]): Result
   return ok(undefined);
 }
 
+/**
+ * Validates a binary payload source (HTTPS URL, base64 payload, or gateway file reference).
+ *
+ * @param source - The binary source descriptor.
+ * @param context - Diagnostic path prefix for failure messages.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateBinarySource(source: IrBinarySource, context: string): Result<void, NormalizedFailure> {
   if (source.type === "url") {
     if (!validateHttpsUrl(source.url)) {
@@ -182,6 +226,13 @@ function validateBinarySource(source: IrBinarySource, context: string): Result<v
   return invalidRequest(`${context}: unknown binary source type`);
 }
 
+/**
+ * Validates a document content source (inline text or binary attachment).
+ *
+ * @param source - The document source descriptor.
+ * @param context - Diagnostic path prefix for failure messages.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateDocumentSource(source: IrDocumentSource, context: string): Result<void, NormalizedFailure> {
   if (source.type === "text") {
     if (typeof source.text !== "string") {
@@ -192,6 +243,13 @@ function validateDocumentSource(source: IrDocumentSource, context: string): Resu
   return validateBinarySource(source, context);
 }
 
+/**
+ * Validates a user input part (text, image, or document).
+ *
+ * @param part - The input part to inspect.
+ * @param index - Zero-based index within the parent message part array.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateInputPart(part: IrInputPart, index: number): Result<void, NormalizedFailure> {
   if (part.type === "text") {
     if (typeof part.text !== "string") {
@@ -217,6 +275,13 @@ function validateInputPart(part: IrInputPart, index: number): Result<void, Norma
   return invalidRequest(`input part [${index}]: unknown input part type`);
 }
 
+/**
+ * Validates a citation source and optional quoted text.
+ *
+ * @param citation - The citation record to inspect.
+ * @param context - Diagnostic path prefix for failure messages.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateCitation(citation: IrCitation, context: string): Result<void, NormalizedFailure> {
   if (typeof citation !== "object" || citation === null) {
     return invalidRequest(`${context}: citation must be an object`);
@@ -258,6 +323,13 @@ function validateCitation(citation: IrCitation, context: string): Result<void, N
   return invalidRequest(`${context}: unknown citation source type`);
 }
 
+/**
+ * Validates an assistant message part (text with optional citations or refusal).
+ *
+ * @param part - The assistant part to validate.
+ * @param index - Zero-based index within the assistant message content array.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateAssistantPart(part: IrAssistantPart, index: number): Result<void, NormalizedFailure> {
   if (part.type === "text") {
     if (typeof part.text !== "string") {
@@ -286,6 +358,14 @@ function validateAssistantPart(part: IrAssistantPart, index: number): Result<voi
   return invalidRequest(`assistant part [${index}]: unknown assistant part type`);
 }
 
+/**
+ * Validates a single transcript item (instruction, user/assistant message, tool call, or tool result).
+ *
+ * @param item - The transcript item to validate.
+ * @param index - Zero-based index within the request items array.
+ * @param requestWireOptions - Optional ingress options checked for provider file attachments.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateItem(
   item: IrItem,
   index: number,
@@ -387,9 +467,10 @@ function validateItem(
 }
 
 /**
- * Validates tool definitions: names must be non-empty and unique, function
- * tools must carry a JSON object schema, and custom tool formats must be text
- * or a grammar with a recognized syntax and non-empty definition.
+ * Validates tool definitions, enforcing unique non-empty names and well-formed schemas or grammars.
+ *
+ * @param tools - Array of tool definitions to validate.
+ * @returns An ok result if all tools are valid, or an `invalid_request` failure.
  */
 function validateTools(tools: readonly IrTool[]): Result<void, NormalizedFailure> {
   const seenNames = new Set<string>();
@@ -426,9 +507,11 @@ function validateTools(tools: readonly IrTool[]): Result<void, NormalizedFailure
 }
 
 /**
- * Validates tool choice against the tool list: `required` and `named` require
- * at least one tool definition, and `named` must name a declared tool (tool
- * names are unique, so "declared" and "exactly one" are the same condition).
+ * Validates tool choice configuration against available tool declarations.
+ *
+ * @param toolChoice - The tool choice directive.
+ * @param tools - Declared tools available in the request.
+ * @returns An ok result if compatible, or an `invalid_request` failure.
  */
 function validateToolChoice(
   toolChoice: IrToolChoice,
@@ -448,9 +531,12 @@ function validateToolChoice(
 }
 
 /**
- * Validates tool transcript correlation in one ordered pass: every tool result
- * must reference a preceding call exactly once, and call IDs are unique across
- * function and custom calls alike.
+ * Validates tool call and result ordering and correlation across the transcript.
+ *
+ * Ensures every tool result corresponds to a preceding call and each call ID is unique.
+ *
+ * @param items - Request transcript items in temporal order.
+ * @returns An ok result if correlated, or an `invalid_request` failure.
  */
 function validateToolTranscript(items: readonly IrItem[]): Result<void, NormalizedFailure> {
   const declaredCallIds = new Set<string>();
@@ -479,14 +565,14 @@ function validateToolTranscript(items: readonly IrItem[]): Result<void, Normaliz
 }
 
 /**
- * Validates invariant properties of an {@link IrRequest}.
+ * Validates normative structural and semantic invariants of an {@link IrRequest}.
  *
- * Enforces normative request invariants:
- * - Items must be non-empty.
- * - At least one user or assistant message must be present (instruction-only is rejected).
- * - Source order and content parts must satisfy semantic constraints.
- * - Tool definitions, tool choice, and tool call/result correlation must be well-formed.
- * - Delivery mode must be either "complete" or "stream".
+ * Enforces non-empty model identifier, valid delivery mode, presence of at least one
+ * user or assistant message, bounded generation controls, and coherent tool definitions.
+ *
+ * @param req - Decoded intermediate request representation.
+ * @param requestWireOptions - Optional ingress wire options for contextual validation.
+ * @returns An ok result if the request satisfies all invariants, or an `invalid_request` failure.
  */
 export function validateIrRequest(
   req: IrRequest,
@@ -560,6 +646,13 @@ export function validateIrRequest(
   return ok(undefined);
 }
 
+/**
+ * Validates an outcome output part (text, refusal, or tool call), requiring a non-empty `partId`.
+ *
+ * @param part - The output part to validate.
+ * @param index - Zero-based index within the outcome parts array.
+ * @returns An ok result if well-formed, or an `invalid_request` failure.
+ */
 function validateOutputPart(part: IrOutputPart, index: number): Result<void, NormalizedFailure> {
   if (typeof part.partId !== "string" || part.partId.trim() === "") {
     return invalidRequest(`output part [${index}]: partId must be a non-empty string`);
@@ -614,6 +707,15 @@ function validateOutputPart(part: IrOutputPart, index: number): Result<void, Nor
   return invalidRequest(`output part [${index}]: unknown output part type`);
 }
 
+/**
+ * Validates token accounting metrics and relationship invariants on an {@link IrUsage}.
+ *
+ * Ensures all token counters are non-negative safe integers and that total counts
+ * are consistent with individual cached input and output totals.
+ *
+ * @param usage - The token usage record to validate.
+ * @returns An ok result if counters are consistent, or an `invalid_request` failure.
+ */
 export function validateUsage(usage: IrUsage): Result<void, NormalizedFailure> {
   if (!isNonNegativeSafeInteger(usage.input)) {
     return invalidRequest("IrUsage.input must be a non-negative safe integer");
@@ -647,13 +749,13 @@ export function validateUsage(usage: IrUsage): Result<void, NormalizedFailure> {
 }
 
 /**
- * Validates invariant properties of an {@link IrOutcome}.
+ * Validates normative structural and accounting invariants of an {@link IrOutcome}.
  *
- * Enforces normative outcome and accounting invariants:
- * - `responseId` and `model` must be non-empty strings.
- * - `parts` preserves semantic order and may be empty; part IDs must be unique.
- * - `finish.reason` must belong to the normative finish reason union.
- * - `usage` counters must be non-negative finite safe integers.
+ * Enforces non-empty identifiers, unique part IDs and call IDs, an admitted finish
+ * reason, and consistent token usage accounting.
+ *
+ * @param out - Decoded intermediate outcome representation.
+ * @returns An ok result if the outcome satisfies all invariants, or an `invalid_request` failure.
  */
 export function validateIrOutcome(out: IrOutcome): Result<void, NormalizedFailure> {
   if (typeof out.responseId !== "string" || out.responseId.trim() === "") {

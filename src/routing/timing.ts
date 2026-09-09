@@ -1,69 +1,65 @@
 /**
- * Timing, sleep, and randomness abstractions for deterministic gateway testing.
+ * @fileoverview
+ * Timing, sleeping, and randomness abstractions for deterministic gateway execution.
  *
- * Exposes injectable {@link Clock}, {@link Sleeper}, and {@link RandomSource}
- * seams with production system defaults. Test doubles live in `test/helpers/test-timing.ts`.
+ * Exposes injectable {@link Clock}, {@link Sleeper}, and {@link RandomSource} contracts
+ * along with their production system implementations (`systemClock`, `systemSleeper`, `systemRandomSource`).
+ * Used across the routing engine for monotonic duration tracking, key cooldown sleeps,
+ * deadline enforcement, and backoff jitter.
  */
 
 /**
- * Clock interface providing monotonic time for deadlines/cooldowns and wall-clock time for logs/traces.
+ * Clock abstraction providing monotonic duration tracking and wall-clock timestamps.
  */
 export interface Clock {
-  /**
-   * Returns the current monotonic time in milliseconds.
-   *
-   * Monotonic time is used exclusively for deadlines, cooldown intervals, attempt durations, and backoff.
-   */
+  /** Returns the current monotonic timestamp in milliseconds for elapsed duration measurement. */
   nowMonotonicMs(): number;
 
-  /**
-   * Returns the current wall-clock date/time.
-   *
-   * Wall-clock time is used exclusively for human-facing artifacts such as ISO directory timestamps.
-   */
+  /** Returns the current wall-clock Date for directory naming and human-facing timestamps. */
   nowWall(): Date;
 }
 
 /**
- * Sleeper interface providing an abortable sleep operation.
+ * Abortable sleep interface for key cooldowns and backoff delays.
  */
 export interface Sleeper {
   /**
-   * Suspends execution for the specified duration in milliseconds, or aborts if the signal fires.
+   * Suspends execution for the specified duration, aborting early if the signal triggers.
    *
    * @param delayMs - Duration in milliseconds to sleep.
-   * @param signal - Optional cancellation signal.
-   * @returns A promise that resolves when the timer expires, or rejects if aborted.
+   * @param signal - Optional abort signal to cancel the sleep early.
    */
   sleep(delayMs: number, signal?: AbortSignal): Promise<void>;
 }
 
 /**
- * Source of uniform pseudo-random numbers in `[0, 1)`.
+ * Pseudo-random number generator seam for retry jitter calculations.
  */
 export interface RandomSource {
-  /**
-   * Returns a uniform pseudo-random number in the half-open interval `[0, 1)`.
-   */
+  /** Returns a pseudo-random floating point number in the range `[0, 1)`. */
   next(): number;
 }
 
-/**
- * Default production clock using standard Node.js/browser runtime globals.
- */
+/** Production {@link Clock} implementation backed by standard runtime APIs. */
 export const systemClock: Clock = {
+  /** Returns high-resolution monotonic time via `performance.now()`. */
   nowMonotonicMs(): number {
     return performance.now();
   },
+  /** Returns the current host Date via `new Date()`. */
   nowWall(): Date {
     return new Date();
   },
 };
 
-/**
- * Default production sleeper using `setTimeout` with abort signal listener support.
- */
+/** Production {@link Sleeper} implementation using `setTimeout` and abort listeners. */
 export const systemSleeper: Sleeper = {
+  /**
+   * Suspends execution for `delayMs` milliseconds, cleaning up timers upon abort.
+   *
+   * @param delayMs - Delay duration in milliseconds.
+   * @param signal - Optional cancellation signal.
+   */
   sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) {
       return Promise.reject(signal.reason ?? new Error("aborted"));
@@ -94,10 +90,9 @@ export const systemSleeper: Sleeper = {
   },
 };
 
-/**
- * Default production random source using `Math.random()`.
- */
+/** Production {@link RandomSource} implementation backed by `Math.random()`. */
 export const systemRandomSource: RandomSource = {
+  /** Returns uniform pseudo-random number via `Math.random()`. */
   next(): number {
     return Math.random();
   },

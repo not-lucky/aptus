@@ -1,3 +1,12 @@
+/**
+ * @fileoverview Graceful process shutdown coordination.
+ *
+ * Coordinates orderly server termination when SIGINT or SIGTERM is received: marks the runtime
+ * as draining, stops accepting new client connections, drains in-flight requests within a
+ * bounded window, awaits terminal telemetry finalization, stops retention schedulers, and
+ * closes the operations listener last.
+ */
+
 import type { Server } from "../http/listeners.ts";
 import type { RequestCancellationRegistry } from "../http/request-cancellation.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
@@ -5,11 +14,11 @@ import type { TraceRetentionScheduler } from "../observability/trace/scheduler.t
 import { type Clock, systemClock } from "../routing/timing.ts";
 
 /**
- * Controller interface coordinating listener drain and forced abort during process shutdown.
+ * Controller coordinating listener drain and forced abort during process shutdown.
  */
 export interface GracefulShutdown {
   /**
-   * Initiates the graceful shutdown sequence.
+   * Initiates the graceful shutdown sequence. Safe for concurrent or multiple invocations.
    *
    * @returns Promise that resolves when all listeners and connections have closed.
    */
@@ -52,28 +61,19 @@ export interface GracefulShutdownOptions {
 /**
  * Creates the graceful shutdown coordinator.
  *
- * Sequence:
- * 1. Emits `shutdownStarted` log/metric and invokes `onDraining()` to mark runtime draining.
+ * Execution stages:
+ * 1. Emits `shutdownStarted` log/metric and invokes `onDraining()` to fail health readiness probes.
  * 2. Stops accepting new client connections and closes idle keep-alive sockets.
- * 3. Starts a timeout timer for `drainMs` milliseconds.
- * 4. Waits for in-flight requests on the client listener to complete normally.
- * 5. If `drainMs` expires before in-flight requests finish (or the public
- *    `abort()` is invoked via a second signal), records the count of requests
- *    still registered, triggers aborts, and calls `closeAllConnections()`.
- * 6. Awaits in-flight request finalizations (bounded by grace period) to write trace terminals.
- * 7. Stops the retention scheduler.
- * 8. Closes the operations listener last, ensuring health and metrics remain scrapable throughout the drain.
- * 9. Invokes `onShutdown()` to clean up background resources (e.g. Undici dispatcher).
- * 10. Emits `shutdownCompleted` log with the drained/aborted request split.
+ * 3. Starts a timer for the `drainMs` grace window.
+ * 4. Awaits normal completion of in-flight client requests.
+ * 5. If `drainMs` expires or `abort()` is triggered by a second signal, forces request cancellations.
+ * 6. Awaits request terminal finalizations to ensure trace manifests are written.
+ * 7. Stops trace retention schedulers.
+ * 8. Closes the operations listener last, keeping `/health` and `/metrics` scrapable throughout drain.
+ * 9. Cleans up background resources (e.g. Undici dispatcher) via `onShutdown()`.
+ * 10. Emits `shutdownCompleted` telemetry recording the drained versus aborted request counts.
  *
- * `finish(forceAbort)` is single-fire: whichever of the timer, the second
- * signal, or the natural client-drain path reaches it first wins. The
- * `aborted` count is captured from the cancellation registry at the instant a
- * forced abort fires, *before* the registered requests are aborted (they
- * unregister asynchronously), so the telemetry distinguishes requests that
- * completed within the drain window from requests that were cut off.
- *
- * @param options - Shutdown parameters and server handles.
+ * @param options - Shutdown configuration and server handles.
  * @returns A {@link GracefulShutdown} controller.
  */
 export function createGracefulShutdown(options: GracefulShutdownOptions): GracefulShutdown {
@@ -87,16 +87,15 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): Gracef
       shutdownPromise = (async () => {
         const startedMs = clock.nowMonotonicMs();
         const initialActiveRequests = options.cancellations?.size() ?? 0;
-        // Cumulative registrations at shutdown start, so requests admitted in the
-        // gap before `client.close()` takes effect are counted in the drained split.
+        // Cumulative registrations at shutdown start, capturing requests admitted in the gap
+        // before client.close() completes.
         const totalRegisteredAtStart = options.cancellations?.registeredCount() ?? 0;
 
-        // Step 1: Emit shutdown started and mark runtime as draining so readiness
-        // probes fail immediately. The observer already swallows its own errors.
+        // Step 1: Emit shutdown started and mark runtime as draining
         options.observer?.shutdownStarted({ activeRequests: initialActiveRequests, drainMs: options.drainMs });
         options.onDraining();
 
-        // Step 2: Stop accepting new client connections and sever idle keep-alives.
+        // Step 2: Stop accepting new client connections and sever idle keep-alives
         const closed = Promise.withResolvers<void>();
         options.client.close(() => closed.resolve());
         options.client.closeIdleConnections();
@@ -109,44 +108,34 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): Gracef
           settled = true;
           clearTimeout(timer);
           if (!forceAbort) return;
-          // Capture the requests still registered at the moment of forced abort
-          // (before aborting them) so the drained/aborted split is exact.
+          // Capture requests still registered at the moment of forced abort
           abortedCount = options.cancellations?.size() ?? 0;
-          // Force-abort any remaining active requests and forcibly close open sockets.
           options.shutdownController?.abort("shutdown");
           options.onAbortActive();
           options.client.closeAllConnections();
         };
-        // Step 3: Set timer for maximum drain grace period. Firing it forces a
-        // deadline abort; a natural client drain (`finish(false)`) clears it.
+
+        // Step 3: Timer for maximum drain grace period
         timer = setTimeout(() => finish(true), options.drainMs);
         force = () => finish(true);
 
-        // Step 4: Wait for client server to finish draining. When every request
-        // completed on its own, `closed.promise` resolves and `finish(false)`
-        // finalizes the drain without aborting anything (abortedCount stays 0).
-        // In the forced-abort path, `closeAllConnections()` itself resolves
-        // `closed.promise`, so this second call is a no-op on the settled flag.
+        // Step 4: Wait for client server to finish draining
         await closed.promise;
         finish(false);
 
-        // Step 5: Await in-flight request terminal finalizations to settle.
+        // Step 5: Await in-flight request terminal finalizations to settle
         await options.cancellations?.awaitSettled(200);
 
-        // Step 6: Stop retention timer after Trace sessions finish and before operations closes.
+        // Step 6: Stop retention timer after trace sessions finish and before operations closes
         options.retentionScheduler?.stop();
 
-        // Step 7: Close operations server last.
+        // Step 7: Close operations server last
         await closeOperations(options.operations);
 
-        // Step 8: Invoke shutdown cleanup callback.
+        // Step 8: Invoke shutdown cleanup callback
         await options.onShutdown?.();
 
-        // Step 9: Emit shutdown completed telemetry. `abortedCount` is already
-        // the exact forced-abort count (0 on the natural-drain path). The drained
-        // count is every request that was ever active during the shutdown window
-        // (initial plus any admitted before the listener stopped accepting) minus
-        // the ones cut off by the forced abort.
+        // Step 9: Emit shutdown completed telemetry
         const totalRegisteredAtFinish = options.cancellations?.registeredCount() ?? 0;
         const lateAdmitted = Math.max(0, totalRegisteredAtFinish - totalRegisteredAtStart);
         const drainedCount = Math.max(0, initialActiveRequests + lateAdmitted - abortedCount);
@@ -168,6 +157,11 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): Gracef
 
 /**
  * Closes the operations HTTP server instance.
+ *
+ * No-op if the server is not currently listening.
+ *
+ * @param server - The operations server to close.
+ * @returns Promise that resolves when the server closes.
  */
 function closeOperations(server: Server): Promise<void> {
   if (!server.listening) return Promise.resolve();

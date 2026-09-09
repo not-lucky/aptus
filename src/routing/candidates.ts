@@ -1,50 +1,67 @@
+/**
+ * @fileoverview
+ * Ordered candidate resolution and descriptor generation for routing dispatch.
+ *
+ * Expands canonical model and route names into ordered {@link CandidateDescriptor} sequences.
+ * Connects model configuration, provider configuration, live key pools, native body mutations,
+ * and route retry/fallback policies ready for candidate execution loops.
+ */
+
 import type { ModelConfig, ProviderConfig, RouteConfig } from "../config/types.ts";
 import type { KeyPool, NativeMutations } from "../domain/contracts.ts";
 import type { IrFailureCategory } from "../domain/operations.ts";
 
 /**
- * One resolved candidate (a model, its provider, and that provider's key pool)
- * in route order, carrying the route's retry/fallback policies.
+ * Descriptor pairing a target model with its provider, live key pool, and route policies.
  */
 export interface CandidateDescriptor {
+  /** Zero-based position of the candidate in the resolved route sequence. */
   readonly index: number;
+  /** Model configuration specifying upstream model name, pricing, and mutations. */
   readonly model: ModelConfig;
+  /** Provider configuration specifying endpoint URL, protocol, and key strategy. */
   readonly provider: ProviderConfig;
+  /** Live key pool managing credentials and cooldown tracking for this provider. */
   readonly pool: KeyPool;
+  /** Normalized native body mutation dictionaries (defaults, extraBody, overrides). */
   readonly mutations: NativeMutations;
+  /** Failure categories that permit a same-candidate retry. */
   readonly retryOn: readonly IrFailureCategory[];
+  /** Failure categories that permit fallback to the next candidate in route order. */
   readonly fallbackOn: readonly IrFailureCategory[];
 }
 
 /**
- * Provider configuration paired with its process-local key pool.
+ * Provider configuration entry paired with its active key pool.
  */
 export interface ProviderEntry {
+  /** Static provider configuration. */
   readonly config: ProviderConfig;
+  /** Active key pool for this provider. */
   readonly pool: KeyPool;
 }
 
 /**
- * The precomputed indexes candidate resolution reads from.
+ * Precomputed indexes mapping canonical model, route, and provider names.
  */
 export interface CandidateIndexes {
+  /** Map of canonical model names to their configuration. */
   readonly modelsByName: ReadonlyMap<string, ModelConfig>;
+  /** Map of canonical route names to their configuration. */
   readonly routesByName: ReadonlyMap<string, RouteConfig>;
+  /** Map of provider names to their configuration and active key pool. */
   readonly providers: ReadonlyMap<string, ProviderEntry>;
 }
 
 /**
- * Resolves a canonical public name into an ordered list of candidate descriptors.
+ * Resolves a canonical public name into an ordered sequence of candidate descriptors.
  *
- * A public model resolves to exactly one candidate with no retry or fallback
- * policy; a route resolves to its configured candidates in order, each carrying
- * the route's `retryOn`/`fallbackOn` categories. Names referencing unknown
- * models, providers, or route members resolve to fewer (possibly zero)
- * candidates.
+ * Models resolve to a single candidate descriptor with empty retry/fallback policies,
+ * while routes resolve to their constituent candidates in configured order.
  *
- * @param canonicalName - Authorized canonical public model or route name.
- * @param indexes - Configuration indexes built once at gateway construction.
- * @returns The ordered candidate descriptors.
+ * @param canonicalName - Canonical public model or route name.
+ * @param indexes - Precomputed configuration and provider pool indexes.
+ * @returns Ordered array of candidate descriptors, or an empty array if unresolvable.
  */
 export function resolveCandidates(canonicalName: string, indexes: CandidateIndexes): readonly CandidateDescriptor[] {
   const model = indexes.modelsByName.get(canonicalName);
@@ -84,6 +101,12 @@ export function resolveCandidates(canonicalName: string, indexes: CandidateIndex
   return candidates;
 }
 
+/**
+ * Normalizes optional model body mutation fields into non-null dictionaries.
+ *
+ * @param model - Model configuration containing optional mutation records.
+ * @returns Complete {@link NativeMutations} object with non-null dictionaries.
+ */
 function mutationsOf(model: ModelConfig): NativeMutations {
   return {
     defaults: model.defaults ?? {},

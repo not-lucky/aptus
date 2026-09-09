@@ -1,26 +1,30 @@
+/**
+ * @fileoverview Request lifecycle telemetry: structured logs and Prometheus metrics.
+ *
+ * Provides the central funnel for recording request events, routing decisions, and
+ * terminal outcomes as structured JSON logs and bounded Prometheus metrics. Telemetry
+ * errors are swallowed so observability failures never break live traffic.
+ *
+ * Implements a dual interface: the canonical {@link LifecycleObserver} event stream
+ * for tests and minimal subscribers, and {@link GatewayObservability} named helpers
+ * carrying rich metric-label context (provider, model, protocol) for production telemetry.
+ */
+
 import type { Logger } from "@logtape/logtape";
 import type { JsonValue, LifecycleEvent, LifecycleObserver, Protocol } from "../domain/contracts.ts";
 import type { IrFailureCategory } from "../domain/operations.ts";
 import type { MetricsRegistry } from "./metrics.ts";
 
 /**
- * A bounded provider attempt result: `success`, one of the 13 canonical
- * failure categories, or `client_cancelled`.
+ * Bounded provider attempt result: `success`, one of the 13 canonical failure categories, or `client_cancelled`.
  */
 export type AttemptResult = "success" | IrFailureCategory | "client_cancelled";
 
 /**
- * Request-scoped telemetry helpers used by the Gateway (and bootstrap) in
- * addition to the canonical {@link LifecycleObserver}.
+ * Request-scoped telemetry helpers used by the gateway and bootstrap runners.
  *
- * The Gateway emits every documented {@link LifecycleEvent} through
- * {@link LifecycleObserver.observe}, and additionally calls one full-context
- * named helper per event. The named helpers carry the metric-label facts the
- * minimal event payloads omit (provider, public name, target protocol), so
- * this production observer records every log and metric through them and
- * leaves `observe` as a no-op. The canonical `observe` stream remains the
- * documented routing-fact contract for tests and future observers; the two
- * channels are two views of the same transitions, never two emission points.
+ * Extends {@link LifecycleObserver} with full-context named helpers carrying label
+ * facts (provider, public name, protocol) omitted by minimal event payloads.
  */
 export interface GatewayObservability extends LifecycleObserver {
   /** Request admitted: in-flight gauge + `aptus.request.ingress`. */
@@ -109,79 +113,116 @@ export interface GatewayObservability extends LifecycleObserver {
 }
 
 /**
- * Fields for a scheduled retry.
+ * Fields for recording a scheduled candidate retry.
  */
 export interface RetryScheduledFields {
+  /** Unique gateway request identifier. */
   readonly aptusRequestId: string;
+  /** Sequential attempt number being retried. */
   readonly attemptNumber: number;
+  /** Provider identifier being retried. */
   readonly provider: string;
+  /** Target protocol for the upstream attempt. */
   readonly targetProtocol: Protocol;
+  /** Normalized failure category that triggered the retry. */
   readonly category: IrFailureCategory;
-  /**
-   * Cooldown scheduled on the failed key (base + jitter, capped). This equals
-   * the actual wait only when no other enabled key is available to rotate to;
-   * with key rotation the retry proceeds immediately despite a non-zero value.
-   */
+  /** Cooldown delay in milliseconds scheduled on the failed key before reuse. */
   readonly delayMs: number;
 }
 
 /**
- * Fields for a selected candidate fallback.
+ * Fields for recording a route candidate fallback transition.
  */
 export interface FallbackSelectedFields {
+  /** Unique gateway request identifier. */
   readonly aptusRequestId: string;
+  /** Ingress protocol spoken by the client. */
   readonly endpointProtocol: Protocol;
+  /** Target protocol of the fallback provider. */
   readonly targetProtocol: Protocol;
+  /** Canonical public route or model name requested. */
   readonly publicName: string;
+  /** Route candidate index transitioning from. */
   readonly fromCandidateIndex: number;
+  /** Route candidate index transitioning to. */
   readonly toCandidateIndex: number;
+  /** Failure category that prompted the fallback transition. */
   readonly category: IrFailureCategory;
 }
 
 /**
- * Fields for a candidate preflight skip.
+ * Fields for recording a candidate skipped during preflight routing checks.
  */
 export interface CandidateSkipFields {
+  /** Unique gateway request identifier. */
   readonly aptusRequestId: string;
+  /** Ingress protocol spoken by the client. */
   readonly endpointProtocol: Protocol;
+  /** Canonical public model name requested. */
   readonly canonicalPublicName: string;
+  /** Route list index of the skipped candidate. */
   readonly candidateIndex: number;
+  /** Provider identifier of the candidate. */
   readonly provider: string;
+  /** Target protocol configured for this candidate. */
   readonly targetProtocol: Protocol;
+  /** Failure category explaining why the candidate was skipped. */
   readonly category: IrFailureCategory;
+  /** Optional capability name that was missing or unsupported. */
   readonly capability?: string;
 }
 
 /**
- * Fields for a completed provider attempt (response head or transport failure).
+ * Fields for recording a completed provider attempt.
  */
 export interface AttemptCompletedFields {
+  /** Unique gateway request identifier. */
   readonly aptusRequestId: string;
+  /** Sequential attempt number for this request. */
   readonly attemptNumber: number;
+  /** Upstream provider identifier dispatched to. */
   readonly provider: string;
+  /** Protocol used for the upstream attempt. */
   readonly targetProtocol: Protocol;
+  /** Upstream HTTP status code, or undefined for transport-level errors. */
   readonly status: number | undefined;
+  /** Bounded attempt outcome result. */
   readonly attemptResult: AttemptResult;
+  /** Whether the request was dispatched in streaming mode. */
   readonly stream: boolean;
+  /** Wall-clock duration of the attempt in milliseconds. */
   readonly durationMs: number;
 }
 
 /**
- * Fields for a completed request (any terminal outcome).
+ * Terminal telemetry fields summarizing an entire client request lifecycle.
  */
 export interface CompletedFields {
+  /** Unique gateway request identifier. */
   readonly aptusRequestId: string;
+  /** Ingress protocol spoken by the client. */
   readonly endpointProtocol: Protocol;
+  /** Upstream target protocol reached, or "unknown" if terminated before dispatch. */
   readonly targetProtocol: Protocol | "unknown";
+  /** Upstream provider used, or "none" if terminated before provider selection. */
   readonly provider: string;
+  /** Canonical public model name requested. */
   readonly canonicalPublicName: string;
+  /** High-level terminal outcome category. */
   readonly outcomeCategory: "complete" | "failed" | "cancelled";
+  /** Final HTTP response status code sent to the client. */
   readonly status: number;
+  /** Total number of upstream dispatch attempts made. */
   readonly attempts: number;
+  /** Whether the client requested streaming responses. */
   readonly stream: boolean;
+  /** Total end-to-end request duration in milliseconds. */
   readonly durationMs: number;
+  /** Time from ingress admission to first response byte sent, if observed. */
   readonly firstByteMs?: number;
+  /** Parsed token usage statistics, if reported by the provider. */
   readonly usage?: JsonValue;
+  /** Estimated request cost in USD formatted string, if pricing was calculated. */
   readonly estimatedCostUsd?: string;
 }
 
@@ -189,7 +230,7 @@ export interface CompletedFields {
  * Initialization options for the lifecycle observer.
  */
 export interface LifecycleObserverOptions {
-  /** The shared `"aptus"` LogTape logger. */
+  /** The shared LogTape logger instance. */
   readonly logger: Logger;
   /** The single Prometheus metrics registry. */
   readonly metrics: MetricsRegistry;
@@ -200,14 +241,13 @@ export interface LifecycleObserverOptions {
 }
 
 /**
- * Creates the {@link LifecycleObserver} plus the request-scoped
- * {@link GatewayObservability} helpers.
+ * Creates a lifecycle observer combining canonical events and named telemetry helpers.
  *
- * The observer never imports `src/config` or `src/http` and cannot affect
- * routing decisions. It only emits logs and metric updates.
+ * All recording methods are synchronous and safe against exceptions, ensuring telemetry
+ * failures never interrupt live request execution.
  *
- * @param options - Logger, metrics registry, and enablement flags.
- * @returns The combined telemetry observer.
+ * @param options - Logger, metrics registry, and channel enablement configuration.
+ * @returns Combined {@link LifecycleObserver} and {@link GatewayObservability} instance.
  */
 export function createLifecycleObserver(options: LifecycleObserverOptions): LifecycleObserver & GatewayObservability {
   const { logger, metrics, loggingEnabled, metricsEnabled } = options;
@@ -532,12 +572,16 @@ export function createLifecycleObserver(options: LifecycleObserverOptions): Life
 }
 
 /**
- * Records the accepted-request HTTP counter plus the duration and TTFF
- * histograms. Shared by `completed` (which additionally logs
- * `aptus.request.completed`) and `httpTerminal` (pre-Gateway failures that
- * must not emit the completion log).
+ * Records accepted-request HTTP metrics including count, duration, and time-to-first-byte.
+ *
+ * @param fields - Terminal completed fields for the request.
+ * @param metricsEnabled - Whether metric emission is enabled.
+ * @param metrics - Metrics registry to update.
  */
 function recordHttpTerminal(fields: CompletedFields, metricsEnabled: boolean, metrics: MetricsRegistry): void {
+  // The endpoint label is derived from the client protocol because the
+  // metrics domain is endpoint-shaped; the mapping matches the three create
+  // endpoints defined in the client app.
   if (!metricsEnabled) return;
   const endpoint =
     fields.endpointProtocol === "openai-chat"

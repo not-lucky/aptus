@@ -1,30 +1,36 @@
 /**
- * Process-local concurrency limiter for gating in-flight client requests.
+ * @fileoverview Process-local limit on the number of client requests admitted concurrently.
+ *
+ * Provides concurrency control for HTTP admission (authentication, body parsing, model
+ * extraction, and name resolution) to prevent bursts of client requests from exhausting
+ * process memory or file descriptors before dispatch.
+ */
+
+/**
+ * Concurrency limiter guarding in-flight admission capacity.
  */
 export interface AdmissionLimiter {
   /**
-   * Attempts to acquire a concurrency lease.
+   * Attempts to acquire one admission concurrency lease.
    *
-   * @returns An idempotent release function if a slot was available; otherwise `undefined` if limit reached.
+   * @returns An idempotent release function if capacity was available, or `undefined` if saturated.
    */
   tryAcquire(): (() => void) | undefined;
 }
 
 /**
- * Creates an in-memory admission concurrency limiter with a fixed positive capacity.
+ * Creates a process-local admission limiter with a fixed capacity ceiling.
  *
- * @param limit - Maximum number of simultaneous active requests permitted.
- * @returns An {@link AdmissionLimiter} instance.
+ * @param limit - Maximum number of concurrent requests allowed in admission.
+ * @returns An {@link AdmissionLimiter} tracking leases in a closure.
  */
 export function createAdmissionLimiter(limit: number): AdmissionLimiter {
   let active = 0;
   return {
     tryAcquire() {
-      // Reject if max in-flight capacity is reached.
       if (active >= limit) return undefined;
       active++;
       let released = false;
-      // Return an idempotent release closure that decrements active count exactly once.
       return () => {
         if (released) return;
         released = true;

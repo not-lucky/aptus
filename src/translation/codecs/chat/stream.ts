@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Streaming codec for the OpenAI Chat Completions protocol.
+ *
+ * Provides request decoding/encoding, provider SSE stream decoding, and client SSE stream
+ * encoding for `openai-chat`. Decodes incoming SSE chunks into semantic IR stream events
+ * and serializes IR events back into Chat chunk frames, including `include_usage` synthesis.
+ *
+ * Reuses complete-path request parsing through {@link parseChatRequestBody} for semantic parity.
+ * Delegates part lifecycle, chunk correlation, and argument buffering to {@link StreamShapeTracker}.
+ */
+
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import { isPlainObject } from "../../../domain/json.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
@@ -25,13 +36,17 @@ import { chatUsageBody, parseChatUsage } from "../shared/usage.ts";
 import { captureOutcomeWireFacts, chatOutcomeWireFields, chatResponsesRequestFields } from "../shared/wire-options.ts";
 import { parseChatRequestBody } from "./ingress.ts";
 /**
- * Decodes a streaming OpenAI Chat Completions request.
+ * Decodes streaming OpenAI Chat Completions requests into IR requests and stream options.
  *
- * Capability rejections, wire-only sidecar capture, transcript items, and
- * generation controls are shared verbatim with the complete-path ingress; this
- * decoder adds only the stream-specific `stream_options` handling.
+ * Extends the shared Chat request grammar with stream-specific `stream_options` validation.
  */
 export class ChatStreamRequestDecoder implements StreamRequestDecoder {
+  /**
+   * Decodes a streaming Chat request body into an IR request and stream wire options.
+   *
+   * @param body - Client request body to decode.
+   * @returns Result containing decoded IR request, stream options, and request wire sidecar.
+   */
   decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
     // The wire documents `stream_options` as object OR null: explicit null is
     // absence; any other non-object fails. `include_usage` is parsed strictly
@@ -74,11 +89,20 @@ export class ChatStreamRequestDecoder implements StreamRequestDecoder {
 }
 
 /**
- * Encodes an {@link IrRequest} into target OpenAI Chat stream request JSON,
- * projecting generation controls and the admitted wire-only sidecar fields
- * exactly like the complete-path encoder.
+ * Encodes an IR request into a target OpenAI Chat streaming request body.
+ *
+ * Sets `stream: true` and configures `stream_options` while projecting generation and tool parameters.
  */
 export class ChatStreamRequestEncoder implements StreamRequestEncoder {
+  /**
+   * Encodes an IR request into a target Chat streaming request body.
+   *
+   * @param request - Preflight-validated IR request to encode.
+   * @param targetModel - Provider-facing model name.
+   * @param wireOptions - Stream wire options specifying usage preference.
+   * @param requestWireOptions - Optional request-side wire options.
+   * @returns Serialized Chat streaming request JSON body.
+   */
   encodeRequest(
     request: IrRequest,
     targetModel: string,
@@ -109,31 +133,46 @@ export class ChatStreamRequestEncoder implements StreamRequestEncoder {
 /**
  * Decodes an upstream OpenAI Chat SSE stream into semantic IR stream events.
  *
- * Wire dispatch only: chunk validation, the in-band error shape, sidecar
- * capture, and the finish-reason mapping are Chat-specific; all part shape,
- * call-id dedup, refusal pairing, argument budget, and terminal-once
- * bookkeeping is delegated to the shared {@link StreamShapeTracker}.
- *
- * The final usage chunk collapses into `response_end.usage` with its
- * cache/reasoning subdivisions (`usage-stream-timing`). The service-tier echo
- * and moderation result are documented optional fields on every chunk and are
- * captured last-write-wins for the outcome wire-options sidecar.
+ * Dispatches chunks on structure, validates error envelopes, handles usage and finish deltas,
+ * and tracks part lifecycles via {@link StreamShapeTracker}.
  */
 export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
+  /** Protocol identifier for this decoder. */
   readonly protocol = "openai-chat" as const;
+  /** Shared shape bookkeeping for this session. */
   private readonly tracker: StreamShapeTracker;
+  /** Recorded finish reason emitted with the terminal event. */
   private finishReason: IrFinishReason | undefined;
+  /** Usage parsed from the final empty-choices chunk. */
   private pendingUsage: IrUsage | undefined;
+  /** Captured response-side wire options recorded last-write-wins. */
   private outcomeWireOptions: OutcomeWireOptions = {};
 
+  /**
+   * Creates a Chat provider stream decoder bound to a stream session.
+   *
+   * @param session - Stream session providing response and part identifiers.
+   * @param maxArgumentBytes - Optional byte limit for streamed tool arguments.
+   */
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.tracker = new StreamShapeTracker({ session, maxArgumentBytes, wireLabel: "Chat" });
   }
 
+  /**
+   * Returns response-side wire options captured from streamed chunks.
+   *
+   * @returns Captured wire options such as service tier and moderation facts.
+   */
   getOutcomeWireOptions(): OutcomeWireOptions {
     return this.outcomeWireOptions;
   }
 
+  /**
+   * Processes one SSE frame from the provider and returns emitted IR stream events.
+   *
+   * @param frame - Server-sent events frame from the provider stream.
+   * @returns Result containing emitted IR events or normalized failure.
+   */
   push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure> {
     // The success terminator already went out on [DONE]; any later frame is a
     // misbehaving provider stream and fails closed instead of re-emitting a
@@ -370,6 +409,17 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
     return ok(events);
   }
 
+  /**
+   * Reports whether the stream ended through its documented terminator.
+   *
+   * The stream pump calls this after the provider connection closes. A Chat stream is complete
+   * only when the `[DONE]` sentinel arrived and marked the tracker terminal; any earlier close is
+   * an interruption that routing treats as a retryable-at-the-routing-layer failure of the
+   * candidate.
+   *
+   * @returns A successful empty result when the stream terminated cleanly. Returns a failed result
+   *   with the `stream_interrupted` category when the connection closed before `[DONE]`.
+   */
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
     if (!this.tracker.isTerminal()) {
       return failure({
@@ -385,22 +435,31 @@ export class ChatProviderStreamDecoder implements ProviderStreamDecoder {
 /**
  * Encodes semantic IR stream events into client-native OpenAI Chat SSE frames.
  *
- * When the client asked for usage (`include_usage`), the final usage chunk is
- * synthesized with totals plus cache/reasoning subdivisions. The effective
- * service-tier echo and the moderation result (re-wrapped into the Chat verdict
- * envelope per side, preserving the `{input, output}` split) ride on that usage
- * chunk when present, otherwise on the terminal finish chunk — neither is lost
- * when `include_usage` was not requested.
+ * Handles chunk construction for deltas, tool calls, finish reasons, and synthesized usage chunks.
  */
 export class ChatClientStreamEncoder implements ClientStreamEncoder {
+  /** Protocol identifier for this encoder. */
   readonly protocol = "openai-chat" as const;
+  /** Stream session providing response identifier and model name. */
   private readonly session: StreamSession;
+  /** Stream options captured from the client request. */
   private readonly wireOptions: StreamWireOptions;
+  /** Unix epoch seconds timestamp stamped on each chunk. */
   private readonly created: number;
+  /** Response-side wire options emitted on terminal or usage chunks. */
   private outcomeWireOptions: OutcomeWireOptions = {};
+  /** Mapping of IR part IDs to allocated tool call indices and metadata. */
   private readonly partIndices = new Map<string, { toolIndex: number; callId: string; name: string }>();
+  /** Counter allocating consecutive tool indices. */
   private nextToolIndex = 0;
 
+  /**
+   * Creates an encoder bound to a client stream session.
+   *
+   * @param session - Stream session providing response ID and model name.
+   * @param wireOptions - Client stream options including usage request flags.
+   * @param now - Clock providing Unix epoch seconds.
+   */
   constructor(
     session: StreamSession,
     wireOptions: StreamWireOptions = {},
@@ -411,10 +470,21 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
     this.created = now();
   }
 
+  /**
+   * Injects outcome wire options to emit with the terminal or usage chunk.
+   *
+   * @param options - Response-side wire options from the provider stream.
+   */
   setOutcomeWireOptions(options: OutcomeWireOptions): void {
     this.outcomeWireOptions = options;
   }
 
+  /**
+   * Encodes an IR stream event into one or more Chat SSE frames.
+   *
+   * @param event - IR stream event to serialize.
+   * @returns Result containing serialized SSE frames or normalized failure.
+   */
   encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure> {
     const id = `chatcmpl-${this.session.responseId}`;
     const model = this.session.model;
@@ -596,6 +666,11 @@ export class ChatClientStreamEncoder implements ClientStreamEncoder {
     return unsupportedCapability("unknown-stream-event");
   }
 
+  /**
+   * Completes the client stream session.
+   *
+   * @returns Always returns an empty array as terminal frames are emitted on `response_end`.
+   */
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
     return ok([]);
   }

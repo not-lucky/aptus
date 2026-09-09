@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Egress encoder for the Anthropic Messages protocol.
+ *
+ * Translates intermediate representation (IR) requests and outcomes onto the
+ * Anthropic Messages wire format. Request encoding delegates to {@link buildMessagesRequestBody}
+ * to project generation controls, transcript items, and request sidecar options. Outcome encoding
+ * projects content blocks, stop reasons, and Anthropic-specific usage token breakdowns.
+ *
+ * Refusal content parts are prohibited on Messages and rejected. Usage counters are emitted
+ * only when reported by the IR outcome.
+ */
+
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
 import type { IrOutcome, IrRequest } from "../../ir.ts";
@@ -6,25 +18,32 @@ import { messagesStopReason, partitionOutcomeParts } from "../shared/transcript.
 import { messagesUsageBody } from "../shared/usage.ts";
 
 /**
- * Egress encoder for Anthropic Messages requests and responses.
+ * Encodes IR requests and outcomes onto the Anthropic Messages wire format.
  *
- * Request encoding delegates to {@link buildMessagesRequestBody}, which
- * projects IR generation controls and the T2 wire-only sidecar fields onto
- * Messages wire fields: metadata collapses to the single user_id entry, only
- * the `auto` service tier maps, and prompt-cache breakpoints are re-anchored
- * as per-block `cache_control` markers with declared TTL loss. The required
- * `max_tokens` is resolved by the coordinator (user value first, model
- * default as fallback) and is intentionally not emitted here.
- *
- * Outcome encoding reconstructs Anthropic usage accounting from the IR totals
- * (`input_tokens = input - cacheRead - cacheWrite`) and echoes a matched stop
- * sequence with the `stop_sequence` stop reason.
+ * Implements {@link EgressEncoder} for `anthropic-messages`. Projects requests via
+ * {@link buildMessagesRequestBody} and formats outcomes into Messages JSON responses.
  */
 export class MessagesEgressEncoder implements EgressEncoder {
+  /**
+   * Encodes an admitted IR request into an Anthropic Messages request body.
+   *
+   * @param request - Preflight-validated IR request to encode.
+   * @param targetModel - Provider-facing model name.
+   * @param requestWireOptions - Optional request-side wire options.
+   * @returns Serialized Messages JSON request body with `stream: false`.
+   */
   encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
     return buildMessagesRequestBody(request, targetModel, false, requestWireOptions);
   }
 
+  /**
+   * Encodes an IR outcome into an Anthropic Messages response envelope.
+   *
+   * @param outcome - Preflight-validated IR outcome to encode.
+   * @param _outcomeWireOptions - Unused by Messages outcome encoding.
+   * @returns HTTP response payload containing status 200, JSON headers, and the response body.
+   * @throws Error if an untranslatable refusal content part is encountered.
+   */
   encodeOutcome(
     outcome: IrOutcome,
     _outcomeWireOptions?: OutcomeWireOptions,
@@ -33,10 +52,10 @@ export class MessagesEgressEncoder implements EgressEncoder {
     readonly headers: HeaderMap;
     readonly body: JsonObject;
   } {
-    // Content blocks preserve part order; an outcome with no parts still
-    // carries one empty text block. Preflight rejects every non-C/R refusal
-    // before encoding, so the refusal arm below is unreachable in translated
-    // turns; it is an invariant assertion that fails loudly on preflight drift.
+    // Content blocks preserve part order, and an outcome with no parts still carries one empty text block.
+    // Preflight rejects every refusal that did not originate from a Chat or Responses source before encoding,
+    // so the refusal arm below is unreachable in translated turns and the throw is an invariant assertion
+    // that fails loudly on preflight drift.
     const content: JsonObject[] = partitionOutcomeParts(outcome.parts).map((segment): JsonObject => {
       if (segment.type === "refusal") {
         throw new Error("Anthropic Messages does not support refusal content parts");
@@ -47,8 +66,8 @@ export class MessagesEgressEncoder implements EgressEncoder {
             type: "tool_use",
             id: segment.call.callId,
             name: segment.call.name,
-            // Preflight admits only function calls with parsed arguments into
-            // an M client; the parse fallback keeps the encoder total.
+            // Preflight admits only function calls with parsed arguments into a Messages client, so the parse
+            // fallback keeps the encoder total for admitted input without hiding a missing parse.
             input:
               segment.call.type === "function"
                 ? (segment.call.arguments ?? JSON.parse(segment.call.argumentsText))
@@ -59,15 +78,13 @@ export class MessagesEgressEncoder implements EgressEncoder {
       content.push({ type: "text", text: "" });
     }
 
-    // A matched stop sequence is echoed only with its own stop reason so the
-    // M framing stays valid; the M wire pairs a non-null stop_sequence with
-    // stop_reason "stop_sequence" and nothing else.
+    // A matched stop sequence is echoed only with its own stop reason so the Messages framing stays valid.
+    // The Messages wire pairs a non-null stop sequence with the stop sequence reason and nothing else.
     const stopReason = messagesStopReason(outcome.finish);
 
-    // Never fabricate usage: absence is distinct from zero, so the field is
-    // omitted unless the IR outcome actually reports counters. The base input
-    // excludes the cached subdivisions because M's `input_tokens` counts only
-    // tokens after the last cache breakpoint (subdivisions are never re-added).
+    // Usage absence is distinct from zero, so the field is omitted unless the IR outcome reports counters.
+    // The base input excludes the cached subdivisions because the Messages `input_tokens` field counts only
+    // tokens after the last cache breakpoint, and subdivisions are never re-added to totals.
     const usage = outcome.usage !== undefined ? messagesUsageBody(outcome.usage) : undefined;
 
     const id = outcome.responseId.startsWith("msg_") ? outcome.responseId : `msg_${outcome.responseId}`;

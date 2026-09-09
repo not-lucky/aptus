@@ -1,23 +1,19 @@
+/**
+ * @fileoverview Recognition tables and helpers for hosted and provider-specific capabilities.
+ *
+ * Maps provider tool types, server tools, and output items (web search, code execution, computer use,
+ * etc.) onto matrix capability identifiers for fail-closed rejection during cross-protocol translation.
+ *
+ * Shared across OpenAI Chat, OpenAI Responses, and Anthropic Messages ingress/egress codecs to ensure
+ * unsupported native capabilities fail closed with their documented capability row rather than generic errors.
+ */
+
 import type { JsonObject } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import { unsupportedCapabilityFailure } from "../../failures.ts";
 import type { MatrixRowId } from "../../matrix.ts";
 
-/**
- * Hosted and provider tool recognition for the six protocol codecs.
- *
- * Every non-admitted hosted or provider tool capability fails closed with its
- * exact matrix row ID. Recognition is keyed by the documented wire spellings
- * per protocol, so request decode and outcome decode reject with the owning
- * row instead of a generic unknown-structure error. Map values are
- * {@link MatrixRowId}s, so a value naming no matrix row fails compilation.
- */
-
-/**
- * R `tools[]` entry types that are hosted or provider capabilities, including
- * the namespace and programmatic-calling meta-tools. Dated variants map to
- * the same row as their GA spelling.
- */
+/** Responses `tools[]` entry types that correspond to hosted or provider capabilities. */
 export const RESPONSES_HOSTED_TOOL_TYPES: Readonly<Record<string, MatrixRowId>> = {
   web_search: "hosted-web-search",
   web_search_2025_08_26: "hosted-web-search",
@@ -37,12 +33,7 @@ export const RESPONSES_HOSTED_TOOL_TYPES: Readonly<Record<string, MatrixRowId>> 
   programmatic_tool_calling: "programmatic-tools",
 };
 
-/**
- * R output item types (also valid as replayed input items) that are hosted or
- * provider capabilities. `web_search_call` refines on `action.type` and
- * `computer_call`/`computer_call_output` refine on safety-check fields at the
- * call site; every other entry rejects on type alone.
- */
+/** Responses output item types representing hosted or provider capabilities. */
 export const RESPONSES_HOSTED_OUTPUT_ITEMS: Readonly<Record<string, MatrixRowId>> = {
   file_search_call: "hosted-file-search",
   code_interpreter_call: "hosted-code-execution",
@@ -66,10 +57,7 @@ export const RESPONSES_HOSTED_OUTPUT_ITEMS: Readonly<Record<string, MatrixRowId>
   compaction_trigger: "responses-compaction",
 };
 
-/**
- * M `tools[]` entry `type` literals that are server tools, keyed by every
- * dated variant documented for the tool family.
- */
+/** Messages `tools[]` entry types for server tools across all documented dated variants. */
 export const MESSAGES_HOSTED_TOOL_TYPES: Readonly<Record<string, MatrixRowId>> = {
   web_search_20250305: "hosted-web-search",
   web_search_20260209: "hosted-web-search",
@@ -93,10 +81,7 @@ export const MESSAGES_HOSTED_TOOL_TYPES: Readonly<Record<string, MatrixRowId>> =
   tool_search_tool_regex: "hosted-tool-search",
 };
 
-/**
- * M `server_tool_use` names and their owning hosted rows. Unknown or missing
- * names fail closed as unknown content at the call site.
- */
+/** Messages `server_tool_use` tool names mapped to their owning capability rows. */
 export const MESSAGES_SERVER_TOOL_USE_NAMES: Readonly<Record<string, MatrixRowId>> = {
   web_search: "hosted-web-search",
   web_fetch: "hosted-web-fetch",
@@ -107,11 +92,7 @@ export const MESSAGES_SERVER_TOOL_USE_NAMES: Readonly<Record<string, MatrixRowId
   tool_search_tool_regex: "hosted-tool-search",
 };
 
-/**
- * M content block types (request user blocks and response blocks) that are
- * hosted or provider capabilities. `server_tool_use` is resolved through
- * {@link MESSAGES_SERVER_TOOL_USE_NAMES} instead.
- */
+/** Messages content block types representing hosted or provider capabilities. */
 export const MESSAGES_HOSTED_BLOCK_TYPES: Readonly<Record<string, MatrixRowId>> = {
   web_search_tool_result: "hosted-web-search",
   web_fetch_tool_result: "hosted-web-fetch",
@@ -125,10 +106,10 @@ export const MESSAGES_HOSTED_BLOCK_TYPES: Readonly<Record<string, MatrixRowId>> 
 };
 
 /**
- * Recursively detects hosted tool result encryption markers (`encrypted_content`,
- * `encrypted_stdout`) anywhere inside a decoded wire value. Encrypted payloads
- * are provider-opaque and can never be translated, so any marker fails closed
- * with `hosted-tool-result-encryption`.
+ * Recursively detects hosted tool result encryption markers (`encrypted_content`, `encrypted_stdout`).
+ *
+ * @param value - Decoded JSON payload to scan.
+ * @returns `true` if any encryption marker key is found at any depth, `false` otherwise.
  */
 export function containsEncryptedToolContent(value: unknown): boolean {
   if (Array.isArray(value)) {
@@ -146,10 +127,10 @@ export function containsEncryptedToolContent(value: unknown): boolean {
 }
 
 /**
- * The `hosted-tool-result-encryption` failure when a decoded wire value carries
- * an encryption marker anywhere inside it; `undefined` otherwise. Every wire
- * container that can hold a hosted tool result calls this before any other
- * recognition so a marker never passes as translatable content.
+ * Returns a `hosted-tool-result-encryption` failure if the value contains encryption markers.
+ *
+ * @param value - Decoded JSON value to scan.
+ * @returns NormalizedFailure if encryption markers are present, otherwise `undefined`.
  */
 export function encryptedContentFailure(value: unknown): NormalizedFailure | undefined {
   if (!containsEncryptedToolContent(value)) return undefined;
@@ -157,10 +138,11 @@ export function encryptedContentFailure(value: unknown): NormalizedFailure | und
 }
 
 /**
- * Failure for a provider-owned Responses reasoning output item: encrypted
- * content maps to `encrypted-reasoning`, readable reasoning parts to
- * `readable-reasoning`. Shared by every R discovery site (request input item,
- * complete outcome output item, stream item events, terminal response scan).
+ * Constructs a capability failure for a Responses reasoning output item.
+ * Distinguishes encrypted reasoning from readable reasoning items.
+ *
+ * @param item - Decoded reasoning item object.
+ * @returns NormalizedFailure with either `encrypted-reasoning` or `readable-reasoning`.
  */
 export function responsesReasoningItemFailure(item: Record<string, unknown>): NormalizedFailure {
   return unsupportedCapabilityFailure(
@@ -169,10 +151,11 @@ export function responsesReasoningItemFailure(item: Record<string, unknown>): No
 }
 
 /**
- * Parses a function call's wire argument text exactly once: a successful parse
- * to a non-null, non-array JSON object becomes the IR `arguments` field; any
- * other outcome leaves `arguments` undefined so the raw text stays observable
- * (`invalid-function-json` never fabricates or normalizes).
+ * Parses accumulated function call argument JSON text into an object exactly once.
+ * Malformed JSON or non-object values yield `undefined`, leaving raw text intact.
+ *
+ * @param argumentsText - Accumulated JSON argument text.
+ * @returns Parsed JSON object, or `undefined` if parsing fails or result is not a plain object.
  */
 export function parseFunctionArgumentsOnce(argumentsText: string): JsonObject | undefined {
   try {

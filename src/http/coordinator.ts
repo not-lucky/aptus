@@ -1,29 +1,44 @@
+/**
+ * @fileoverview
+ * Exactly-once terminal lifecycle coordination for admitted requests.
+ *
+ * Multiple code paths race to conclude a request (provider response delivery, client disconnect,
+ * gateway failure, dry run, or internal error). This module provides a request-scoped coordinator
+ * that guarantees the first path to finalize wins ownership, recording the terminal trace and
+ * emitting lifecycle telemetry exactly once while remaining resilient to observer faults.
+ */
+
 import type { AptusRequestId, Protocol, TerminalCoordinator, TerminalFact, TraceSession } from "../domain/contracts.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import type { Redactor } from "../observability/trace/redaction.ts";
 import { type Clock, systemClock } from "../routing/timing.ts";
 
-/**
- * Initialization options for constructing a {@link TerminalCoordinator}.
- */
+/** Options for constructing a request-scoped terminal coordinator. */
 export interface TerminalCoordinatorOptions {
+  /** Unique request identifier assigned during admission. */
   readonly aptusRequestId: AptusRequestId;
+  /** Ingress protocol spoken by the client endpoint. */
   readonly endpointProtocol: Protocol;
+  /** Monotonic millisecond timestamp recorded when admission began. */
   readonly startedMs: number;
+  /** Trace session recording lifecycle stages for the request. */
   readonly trace: TraceSession;
+  /** Telemetry observer receiving completion events and metrics. */
   readonly observer: GatewayObservability;
+  /** Monotonic and wall clock source. */
   readonly clock?: Clock;
+  /** Optional redactor for stripping sensitive tokens from recorded usage objects. */
   readonly redactor?: Redactor;
 }
 
 /**
- * Creates the single request-scoped terminal and delivery coordinator.
+ * Creates an exactly-once terminal coordinator for an admitted request.
  *
- * Enforces atomic terminal finalization across competing outcomes (provider response,
- * HTTP client disconnect, Gateway failure, dry run, internal fault).
+ * Tracks the admitted stream flag, first byte latency, provider dispatch attempts,
+ * and coordinates terminal fact recording across competing completion paths.
  *
- * @param options - Request identity, protocol, timing, trace session, and telemetry observer.
- * @returns A {@link TerminalCoordinator} instance.
+ * @param options - Request identity, protocol, clock, trace, and observer dependencies.
+ * @returns Terminal coordinator instance.
  */
 export function createTerminalCoordinator(options: TerminalCoordinatorOptions): TerminalCoordinator {
   const { aptusRequestId, endpointProtocol, startedMs, trace, observer, redactor } = options;
@@ -41,29 +56,51 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
   });
 
   return {
+    /** Promise settling once the winning finalizer completes all telemetry writes. */
     finalized,
 
+    /**
+     * Marks that the request crossed the HTTP admission boundary.
+     *
+     * @param stream - Whether the incoming request payload requested streaming.
+     */
     markIngress(stream: boolean): void {
       ingressEmitted = true;
       ingressStream = stream;
     },
 
+    /** Records the client time-to-first-byte latency on the first call only. */
     markClientFirstByte(): void {
       if (firstByteMs === undefined) {
         firstByteMs = clock.nowMonotonicMs() - startedMs;
       }
     },
 
+    /**
+     * Records the highest provider attempt number initiated during routing.
+     *
+     * @param attemptNumber - One-based index of the initiated attempt.
+     */
     recordAttempt(attemptNumber: number): void {
       if (attemptNumber > currentAttempts) {
         currentAttempts = attemptNumber;
       }
     },
 
+    /** Returns the highest attempt number recorded, or 0 if no attempts began. */
     getAttempts(): number {
       return currentAttempts;
     },
 
+    /**
+     * Atomically claims terminal ownership and executes lifecycle completion side effects.
+     *
+     * The first caller to claim finalization emits trace finish, decrements in-flight gauges,
+     * logs completed request metrics, and resolves the `finalized` drain promise.
+     *
+     * @param fact - Immutable terminal fact describing the final request outcome.
+     * @returns Object indicating whether this caller won terminal claim ownership.
+     */
     async finalize(fact: TerminalFact): Promise<{ won: boolean }> {
       if (wonClaim) {
         return { won: false };
@@ -73,7 +110,7 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
       const attempts = fact.attempts > 0 ? fact.attempts : currentAttempts;
 
       try {
-        // 1. Finish Trace terminal with fallback to shutdown_abort on shutdown cancellation failure
+        // Finish the trace terminal first, falling back to an incomplete abort record on shutdown failure.
         try {
           await trace.finish(fact.terminal);
         } catch {
@@ -82,14 +119,9 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
           }
         }
 
-        // 2-4. Accepted-request telemetry (in-flight decrement, request_terminal
-        // fact, and aptus.request.completed) only fires after HTTP ingress
-        // admission. Authentication, limiter, and body-admission failures that
-        // never reached the admission boundary must not decrement the gauge or
-        // emit an accepted-request counter observation.
+        // Emit terminal metrics only if ingress was accepted, keeping rejected attempts silent.
         if (ingressEmitted) {
-          // 2. Decrement in-flight gauge using the admitted stream label so
-          // the increment/decrement pair always balances.
+          // Decrement the in-flight gauge matching the admitted stream label.
           try {
             observer.requestTerminal({
               aptusRequestId,
@@ -97,10 +129,10 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
               stream: ingressStream,
             });
           } catch {
-            // Swallow observer error
+            // Observer errors are caught to avoid disrupting response finalization.
           }
 
-          // 3. Emit canonical request_terminal lifecycle event
+          // Emit canonical terminal lifecycle event.
           try {
             const terminalResult =
               fact.terminal.kind === "incomplete"
@@ -114,12 +146,10 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
               result: terminalResult,
             });
           } catch {
-            // Swallow observer error
+            // Contained observer fault.
           }
 
-          // 4. Emit duration/TTFF histograms plus either the
-          // `aptus.request.completed` log (Gateway-admitted requests) or the
-          // accepted-request counter/duration only (pre-Gateway failures).
+          // Emit completion log or HTTP terminal observation.
           try {
             const targetProtocol = fact.targetProtocol ?? "unknown";
             const provider = fact.provider ?? "unknown";
@@ -150,11 +180,10 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
               observer.completed(completedFields);
             }
           } catch {
-            // Swallow observer error
+            // Contained observer fault.
           }
 
-          // 5. Emit `aptus.response.first_byte` once first-byte timing is known
-          // and at least one provider attempt actually produced the response.
+          // Emit first-byte timing when latency is tracked and attempts were made.
           if (firstByteMs !== undefined && attempts > 0) {
             try {
               observer.firstByte({
@@ -163,7 +192,7 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
                 durationMs: firstByteMs,
               });
             } catch {
-              // Swallow observer error
+              // Contained observer fault.
             }
           }
         }

@@ -1,11 +1,19 @@
+/**
+ * @fileoverview Failure taxonomy, trace vocabulary, and small subsystem contracts.
+ *
+ * Defines the shared failure categories (13-member taxonomy), normalized and HTTP-encoded
+ * failure envelopes, trace lifecycle stages/terminals, retention accounting, and health
+ * reporting interfaces used across routing, HTTP admission, and observability.
+ */
+
 import type { HeaderMap, JsonObject, Protocol } from "./contracts.ts";
 import type { AptusRequestId } from "./request-id.ts";
 
 /**
- * The canonical 13-member failure category set.
+ * The canonical thirteen-member failure category set.
  *
- * Provides a protocol-neutral taxonomy for classifying request, authentication,
- * routing, upstream provider, and transport errors.
+ * Protocol-neutral classification used to determine HTTP status code mapping,
+ * retry/fallback eligibility in routing, and client error representations.
  */
 export type IrFailureCategory =
   | "invalid_request"
@@ -23,68 +31,50 @@ export type IrFailureCategory =
   | "stream_interrupted";
 
 /**
- * A client-safe normalized failure containing classified category, safe messages, and retry metadata.
+ * Client-safe normalized failure containing category, message, and retry metadata.
+ *
+ * Normalizes provider-specific and translation errors into a safe representation
+ * with internal paths and credentials redacted.
  */
 export interface NormalizedFailure {
-  /**
-   * Stable failure category that determines HTTP status code and routing/retry policies.
-   */
+  /** Stable failure category determining HTTP status mapping and retry eligibility. */
   readonly category: IrFailureCategory;
 
-  /**
-   * Bounded, redacted human-readable error description safe for client return.
-   */
+  /** Redacted, bounded human-readable error description safe for client return. */
   readonly message: string;
 
-  /**
-   * Optional upstream or Aptus-specific error code/type identifier.
-   */
+  /** Optional upstream provider error code or internal marker. */
   readonly code?: string;
 
-  /**
-   * Specific capability identifier when {@link category} is `"unsupported_capability"`; omitted otherwise.
-   */
+  /** Specific matrix row ID when category is `"unsupported_capability"`. */
   readonly capability?: string;
 
-  /**
-   * Normalized retry delay in whole seconds when safely extractable from upstream response headers.
-   */
+  /** Parsed retry delay in seconds from upstream `Retry-After` headers, if present. */
   readonly retryAfterSeconds?: number;
 
-  /**
-   * Upstream request identifier when observed on provider error responses.
-   */
+  /** Upstream request identifier echoed on provider error responses, if available. */
   readonly requestId?: string;
 
-  /**
-   * Whether candidate routing or gateway policy permits retrying this failure on the same candidate.
-   */
+  /** Whether routing policy permits retrying this failure against the same provider candidate. */
   readonly retryable: boolean;
 }
 
 /**
- * A protocol-native encoded expected failure ready for HTTP serialization.
+ * Protocol-native encoded failure payload and headers ready for HTTP serialization.
  */
 export interface EncodedFailure {
-  /**
-   * HTTP status code determined by protocol and failure category mapping.
-   */
+  /** HTTP response status code (4xx or 5xx). */
   readonly status: number;
 
-  /**
-   * Response headers containing `content-type`, `x-aptus-request-id`, and optional `retry-after`.
-   */
+  /** Filtered response headers containing content type, request ID, and optional retry delay. */
   readonly headers: HeaderMap;
 
-  /**
-   * UTF-8 encoded protocol-native error envelope payload.
-   */
+  /** UTF-8 encoded protocol-native error envelope payload. */
   readonly body: Uint8Array;
 }
 
 /**
- * An ordered trace stage identity corresponding to a discrete point in request lifecycle.
- * Sequence numbers are assigned sequentially by the TraceSession.
+ * Ordered trace stage identifier marking a discrete step in the request lifecycle.
  */
 export type TraceStage =
   | "client_request"
@@ -112,160 +102,122 @@ export type TraceStage =
   | "trace_failure";
 
 /**
- * The final terminal outcome of a request recorded in `999_terminal.json`.
+ * Final terminal state of a request recorded in `999_terminal.json`.
  */
 export type TraceTerminal =
   | {
-      /** Successful completion with HTTP status and optional token usage / cost estimates. */
+      /** Successful request completion with status, token usage, and cost estimate. */
       readonly kind: "complete";
       readonly status: number;
       readonly usage?: JsonObject;
       readonly estimatedCostUsd?: string;
     }
   | {
-      /** Request terminated with an expected domain failure. */
+      /** Request terminated with an expected normalized domain failure. */
       readonly kind: "failed";
       readonly failure: NormalizedFailure;
     }
   | {
-      /** Request cancelled by client disconnect or graceful shutdown. */
+      /** Request cancelled by client disconnect or graceful server shutdown. */
       readonly kind: "cancelled";
       readonly by: "client" | "shutdown";
     }
   | {
-      /** Request was executed in dry-run mode without upstream dispatch. */
+      /** Request executed in dry-run mode without upstream network dispatch. */
       readonly kind: "dry_run";
     }
   | {
-      /** Trace aborted prematurely due to write failure, process crash, shutdown timeout, or local internal fault. */
+      /** Trace aborted prematurely due to write failure, process crash, shutdown, or fault. */
       readonly kind: "incomplete";
       readonly reason: "trace_write_failed" | "process_exit" | "shutdown_abort" | "internal_fault";
     };
 
 /**
- * Immutable manifest file (`000_manifest.json`) written at the start of every trace session.
+ * Session header written to `000_manifest.json` at the start of every trace session.
  */
 export interface TraceManifest {
-  /**
-   * Trace schema version. Currently pinned to `1`.
-   */
+  /** Trace schema format version, currently pinned to `1`. */
   readonly schemaVersion: 1;
 
-  /**
-   * The unique Aptus request identifier.
-   */
+  /** Unique request identifier matching the `x-aptus-request-id` response header. */
   readonly aptusRequestId: AptusRequestId;
 
-  /**
-   * RFC 3339 formatted local start timestamp.
-   */
+  /** RFC 3339 timestamp recording when the trace session opened. */
   readonly startedAt: string;
 
-  /**
-   * Protocol used by the incoming client create request.
-   */
+  /** Client wire protocol accepted at ingress (`openai-chat`, `openai-responses`, `anthropic-messages`). */
   readonly sourceProtocol: Protocol;
 
-  /**
-   * SHA-256 digest of the canonical redacted configuration active when the request started.
-   */
+  /** SHA-256 hash of the redacted active configuration at request start. */
   readonly configRevision: string;
 
-  /**
-   * Applied secret redaction policy identifier.
-   */
+  /** Guarantee marker declaring credential and secret redaction policy. */
   readonly redaction: "credentials-and-resolved-secrets";
 
-  /**
-   * Storage protection indicator noting payload confidentiality is enforced by OS file permissions (0700/0600).
-   */
+  /** Payload confidentiality model relying on filesystem permissions (`0700`/`0600`). */
   readonly payloadProtection: "filesystem-permissions-only";
 }
 
 /**
- * Statistical summary of a trace retention cleanup execution.
+ * Statistics reported by a trace retention cleanup pass.
  */
 export interface RetentionResult {
-  /**
-   * Number of completed trace directories deleted because they exceeded maximum retention age.
-   */
+  /** Completed trace sessions purged due to exceeding maximum retention age. */
   readonly deletedForAge: number;
 
-  /**
-   * Number of completed trace directories deleted because total trace disk usage exceeded byte limits.
-   */
+  /** Oldest-first completed trace sessions purged to satisfy the total size budget. */
   readonly deletedForSize: number;
 
-  /**
-   * Number of active or incomplete trace directories skipped during retention sweep.
-   */
+  /** Active or incomplete sessions skipped to prevent corrupting in-flight requests. */
   readonly skipped: number;
 
-  /**
-   * Total disk size in bytes of remaining completed traces after cleanup.
-   */
+  /** Total disk bytes of surviving completed trace sessions after cleanup. */
   readonly remainingBytes: number;
 
-  /**
-   * Total disk size in bytes of active or incomplete trace directories skipped by this pass.
-   */
+  /** Total disk bytes occupied by active or incomplete trace directories. */
   readonly incompleteBytes: number;
 }
 
 /**
- * Health check JSON payload returned by `/health/live`, `/health/ready`, and `/health`.
+ * Process health status payload served at `/health`, `/health/live`, and `/health/ready`.
  */
 export interface HealthPayload {
-  /**
-   * Process health status: `"ok"` when operational/live, `"degraded"` when draining or trace subsystem failed.
-   */
+  /** Operational health status (`ok` when live and routable, `degraded` during shutdown drain or trace failure). */
   readonly status: "ok" | "degraded";
 
-  /**
-   * SHA-256 digest of the running redacted configuration.
-   */
+  /** SHA-256 digest of active running redacted configuration. */
   readonly configRevision: string;
 
-  /**
-   * File trace subsystem readiness. `false` if startup probe failed or runtime write degradation occurred.
-   */
+  /** File trace subsystem readiness flag (false if startup probe failed or degraded). */
   readonly traceReady: boolean;
 
-  /**
-   * Number of configured providers that currently have at least one enabled API key.
-   */
+  /** Number of configured providers that currently have at least one usable API key. */
   readonly enabledProviderCount: number;
 }
 
 /**
- * Input arguments for encoding an expected domain failure into a protocol-native response.
+ * Input arguments for encoding a normalized domain failure into a protocol-native response.
  */
 export interface ErrorEncodingInput {
-  /**
-   * The client protocol that owns the error response envelope shape.
-   */
+  /** Target client wire protocol for envelope formatting. */
   readonly protocol: Protocol;
 
-  /**
-   * The Aptus request ID to include in the `x-aptus-request-id` header and Anthropic envelope.
-   */
+  /** Request identifier to echo in headers and payload. */
   readonly aptusRequestId: AptusRequestId;
 
-  /**
-   * The normalized domain failure to encode.
-   */
+  /** Normalized failure containing category, message, and retry details. */
   readonly failure: NormalizedFailure;
 }
 
 /**
- * Encoder contract for serializing normalized domain failures into protocol-native envelopes.
+ * Encoder contract for rendering normalized domain failures into wire-ready HTTP responses.
  */
 export interface ErrorEncoder {
   /**
-   * Encodes a normalized domain failure into target protocol error envelope bytes and headers.
+   * Encodes a normalized domain failure into wire headers and response body.
    *
-   * @param input - The target protocol, request ID, and failure description.
-   * @returns An {@link EncodedFailure} with exact HTTP status, safe headers, and JSON body.
+   * @param input - Client protocol, request ID, and failure description.
+   * @returns An {@link EncodedFailure} with HTTP status, headers, and UTF-8 JSON body.
    */
   encode(input: ErrorEncodingInput): EncodedFailure;
 }
@@ -275,35 +227,35 @@ export interface ErrorEncoder {
  */
 export interface TraceRetention {
   /**
-   * Executes a single retention pass over the configured trace storage root.
+   * Executes a retention cleanup sweep against the trace directory root.
    *
-   * @param nowMs - Current wall-clock Unix time in milliseconds.
-   * @returns A promise resolving to the cleanup statistics.
-   * @throws Local filesystem I/O errors, which degrade trace readiness.
+   * Deletes expired traces by age and enforces overall storage budgets.
+   *
+   * @param nowMs - Current epoch time in milliseconds.
+   * @returns A promise resolving to cleanup metrics in {@link RetentionResult}.
    */
   run(nowMs: number): Promise<RetentionResult>;
 }
 
 /**
- * Reporter contract for querying the current process-local health state without network I/O.
+ * Reporter contract for querying local process readiness without network I/O.
  */
 export interface HealthReporter {
   /**
-   * Reads current readiness facts.
+   * Reads current health and readiness facts.
    *
-   * @returns An immutable, secret-free {@link HealthPayload}.
+   * @returns A snapshot {@link HealthPayload} without secrets or credentials.
    */
   current(): HealthPayload;
 }
 
 /**
- * Maps failure categories to Anthropic wire error types.
+ * Maps gateway failure categories to Anthropic wire error types.
  *
- * Provides a single canonical mapping shared by HTTP error encoding and
- * streaming in-band error translation to guarantee complete-vs-stream parity.
+ * Provides a canonical mapping shared by HTTP error envelopes and in-band stream events.
  *
- * @param category - Canonical failure category or internal marker.
- * @returns Anthropic wire error type string.
+ * @param category - Domain failure category or `"internal"` fault marker.
+ * @returns The matching Anthropic wire error type string (e.g. `"invalid_request_error"`).
  */
 export function anthropicErrorType(category: IrFailureCategory | "internal"): string {
   switch (category) {

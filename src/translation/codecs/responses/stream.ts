@@ -1,3 +1,13 @@
+/**
+ * @fileoverview OpenAI Responses streaming codec: request decoding and encoding,
+ * provider stream decoding, and client stream encoding.
+ *
+ * Handles named-event SSE frames (`response.created`, `response.output_item.added`,
+ * `response.output_text.delta`, `response.function_call_arguments.*`, `response.completed`,
+ * `response.failed`). Enforces sequence-number ordering and reasoning detection, while
+ * delegating cross-protocol stream shape tracking to {@link StreamShapeTracker}.
+ */
+
 import type { JsonObject, Result } from "../../../domain/contracts.ts";
 import { isPlainObject } from "../../../domain/json.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
@@ -18,8 +28,8 @@ import { failure, invalidRequest, ok, unsupportedCapability } from "../../result
 import type { SseFrame } from "../../sse.ts";
 import { responsesReasoningItemFailure } from "../shared/hosted-tools.ts";
 import { responsesTextConfig } from "../shared/output-format.ts";
-import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { StreamToolArgumentsBudget } from "../shared/stream-limits.ts";
+import { StreamShapeTracker } from "../shared/stream-shape.ts";
 import { responsesToolFields } from "../shared/tool-fields.ts";
 import { buildResponsesInput, responsesFinishStatus, responsesGenerationFields } from "../shared/transcript.ts";
 import { parseResponsesUsage, responsesUsageBody } from "../shared/usage.ts";
@@ -29,13 +39,19 @@ import {
   responsesOutcomeWireFields,
 } from "../shared/wire-options.ts";
 import { parseResponsesAnnotation, parseResponsesRequestBody } from "./ingress.ts";
+
 /**
- * Decodes a streaming OpenAI Responses request.
+ * Decodes streaming OpenAI Responses requests into IR requests.
  *
- * Capability rejections, wire-only sidecar capture, transcript items, and
- * generation controls are shared verbatim with the complete-path ingress.
+ * Delegates request body parsing to {@link parseResponsesRequestBody} with no stream-only options.
  */
 export class ResponsesStreamRequestDecoder implements StreamRequestDecoder {
+  /**
+   * Decodes a streaming Responses request body into an {@link IrRequest}.
+   *
+   * @param body - Raw request body JSON object.
+   * @returns Decoded IR request with request wire options, or normalized failure.
+   */
   decodeRequest(body: JsonObject): Result<StreamRequestDecodeResult, NormalizedFailure> {
     const parsed = parseResponsesRequestBody(body, "stream");
     if (!parsed.ok) return parsed;
@@ -48,11 +64,18 @@ export class ResponsesStreamRequestDecoder implements StreamRequestDecoder {
 }
 
 /**
- * Encodes an {@link IrRequest} into target OpenAI Responses stream request
- * JSON, projecting generation controls and the admitted wire-only sidecar
- * fields exactly like the complete-path encoder.
+ * Encodes an {@link IrRequest} into an OpenAI Responses streaming request body.
  */
 export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
+  /**
+   * Encodes an IR request into an OpenAI Responses streaming request body.
+   *
+   * @param request - The IR request to encode.
+   * @param targetModel - Provider model name for the target.
+   * @param _wireOptions - Unused; Responses defines no stream-only request options.
+   * @param requestWireOptions - Optional request-side sidecar options captured at ingress.
+   * @returns The encoded request body JSON object.
+   */
   encodeRequest(
     request: IrRequest,
     targetModel: string,
@@ -77,12 +100,16 @@ export class ResponsesStreamRequestEncoder implements StreamRequestEncoder {
 }
 
 /**
- * Scans one terminal response object's output array for provider-owned
- * reasoning items. The `output_item.added` events normally carry every item,
- * but a terminal payload that includes an unannounced reasoning item must fail
- * closed too instead of silently vanishing behind a success terminator.
+ * Scans a terminal response object's output array for unannounced reasoning or unsupported items.
+ *
+ * @param resp - Decoded terminal response object.
+ * @param hasIdentity - Predicate checking whether an item or call identifier was announced.
+ * @returns Ok on valid output, or normalized failure if invalid items are present.
  */
-function scanTerminalOutput(resp: Record<string, unknown>, hasIdentity: (identity: string) => boolean): Result<void, NormalizedFailure> {
+function scanTerminalOutput(
+  resp: Record<string, unknown>,
+  hasIdentity: (identity: string) => boolean,
+): Result<void, NormalizedFailure> {
   if (!Array.isArray(resp.output)) return ok(undefined);
   for (const item of resp.output) {
     if (!isPlainObject(item)) continue;
@@ -112,31 +139,43 @@ function scanTerminalOutput(resp: Record<string, unknown>, hasIdentity: (identit
 /**
  * Decodes an upstream OpenAI Responses SSE stream into semantic IR stream events.
  *
- * Wire dispatch only: event-name matching, sequence-number ordering, item
- * validation, and the terminal finish-reason derivation are Responses-specific;
- * all part shape, call-id/item-id dedup, refusal pairing, argument budget, and
- * terminal-once bookkeeping is delegated to the shared {@link StreamShapeTracker}.
- *
- * Provider-owned reasoning output items fail closed at discovery
- * (`encrypted-reasoning` when carrying `encrypted_content`, else
- * `readable-reasoning`). The terminal completion event collapses usage with its
- * subdivisions into `response_end.usage` and captures the service-tier echo and
- * moderation result for the outcome wire-options sidecar.
+ * Handles event matching, strictly increasing sequence-number validation, item routing,
+ * and completion status derivation. Delegates part shape and budget to {@link StreamShapeTracker}.
  */
 export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
   readonly protocol = "openai-responses" as const;
+  /** Shared shape bookkeeping for this session. */
   private readonly tracker: StreamShapeTracker;
+  /** Highest sequence number accepted so far; out-of-order events fail closed. */
   private lastSequenceNumber = 0;
+  /** Last-write-wins capture of response-side sidecar facts. */
   private outcomeWireOptions: OutcomeWireOptions = {};
 
+  /**
+   * Creates a decoder bound to one stream session.
+   *
+   * @param session - Stream session providing response and part identifiers.
+   * @param maxArgumentBytes - Optional override for streamed tool argument budget.
+   */
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.tracker = new StreamShapeTracker({ session, maxArgumentBytes, wireLabel: "Responses" });
   }
 
+  /**
+   * Returns response-side sidecar facts captured from completion events.
+   */
   getOutcomeWireOptions(): OutcomeWireOptions {
     return this.outcomeWireOptions;
   }
 
+  /**
+   * Processes a single Responses SSE frame into zero or more IR stream events.
+   *
+   * Validates sequence-number monotonicity and maps named events to IR events.
+   *
+   * @param frame - Incoming server-sent events frame.
+   * @returns Array of decoded IR events, or a normalized failure.
+   */
   push(frame: SseFrame): Result<readonly IrStreamEvent[], NormalizedFailure> {
     // The success terminator already went out on the terminal event; any later
     // event is a misbehaving provider stream and fails closed instead of
@@ -342,7 +381,11 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
         return invalidRequest("function_call_arguments.done arguments must be a string");
       }
       const events: IrStreamEvent[] = [];
-      if (this.tracker.argumentDeltaCount(match.slot) === 0 && typeof chunk.arguments === "string" && chunk.arguments.length > 0) {
+      if (
+        this.tracker.argumentDeltaCount(match.slot) === 0 &&
+        typeof chunk.arguments === "string" &&
+        chunk.arguments.length > 0
+      ) {
         const deltaRes = this.tracker.toolArgumentsDelta(events, match.slot, chunk.arguments);
         if (!deltaRes.ok) return deltaRes;
       }
@@ -508,6 +551,11 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
     return unsupportedCapability("unknown-stream-event");
   }
 
+  /**
+   * Validates that the stream terminated cleanly with a completion or failure event.
+   *
+   * @returns Empty array on clean finish, or `stream_interrupted` failure if closed prematurely.
+   */
   finish(): Result<readonly IrStreamEvent[], NormalizedFailure> {
     if (!this.tracker.isTerminal()) {
       return failure({
@@ -523,31 +571,52 @@ export class ResponsesProviderStreamDecoder implements ProviderStreamDecoder {
 /**
  * Encodes semantic IR stream events into client-native OpenAI Responses SSE frames.
  *
- * The terminal completion event carries detailed usage subdivisions plus the
- * effective service-tier echo and moderation result when one was captured for
- * this direction.
+ * Emits strictly increasing sequence numbers, lifecycle events, and reconstructed usage.
  */
 export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
   readonly protocol = "openai-responses" as const;
+  /** Stream session providing response ID stamped into event identifiers. */
   private readonly session: StreamSession;
+  /** Budget guarding re-serialized tool arguments emitted at function-part close. */
   private readonly budget: StreamToolArgumentsBudget;
+  /** Next sequence number to stamp; requires strict monotonicity. */
   private sequenceNumber = 1;
+  /** Whether lifecycle-opening frames have been emitted. */
   private emittedLifecycleOpening = false;
+  /** Response-side sidecar facts injected before the terminal event. */
   private outcomeWireOptions: OutcomeWireOptions = {};
+  /** Open function parts accumulated until close emits the full item. */
   private readonly openFunctionParts = new Map<
     string,
     { itemId: string; callId: string; name: string; arguments: string }
   >();
 
+  /**
+   * Creates an encoder bound to one stream session.
+   *
+   * @param session - Stream session providing response ID and model name.
+   * @param maxArgumentBytes - Optional override for tool-call argument budget.
+   */
   constructor(session: StreamSession, maxArgumentBytes?: number) {
     this.session = session;
     this.budget = new StreamToolArgumentsBudget(maxArgumentBytes);
   }
 
+  /**
+   * Stores response-side sidecar facts to emit with the terminal completion event.
+   *
+   * @param options - Captured facts from provider outcome wire options.
+   */
   setOutcomeWireOptions(options: OutcomeWireOptions): void {
     this.outcomeWireOptions = options;
   }
 
+  /**
+   * Encodes an IR stream event into one or more Responses SSE frames.
+   *
+   * @param event - The IR stream event to encode.
+   * @returns Array of encoded SSE frames, or a normalized failure.
+   */
   encode(event: IrStreamEvent): Result<readonly SseFrame[], NormalizedFailure> {
     const id = `resp_${this.session.responseId}`;
     const frames: SseFrame[] = [];
@@ -822,15 +891,20 @@ export class ResponsesClientStreamEncoder implements ClientStreamEncoder {
     return unsupportedCapability("unknown-stream-event");
   }
 
+  /**
+   * Concludes the client stream.
+   *
+   * @returns Empty array; stream termination is handled by `response_end`.
+   */
   finish(): Result<readonly SseFrame[], NormalizedFailure> {
     return ok([]);
   }
 
   /**
-   * Emits the two lifecycle-opening frames (`response.created`,
-   * `response.in_progress`) that every R client stream must start with. The
-   * `response_start` arm and the first-frame error arm share this helper so an
-   * error-before-start stream opens the same lifecycle shape as a clean one.
+   * Emits lifecycle-opening frames (`response.created`, `response.in_progress`).
+   *
+   * @param id - Prefixed response identifier.
+   * @param frames - Target frame array to append lifecycle frames to.
    */
   private lifecycleOpeningFrames(id: string, frames: SseFrame[]): void {
     this.emittedLifecycleOpening = true;

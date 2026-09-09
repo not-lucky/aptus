@@ -1,3 +1,13 @@
+/**
+ * @fileoverview Public composition root and registry factory for cross-protocol translation.
+ *
+ * Instantiates the standard per-protocol codec registry across OpenAI Chat, OpenAI Responses,
+ * and Anthropic Messages, and exposes {@link createDefaultTranslationCoordinator} to wire
+ * the translation pipeline with optional timestamp clock overrides.
+ *
+ * Also re-exports the translation contract types, coordinator factories, and stream utilities.
+ */
+
 import { ChatEgressEncoder } from "./codecs/chat/egress.ts";
 import { ChatIngressDecoder } from "./codecs/chat/ingress.ts";
 import {
@@ -67,16 +77,17 @@ export type { ResponseOwnership, SseDecodeResult, SseDecoder, SseEncoder, SseFra
 export { createSseDecoder, createSseEncoder } from "./sse.ts";
 export { createIrStreamStateMachine, IrStreamStateMachine } from "./stream-state.ts";
 
+/** Clock configuration options for injecting deterministic timestamps during codec construction. */
 export interface TranslationCodecOptions {
-  /**
-   * Wall-clock Unix epoch seconds used to synthesize client envelope timestamps.
-   * Defaults to the real clock; inject a fixed value for deterministic tests.
-   */
+  /** Wall-clock Unix epoch seconds provider for synthesizing client envelope timestamps. */
   readonly now?: () => number;
 }
 
 /**
  * Instantiates the standard per-protocol codecs registry for Chat, Responses, and Messages.
+ *
+ * @param options - Optional clock configuration for deterministic envelope timestamp generation.
+ * @returns Complete {@link TranslationCodecs} registry with ingress, egress, and streaming codecs.
  */
 export function createTranslationCodecs(options?: TranslationCodecOptions): TranslationCodecs {
   return {
@@ -115,6 +126,9 @@ export function createTranslationCodecs(options?: TranslationCodecOptions): Tran
 
 /**
  * Creates the default initialized translation coordinator with all standard codecs wired.
+ *
+ * @param options - Optional clock configuration forwarded to the codec registry.
+ * @returns Initialized {@link TranslationCoordinator} ready for request and outcome translation.
  */
 export function createDefaultTranslationCoordinator(options?: TranslationCodecOptions): TranslationCoordinator {
   return createTranslationCoordinator(createTranslationCodecs(options));

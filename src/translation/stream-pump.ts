@@ -1,3 +1,11 @@
+/**
+ * @fileoverview Cross-protocol streaming pipeline pumping upstream provider bytes to client SSE chunks.
+ *
+ * Implements {@link TranslatedStreamPump} to coordinate framing, decoding provider SSE chunks
+ * into IR stream events, validating event sequences with {@link IrStreamStateMachine},
+ * observing usage accounting, applying outcome wire sidecars, and encoding target client SSE frames.
+ */
+
 import type { Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import type { ClientStreamEncoder, OutcomeWireOptions, ProviderStreamDecoder } from "./contracts.ts";
@@ -6,24 +14,45 @@ import { normalizeOutcomeWireOptions, outcomeWireOptionsFailure } from "./prefli
 import { failure, ok } from "./result.ts";
 import type { SseDecoder, SseEncoder, SseFrame } from "./sse.ts";
 import type { IrStreamStateMachine } from "./stream-state.ts";
+
 /**
- * Owns the cross-protocol streaming pipeline: strict SSE framing, provider
- * stream decoding, IR state-machine validation, and client stream encoding.
- *
- * The pre-header bootstrap (translated-stream-attempt) and the post-header
- * relay (translated-stream-relay) both drive the same pipeline through this
- * class, so the decode/validate/encode loop lives in exactly one place.
+ * Pipeline coordinating byte framing, IR event parsing, lifecycle validation, and client encoding.
  */
 export class TranslatedStreamPump {
+  /** Terminal usage metrics captured from the provider response end event. */
   private observedUsage: IrUsage | undefined;
+
+  /** Terminal failure recorded if an in-band error occurs during streaming. */
   private observedFailure: NormalizedFailure | undefined;
+
+  /** Incremental SSE framing decoder for incoming provider bytes. */
   private readonly sseDecoder: SseDecoder;
+
+  /** Canonical SSE frame serializer for outgoing client chunks. */
   private readonly sseEncoder: SseEncoder;
+
+  /** Protocol-specific stream decoder yielding semantic IR events. */
   private readonly providerDecoder: ProviderStreamDecoder;
+
+  /** Stateful lifecycle validator enforcing IR stream sequence invariants. */
   private readonly stateMachine: IrStreamStateMachine;
+
+  /** Protocol-specific stream encoder transforming IR events to client SSE frames. */
   private readonly clientEncoder: ClientStreamEncoder;
+
+  /** Callback invoked synchronously for each validated IR stream event. */
   private readonly onEvent: (event: IrStreamEvent) => void;
 
+  /**
+   * Initializes a translated streaming pump with framing and codec pipeline stages.
+   *
+   * @param sseDecoder - Incremental SSE framing decoder for provider bytes.
+   * @param sseEncoder - Canonical SSE encoder for client chunks.
+   * @param providerDecoder - Protocol-specific stream decoder bound to the provider session.
+   * @param stateMachine - Lifecycle state machine tracking event sequencing.
+   * @param clientEncoder - Protocol-specific stream encoder bound to the client session.
+   * @param onEvent - Event listener callback for telemetry and observation.
+   */
   constructor(
     sseDecoder: SseDecoder,
     sseEncoder: SseEncoder,
@@ -40,30 +69,41 @@ export class TranslatedStreamPump {
     this.onEvent = onEvent;
   }
 
-  /** Final usage observed on the stream's `response_end`, if any. */
+  /**
+   * Retrieves the final usage metrics captured from the stream, if reported by the provider.
+   *
+   * @returns Terminal {@link IrUsage} metrics, or `undefined` if absent or stream is incomplete.
+   */
   getUsage(): IrUsage | undefined {
     return this.observedUsage;
   }
 
-  /** In-band error failure observed on the stream, if any. */
+  /**
+   * Retrieves the in-band provider error failure, if one occurred during streaming.
+   *
+   * @returns Terminal {@link NormalizedFailure}, or `undefined` if no in-band error occurred.
+   */
   getFailure(): NormalizedFailure | undefined {
     return this.observedFailure;
   }
 
-  /** Whether the IR state machine has reached a terminal state. */
+  /**
+   * Checks whether the stream lifecycle state machine has reached a terminal state.
+   *
+   * @returns True if stream reached terminal completion or error.
+   */
   isTerminal(): boolean {
     return this.stateMachine.isTerminal();
   }
 
   /**
-   * Feeds one provider byte segment through SSE framing and the semantic pipeline.
+   * Consumes an incoming chunk of provider bytes, returning encoded client SSE byte chunks.
    *
-   * @returns Ordered target client chunks, or a terminal fail-closed failure.
+   * @param bytes - Incoming raw byte segment from upstream provider transport.
+   * @returns List of encoded client byte chunks, or normalized failure if parsing or validation failed.
    */
   pushBytes(bytes: Uint8Array): Result<readonly Uint8Array[], NormalizedFailure> {
-    // An in-band provider error is terminal. Ignore bytes received after it
-    // rather than letting a later provider frame replace the first failure or
-    // turn a target-native error into a second terminal result.
+    // Ignore bytes received after an in-band provider error has already terminated the stream.
     if (this.observedFailure !== undefined) return ok([]);
 
     const chunks: Uint8Array[] = [];
@@ -81,13 +121,11 @@ export class TranslatedStreamPump {
   }
 
   /**
-   * Finishes at EOF: flushes SSE framing, the provider decoder, and the client encoder.
+   * Finalizes framing and flushes remaining client chunks at provider end-of-stream.
    *
-   * @returns Remaining target client chunks, or a terminal fail-closed failure.
+   * @returns Final encoded client byte chunks, or normalized failure if stream was truncated.
    */
   finish(): Result<readonly Uint8Array[], NormalizedFailure> {
-    // The provider error already emitted the target-native terminal frame.
-    // Do not flush any decoder or encoder state after it.
     if (this.observedFailure !== undefined) return ok([]);
 
     const chunks: Uint8Array[] = [];
@@ -127,6 +165,9 @@ export class TranslatedStreamPump {
     return ok(chunks);
   }
 
+  /**
+   * Decodes one SSE frame into IR stream events and processes them in sequence.
+   */
   private processFrame(frame: SseFrame, chunks: Uint8Array[]): Result<void, NormalizedFailure> {
     if (this.observedFailure !== undefined) return ok(undefined);
 
@@ -142,6 +183,9 @@ export class TranslatedStreamPump {
     return ok(undefined);
   }
 
+  /**
+   * Validates one IR stream event, updates telemetry/usage, applies wire options, and encodes client frames.
+   */
   private processEvent(evt: IrStreamEvent, chunks: Uint8Array[]): Result<void, NormalizedFailure> {
     const smResult = this.stateMachine.feed(evt);
     if (!smResult.ok) {
@@ -151,17 +195,10 @@ export class TranslatedStreamPump {
     if (evt.type === "error") {
       this.observedFailure = evt.failure;
     }
-    // Terminal usage invariants (input ≥ cached subdivisions, total ≥
-    // input + output) are enforced inside the IR state machine's feed above,
-    // which fails closed before any client frame encodes.
     if (evt.type === "response_end" && evt.usage !== undefined) {
       this.observedUsage = evt.usage;
     }
-    // Outcome wire-options channel: the stream path bypasses the complete-path
-    // outcome preflight, so direction feasibility for the response-side sidecar
-    // runs here, at the terminal event, before the final client frame encodes.
-    // By this point the provider decoder has parsed the terminal frame that
-    // carried any moderation result or service-tier echo.
+    // Outcome wire options: evaluate direction feasibility at response_end before client framing.
     if (evt.type === "response_end") {
       const wireOptions = this.providerDecoder.getOutcomeWireOptions();
       const failResult = this.applyOutcomeWireOptions(wireOptions);
@@ -178,9 +215,7 @@ export class TranslatedStreamPump {
   }
 
   /**
-   * Applies direction feasibility to the outcome sidecar and hands the
-   * normalized options to the client encoder. Both rules are shared with the
-   * complete-path outcome preflight, which the stream path bypasses.
+   * Enforces direction feasibility and normalizes outcome wire options before terminal frame encoding.
    */
   private applyOutcomeWireOptions(wireOptions: OutcomeWireOptions): Result<void, NormalizedFailure> {
     if (wireOptions.moderation === undefined && wireOptions.serviceTier === undefined) {

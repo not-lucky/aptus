@@ -1,12 +1,28 @@
+/**
+ * @fileoverview Projection of intermediate representation output formats onto target wire protocols.
+ *
+ * Translates semantic IR output shapes (text, structured JSON schemas) and legacy JSON object
+ * modes into protocol-specific wire fields: Chat `response_format`, Responses `text.format` and
+ * `text.verbosity`, and Messages `output_config`.
+ *
+ * Used by complete and streaming egress encoders across OpenAI Chat, OpenAI Responses, and
+ * Anthropic Messages to ensure consistent wire schema generation.
+ */
+
 import type { JsonValue } from "../../../domain/contracts.ts";
 import type { RequestWireOptions } from "../../contracts.ts";
 import type { IrGenerationControls, IrOutputFormat } from "../../ir.ts";
 
-/** Wire-only schema name synthesized for target protocols that require a name when the IR has none. */
+/** Default schema name synthesized when target wires require a named schema but the IR provides none. */
 export const SYNTHESIZED_FORMAT_NAME = "response";
 
 /**
- * Projects IR output format and wire options onto Chat `response_format`.
+ * Projects IR output shape and sidecar flags into Chat `response_format` fields.
+ * Legacy JSON object mode takes precedence over IR output formats.
+ *
+ * @param output - IR output format specification.
+ * @param wireOptions - Request sidecar containing wire-specific options.
+ * @returns Record containing `response_format` when applicable, or empty object.
  */
 export function chatOutputFormatFields(
   output: IrOutputFormat | undefined,
@@ -29,8 +45,13 @@ export function chatOutputFormatFields(
 }
 
 /**
- * Projects Responses `text` configuration, merging generation verbosity with
- * output format (from sidecar or IR output).
+ * Projects verbosity controls and IR output shape into Responses `text` configuration fields.
+ * Legacy JSON object mode takes precedence over IR output formats.
+ *
+ * @param generation - Generation controls potentially carrying verbosity.
+ * @param output - IR output format specification.
+ * @param wireOptions - Request sidecar containing wire-specific options.
+ * @returns Record containing `text` configuration when applicable, or empty object.
  */
 export function responsesTextConfig(
   generation: IrGenerationControls | undefined,
@@ -62,10 +83,13 @@ export function responsesTextConfig(
 }
 
 /**
- * Projects IR output format onto Messages `output_config`.
+ * Projects IR output shape into Anthropic Messages `output_config` fields.
+ * Omitted for plain text responses as Messages defaults to text.
+ *
+ * @param output - IR output format specification.
+ * @returns Record containing `output_config` for JSON schemas, or empty object.
  */
 export function messagesOutputConfigFields(output: IrOutputFormat | undefined): Record<string, JsonValue> {
-  // Omitted `output` or explicit `type: "text"` means text; M wire omits `output_config` entirely for text.
   if (output === undefined || output.type !== "json_schema") return {};
   return {
     output_config: {

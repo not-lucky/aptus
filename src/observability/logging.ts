@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Structured JSON-lines logging for the Aptus gateway.
+ *
+ * Configures the process-global LogTape logging subsystem and exposes the shared
+ * gateway logger. Log records are formatted as single-line JSON objects with flattened
+ * event properties for direct ingestion by log aggregators.
+ *
+ * Invariants: Sensitive credentials, raw model IDs, and client IP addresses are never
+ * logged. Startup configuration runs once before traffic admission.
+ */
+
 import {
   configureSync,
   getConsoleSink,
@@ -9,25 +20,21 @@ import {
 import type { LoggingConfig } from "../config/types.ts";
 
 /**
- * One JSON object per line with every documented event field flattened into
- * the top level: `{"@timestamp","level","message","logger",...fields}`.
+ * JSON-lines formatter that flattens event fields to the top level of each record.
  *
- * LogTape's default console formatter renders only the event name and drops
- * the record properties, which would violate the operations contract that
- * every log is structured with its stable required fields.
+ * Renders timestamp, level, message, logger category, and event properties into
+ * a single flat JSON object per line with dot-separated categories.
  */
 const consoleFormatter = getJsonLinesFormatter({ message: "rendered", properties: "flatten", categorySeparator: "." });
 
 /**
- * Configures the global LogTape configuration for the `"aptus"` category.
+ * Installs the process-global LogTape logging configuration.
  *
- * A custom sink may be supplied (used by tests to capture structured records);
- * otherwise the console sink renders JSON-lines records through stdout/stderr.
- * When `config.enabled` is `false`, the logger's `lowestLevel` is `null` so
- * every record is rejected.
+ * Sets up the `"aptus"` logger category with the configured severity threshold
+ * and sink. When logging is disabled, the lowest level is set to null to drop records.
  *
- * @param config - Structured logging configuration.
- * @param sink - Optional custom sink (defaults to the JSON-lines console sink).
+ * @param config - Logging configuration containing enablement and level threshold.
+ * @param sink - Optional custom sink override; defaults to the JSON-lines console sink.
  */
 export function configureLogging(config: LoggingConfig, sink?: Sink): void {
   configureSync({
@@ -41,13 +48,11 @@ export function configureLogging(config: LoggingConfig, sink?: Sink): void {
 }
 
 /**
- * Returns the configured `"aptus"` logger.
+ * Returns the shared LogTape logger for the `"aptus"` category.
  *
- * Configured event names are emitted as the structured log
- * message with their required fields as properties. Secrets, raw model IDs,
- * and URLs are never logged.
+ * Callers emit documented structured event names with safe payload properties.
  *
- * @returns The shared `"aptus"` LogTape logger.
+ * @returns The shared LogTape {@link Logger} instance.
  */
 export function aptusLogger(): Logger {
   return getLogger("aptus");

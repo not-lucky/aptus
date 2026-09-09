@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Delivery of complete and streaming provider responses to downstream HTTP clients.
+ *
+ * Coordinates the terminal phase of request execution: {@link relayComplete} transfers non-streaming
+ * payloads (spooling memory vs disk payloads to trace), {@link relayTranslatedComplete} delivers
+ * cross-protocol converted JSON responses, and {@link relayStream} streams chunked SSE events while
+ * capturing raw bytes, collecting token usage, and finalizing lifecycle facts.
+ */
+
 import type {
   AttemptObservation,
   GatewayRequest,
@@ -24,35 +34,44 @@ import { createStreamUsageCollector, extractCompleteUsage } from "./usage.ts";
 const utf8Decoder = new TextDecoder();
 const utf8Encoder = new TextEncoder();
 
-/**
- * Context for relaying one attempt's owned response to HTTP.
- */
+/** Shared context required for relaying provider responses to the client. */
 export interface RelayContext {
+  /** Unique request identifier. */
   readonly aptusRequestId: GatewayRequest["aptusRequestId"];
-  /** Monotonic request start used for duration and TTFF metrics. */
+  /** Monotonic millisecond timestamp when request admission completed. */
   readonly started: number;
+  /** Ingress protocol spoken by the client endpoint. */
   readonly endpointProtocol: Protocol;
+  /** Canonical model or route name requested by client. */
   readonly canonicalName: string;
+  /** Upstream provider identifier. */
   readonly providerName: string;
+  /** Protocol spoken by the upstream provider. */
   readonly targetProtocol: Protocol;
+  /** Total number of attempts executed across all candidates. */
   readonly attemptCount: number;
+  /** Active trace session for recording client/provider responses. */
   readonly trace: TraceSession;
+  /** Terminal coordinator tracking lifecycle completion. */
   readonly coordinator: TerminalCoordinator;
+  /** Telemetry observer for lifecycle and cancellation events. */
   readonly observer: GatewayObservability;
+  /** Inbound request abort signal. */
   readonly requestSignal: AbortSignal;
+  /** Monotonic and wall clock source. */
   readonly clock: Clock;
+  /** Pricing configuration for calculating estimated cost. */
   readonly pricing: PricingConfig | null;
 }
 
 /**
- * Relays an already fully read (non-streaming) response to HTTP, recording the
- * terminal Trace and telemetry exactly once.
+ * Relays a non-streaming provider response, recording client traces and finalizing the terminal fact.
  *
- * @param response - Response head and metadata.
- * @param body - The owned response body abstraction.
- * @param observation - Attempt observation.
+ * @param response - Received provider response head.
+ * @param body - Buffered owned body.
+ * @param observation - Classified attempt observation.
  * @param context - Relay execution context.
- * @returns Complete {@link GatewayResult}.
+ * @returns Complete gateway result with delivery finalization callback.
  */
 export async function relayComplete(
   response: ProviderResponse,
@@ -177,14 +196,11 @@ export async function relayComplete(
 /**
  * Relays an egress-encoded cross-protocol translated response to HTTP.
  *
- * Emits the client-native body and headers, records `client_response` trace,
- * and derives terminal usage and cost estimation from the semantic IrOutcome.
- *
- * @param _response - Raw provider response (disposed).
- * @param rawProviderBody - Raw provider body (disposed).
- * @param outcome - Translated outcome containing client body, status, headers, and IrOutcome.
+ * @param _response - Original upstream response.
+ * @param rawProviderBody - Raw upstream body to be disposed.
+ * @param outcome - Translated outcome containing client-facing body, status, and headers.
  * @param context - Relay execution context.
- * @returns Complete {@link GatewayResult}.
+ * @returns Complete gateway result with delivery finalization callback.
  */
 export async function relayTranslatedComplete(
   _response: ProviderResponse,
@@ -251,12 +267,11 @@ export async function relayTranslatedComplete(
 }
 
 /**
- * Wraps a streaming provider body for relay, streaming chunks to trace sinks and
- * finishing the Trace/telemetry exactly once at end/error/cancel.
+ * Wraps a native streaming provider body for client relay, tapping chunks into trace and usage collectors.
  *
- * @param response - Upstream provider response.
+ * @param response - Upstream provider response holding readable stream body.
  * @param context - Relay execution context.
- * @returns Streaming {@link GatewayResult}.
+ * @returns Streaming gateway result managing chunk delivery and terminal finalization.
  */
 export function relayStream(response: ProviderResponse, context: RelayContext): GatewayResult {
   const reader = response.body.getReader();
@@ -282,7 +297,6 @@ export function relayStream(response: ProviderResponse, context: RelayContext): 
             await providerSink.complete().catch(() => undefined);
 
             if (!usageResult.hasValidTerminal && !usageResult.isProviderError) {
-              // Interrupted before terminal marker
               const durationMs = context.clock.nowMonotonicMs() - context.started;
               const failure = interruptedFailure();
               await context.coordinator.finalize({

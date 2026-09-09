@@ -1,53 +1,54 @@
+/**
+ * @fileoverview Unauthenticated operations Express application for health and metrics.
+ *
+ * Exposes unauthenticated diagnostic endpoints: `/metrics` for Prometheus scraping,
+ * `/health/live` for process liveness, and `/health/ready` (and `/health`) for readiness.
+ * Readiness checks evaluate shutdown drain state, file trace readiness, and key availability.
+ */
+
 import express from "express";
 import type { AptusConfig } from "../config/types.ts";
 import type { HealthPayload } from "../domain/operations.ts";
 import type { MetricsRegistry } from "../observability/metrics.ts";
 
 /**
- * Mutable process-local runtime state shared across HTTP listeners and shutdown handlers.
+ * Mutable process-local runtime state inspected by health checks.
  */
 export interface RuntimeState {
-  /**
-   * Set to `true` when graceful process shutdown begins, causing `/health/ready` to report degraded 503.
-   */
+  /** True when graceful process shutdown has initiated. Causes readiness probes to fail. */
   draining: boolean;
 
-  /**
-   * File trace subsystem readiness. Set to `false` if runtime trace write errors occur.
-   */
+  /** True when file tracing is initialized and healthy without write degradation. */
   traceReady: boolean;
 }
 
 /**
- * Initialization options for constructing the unauthenticated operations Express application.
+ * Options for constructing the operations Express application.
  */
 export interface OperationsAppOptions {
-  /** Deep-frozen active configuration. */
+  /** Active configuration snapshot providing metrics settings and provider key pools. */
   config: AptusConfig;
-  /** SHA-256 digest of active redacted configuration. */
+  /** SHA-256 hash of active redacted configuration. */
   revision: string;
-  /** Shared runtime state reference. */
+  /** Mutable runtime state tracking draining and trace readiness. */
   state: RuntimeState;
-  /** The single Prometheus metrics registry rendered by `/metrics`. */
+  /** Process-local Prometheus metrics registry. */
   metrics: MetricsRegistry;
 }
 
 /**
- * Instantiates the Express application for the unauthenticated operations listener.
+ * Creates the Express application serving operations endpoints (`/metrics`, `/health/*`).
  *
- * Endpoints:
- * - `GET /metrics`: Prometheus metrics scrape endpoint (returns 404 when metrics are disabled).
- * - `GET /health/live`: Liveness check (always returns HTTP 200 `status: "ok"` while process is alive).
- * - `GET /health/ready`: Readiness check (returns HTTP 200 if not draining, traceReady is true, and providers are available; otherwise 503 `status: "degraded"`).
- * - `GET /health`: Exact readiness alias for compatibility with standard container probes.
+ * - `GET /metrics`: Renders Prometheus text exposition, or returns 404 if metrics are disabled.
+ * - `GET /health/live`: Returns 200 OK while the event loop and process are alive.
+ * - `GET /health/ready` (and `/health`): Returns 200 OK if not draining, traces ready, and providers available; 503 otherwise.
  *
- * @param options - Application construction options.
- * @returns Configured Express application.
+ * @param options - Configuration, state reference, and metrics registry.
+ * @returns An Express application ready for HTTP listener binding.
  */
 export function createOperationsApp(options: OperationsAppOptions): express.Express {
   const { config, revision, state, metrics } = options;
 
-  // Count providers with at least one enabled key.
   const enabledProviderCount = config.providers.filter((provider) => provider.keys.some((key) => key.enabled)).length;
 
   const payload = (status: "ok" | "degraded"): HealthPayload => ({
@@ -57,7 +58,6 @@ export function createOperationsApp(options: OperationsAppOptions): express.Expr
     enabledProviderCount,
   });
 
-  // Readiness condition: must not be in shutdown drain, trace subsystem must be healthy, and at least 1 provider has an enabled key.
   const ready = (): boolean => !state.draining && state.traceReady && enabledProviderCount > 0;
 
   const app = express();

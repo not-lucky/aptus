@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Ingress admission and security validation gate for incoming client requests.
+ *
+ * Validates request headers and bodies before gateway dispatch: enforces JSON content types,
+ * streams payloads with hard size limits, validates UTF-8 byte sequences, parses JSON with
+ * strict duplicate-key rejection (preventing parameter-smuggling attacks), and filters inbound
+ * headers against credentials, hop-by-hop framing, and untrusted proxy forwarding.
+ */
+
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { BlockList, isIP } from "node:net";
 import { TextDecoder } from "node:util";
@@ -6,6 +16,11 @@ import type { IrFailureCategory } from "../domain/operations.ts";
 
 /**
  * Ingress admission failure description.
+ *
+ * A plain data carrier: the error-encoder maps the category to an HTTP
+ * status and relays the message to the client, so neither field is ever
+ * mutated after creation. Messages are bounded and never echo header
+ * values or body content, to keep them safe to log.
  */
 export interface IngressFailure {
   /** Failure category for status mapping (e.g. `invalid_request` or `payload_too_large`). */
@@ -16,6 +31,10 @@ export interface IngressFailure {
 
 /**
  * Result of duplicate-free JSON parsing.
+ *
+ * The ok variant carries the parsed value; the failure variant carries the
+ * exact reason the text was rejected (syntax error, duplicate key, trailing
+ * content), so tests can pin the message.
  */
 export type JsonParseResult =
   | { readonly ok: true; readonly value: JsonValue }
@@ -23,6 +42,11 @@ export type JsonParseResult =
 
 /**
  * Result of request body admission and header filtering.
+ *
+ * This is the all-or-nothing verdict on one incoming request: on success it
+ * carries the parsed JSON object and the sanitized header map that the
+ * gateway should see, and on failure the request never proceeds any
+ * further. There is no partial admission.
  */
 export type AdmissionResult =
   | { readonly ok: true; readonly body: JsonObject; readonly headers: HeaderMap }
@@ -40,10 +64,20 @@ const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
  * 6. Validates root payload is a JSON object.
  * 7. Filters inbound headers against forbidden and trusted proxy forwarding rules.
  *
- * @param request - Incoming Node HTTP request.
- * @param bodyLimitBytes - Configured maximum body size limit in bytes.
- * @param trustedProxyCidrs - List of trusted reverse proxy IPv4 CIDRs.
- * @returns Promise resolving to {@link AdmissionResult}.
+ * @param request - The incoming Node HTTP request. The body is consumed by
+ *   this function; headers are read but never modified.
+ * @param bodyLimitBytes - The configured maximum body size in bytes. The
+ *   count includes every byte received, so a body one byte over the limit
+ *   is rejected. It must be a positive integer.
+ * @param trustedProxyCidrs - The trusted reverse proxy IPv4 CIDR allowlist
+ *   used by the header filtering step. When empty, no peer is trusted and
+ *   all forwarding headers are stripped. The default is empty, which is the
+ *   safe posture for a deployment without a reverse proxy.
+ * @returns A promise resolving to {@link AdmissionResult}: on success the
+ *   parsed body and cleaned headers, and on failure the ingress failure
+ *   describing the first check that did not pass, in the order documented
+ *   in the summary. The promise never rejects; transport-level read errors
+ *   are reported as `invalid_request` failures.
  */
 export async function admitJsonObject(
   request: IncomingMessage,
@@ -91,10 +125,23 @@ export async function admitJsonObject(
 }
 
 /**
- * Parses a JSON text string, strictly rejecting duplicate object keys at all nesting depths.
+ * Parses a JSON text string, strictly rejecting duplicate object keys at
+ * all nesting depths.
  *
- * @param text - Raw JSON string to parse.
- * @returns Result containing the parsed {@link JsonValue} or an {@link IngressFailure}.
+ * The function also enforces single-value documents: trailing content after
+ * the first JSON value (two objects back to back, or trailing garbage) is
+ * rejected, which `JSON.parse` alone would not catch.
+ *
+ * The function is synchronous, pure, and never throws; every invalid input
+ * is reported through the failure variant.
+ *
+ * @param text - The raw JSON string to parse. It is expected to be valid
+ *   UTF-8 text already; encoding problems are the caller's step and are
+ *   rejected there.
+ * @returns A result containing the parsed {@link JsonValue} on success, or
+ *   an `invalid_request` {@link IngressFailure} naming the first syntax
+ *   problem (including the duplicate-key and trailing-content cases) on
+ *   failure.
  */
 export function parseDuplicateFreeJson(text: string): JsonParseResult {
   const parser = new JsonParser(text);
@@ -111,10 +158,19 @@ export function parseDuplicateFreeJson(text: string): JsonParseResult {
  * - Strips hop-by-hop and transport framing headers (`connection`, `content-length`, etc.).
  * - Strips forwarding headers (`X-Forwarded-*`, `Forwarded`) unless peer IP is within `trustedProxyCidrs`.
  *
- * @param headers - Raw incoming HTTP headers.
- * @param peerAddress - Remote socket IP address.
- * @param trustedProxyCidrs - List of trusted reverse proxy IPv4 CIDRs.
- * @returns Cleaned {@link HeaderMap}.
+ * @param headers - The raw incoming HTTP headers, with Node's
+ *   lowercase-name and possible array-value conventions. They are read
+ *   only; the input object is never modified.
+ * @param peerAddress - The remote socket IP address, used for the
+ *   trusted-proxy decision. It can be `undefined` (for example on a
+ *   Unix socket), which is treated as untrusted.
+ * @param trustedProxyCidrs - The trusted reverse proxy IPv4 CIDR allowlist.
+ *   When empty, or when the peer is not inside any listed network, all
+ *   forwarding headers are stripped rather than trusted.
+ * @returns The cleaned {@link HeaderMap}: lowercase names, array values
+ *   joined with a comma and a space, credentials and hop-by-hop headers
+ *   removed, and forwarding headers present only when the peer is a
+ *   trusted proxy.
  */
 export function filterClientHeaders(
   headers: IncomingHttpHeaders,
@@ -133,6 +189,18 @@ export function filterClientHeaders(
   return result;
 }
 
+/**
+ * Builds the failure variant shared by every admission check.
+ *
+ * A tiny constructor that keeps the failure shape in one place so the
+ * category and message fields stay consistent across the many checks in
+ * this module. It is synchronous, pure, and never throws.
+ *
+ * @param category - The failure category to report, which the error encoder
+ *   maps onto an HTTP status.
+ * @param message - The bounded, client-safe error description.
+ * @returns The failure-shaped result object.
+ */
 function failure(
   category: IrFailureCategory,
   message: string,
@@ -203,7 +271,22 @@ function isJsonWhitespace(character: string | undefined): boolean {
 }
 
 /**
- * Fast recursive-descent JSON parser that detects duplicate keys in objects at every nesting level.
+ * Fast recursive-descent JSON parser that detects duplicate keys in objects
+ * at every nesting level.
+ *
+ * The class exists to back {@link parseDuplicateFreeJson}; the built-in
+ * `JSON.parse` cannot express the duplicate-key rejection, and wrapping it
+ * with a second scan would parse everything twice. The parser follows RFC
+ * 8259: it accepts objects, arrays, strings (with full escape and UTF-16
+ * surrogate-pair handling), numbers (with strict grammar and a finiteness
+ * check), and the three literals, and it rejects trailing content. Errors
+ * are reported by setting the public `error` field and returning
+ * `undefined`, because parse failures are a normal, expected outcome here
+ * rather than an exceptional one.
+ *
+ * One instance parses one document; instances are not reusable after a
+ * completed parse. All methods are synchronous and side-effect free beyond
+ * the instance's own cursor and error state.
  */
 class JsonParser {
   readonly #text: string;

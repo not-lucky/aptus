@@ -1,3 +1,11 @@
+/**
+ * @fileoverview Egress encoder for the OpenAI Responses protocol.
+ *
+ * Encodes intermediate representation (IR) requests and outcomes onto the OpenAI Responses
+ * wire format. Translates generation controls, text verbosity, reasoning effort, prompt
+ * cache breakpoints, tool declarations, output partitioning, usage accounting, and
+ * sidecar options.
+ */
 import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject } from "../../../domain/contracts.ts";
 import type { EgressEncoder, OutcomeWireOptions, RequestWireOptions } from "../../contracts.ts";
@@ -14,26 +22,31 @@ import { responsesUsageBody } from "../shared/usage.ts";
 import { chatResponsesRequestFields, responsesOutcomeWireFields } from "../shared/wire-options.ts";
 
 /**
- * Egress encoder for OpenAI Responses requests and responses.
- *
- * Request encoding projects IR generation controls (including `text.verbosity`
- * and `reasoning.effort`) and the admitted wire-only sidecar fields onto
- * Responses wire fields; per-part prompt-cache breakpoints are re-anchored onto
- * the reconstructed input parts. Outcome encoding emits usage subdivisions,
- * the moderation result in Responses' singular-verdict form, and the effective
- * service-tier echo.
+ * Encodes IR requests and outcomes onto the OpenAI Responses wire shape.
  */
 export class ResponsesEgressEncoder implements EgressEncoder {
-  /**
-   * Wall-clock Unix epoch seconds used to synthesize the envelope `created_at`
-   * timestamp. Injectable so tests stay deterministic; defaults to the real clock.
-   */
+  /** Clock supplying whole Unix epoch seconds for envelope created_at timestamps. */
   private readonly now: () => number;
 
+  /**
+   * Creates an encoder with an optional clock override.
+   *
+   * @param now - Function returning current time as whole Unix epoch seconds. Defaults to `Date.now`.
+   */
   constructor(now: () => number = () => Math.floor(Date.now() / 1000)) {
     this.now = now;
   }
 
+  /**
+   * Encodes an IR request into an OpenAI Responses request body.
+   *
+   * Projects transcript items, generation controls, text config, tools, and wire options.
+   *
+   * @param request - The admitted IR request to encode.
+   * @param targetModel - The provider model name for the target.
+   * @param requestWireOptions - Optional request wire options captured at ingress.
+   * @returns The Responses request body as a JSON object.
+   */
   encodeRequest(request: IrRequest, targetModel: string, requestWireOptions?: RequestWireOptions): JsonObject {
     const markedItems = new Set(
       (requestWireOptions?.promptCacheBreakpoints ?? []).map((breakpoint) => breakpoint.itemIndex),
@@ -51,6 +64,15 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     };
   }
 
+  /**
+   * Encodes an IR outcome as an OpenAI Responses response envelope.
+   *
+   * Partitions output parts, maps finish status, and reconstructs usage and sidecar fields.
+   *
+   * @param outcome - The IR outcome to encode.
+   * @param outcomeWireOptions - Optional outcome wire options captured at ingress.
+   * @returns Response envelope containing status code, headers, and body.
+   */
   encodeOutcome(
     outcome: IrOutcome,
     outcomeWireOptions?: OutcomeWireOptions,
@@ -63,13 +85,13 @@ export class ResponsesEgressEncoder implements EgressEncoder {
     const isContentFilter = outcome.finish.reason === "content_filter";
     const status = responsesFinishStatus(outcome.finish.reason);
 
-    // Never fabricate usage: the IR outcome decides presence, and absence is
-    // distinct from zero (a Chat source may omit usage entirely). Subdivisions
-    // ride in the documented details objects and are never re-added.
+    // Usage absence is distinct from zero, so the field is omitted unless the IR outcome reports counters.
+    // A Chat source can omit usage entirely, and subdivisions ride in the documented details objects without
+    // ever being re-added to totals.
     const usage = outcome.usage !== undefined ? responsesUsageBody(outcome.usage) : undefined;
 
-    // Output items preserve part order and a tool-only outcome emits no empty
-    // message item; an outcome with no parts still carries one.
+    // Output items preserve part order, and a tool-only outcome emits no empty message item. An outcome with
+    // no parts still carries one empty message item so the envelope always carries at least one output item.
     const msgId = (): string => `msg_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const output: JsonObject[] = partitionOutcomeParts(outcome.parts).map(
       (segment): JsonObject =>
@@ -124,9 +146,9 @@ export class ResponsesEgressEncoder implements EgressEncoder {
       model: outcome.model,
       output,
       ...(usage !== undefined ? { usage } : {}),
-      // The moderation result rides in Responses' singular-verdict form and the
-      // tier echo passes through; both projections are shared with the
-      // streaming client encoder.
+      // The moderation result rides in the singular-verdict form that Responses carries, and the service tier
+      // echo passes through. Both projections are shared with the streaming client encoder so complete and
+      // streaming paths keep wire parity by structure.
       ...responsesOutcomeWireFields(outcomeWireOptions),
     };
 

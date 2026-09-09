@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Shared cross-protocol attempt preparer for translated gateway dispatches.
+ *
+ * Implements the {@link AttemptPreparer} interface for cross-protocol requests via
+ * {@link createTranslatedPreparer}: translates client requests to target provider formats
+ * before key acquisition, prepares authenticated provider payloads with the leased key,
+ * and classifies response heads using the target provider protocol adapter.
+ */
+
 import type { GatewayRequest, JsonValue } from "../domain/contracts.ts";
 import type { TranslatedTicket, TranslationCoordinator } from "../translation/contracts.ts";
 import { targetDefaultMaxTokensFrom } from "../translation/coordinator.ts";
@@ -5,23 +15,25 @@ import type { AttemptPreparer } from "./attempt.ts";
 import { failureJson } from "./failures.ts";
 
 /**
- * Shared cross-protocol attempt preparer behind the unified dispatch seam.
+ * Creates an {@link AttemptPreparer} driving cross-protocol request translation and preparation.
  *
- * Single owner of the translate-then-prepare order for every translated path:
- * `translateRequest` (decode, validate, preflight, encode, finalize) before
- * any key lease, ticketed provider preparation after, and target-protocol
- * classification. The complete and stream attempts differ only in the `stream`
- * selector, so a wrong-variant call is unrepresentable.
- *
- * @param translation - Translation coordinator bundle.
- * @param stream - Delivery mode, threaded through translate and prepare by construction.
- * @returns An {@link AttemptPreparer} producing translation tickets.
+ * @param translation - Translation coordinator handling request/response transformation.
+ * @param stream - Whether the request was admitted for streaming delivery.
+ * @returns Attempt preparer yielding {@link TranslatedTicket} instances.
  */
 export function createTranslatedPreparer(
   translation: TranslationCoordinator,
   stream: boolean,
 ): AttemptPreparer<TranslatedTicket> {
   return {
+    /**
+     * Translates the inbound request into the intermediate representation and target wire payload prior to leasing.
+     *
+     * @param candidate - Target candidate descriptor.
+     * @param request - Inbound gateway request.
+     * @param ctx - Attempt execution context.
+     * @returns Translated ticket on success, or normalized translation failure on rejection.
+     */
     prepareBeforeLease: async (candidate, request, ctx) => {
       const translated = translation.translateRequest({
         sourceProtocol: request.protocol,
@@ -47,6 +59,17 @@ export function createTranslatedPreparer(
       await ctx.trace.recordJson("translation_egress", { ok: true });
       return { ok: true as const, value: translated.value };
     },
+
+    /**
+     * Builds the concrete dispatchable provider request from the translation ticket and acquired key lease.
+     *
+     * @param candidate - Target candidate descriptor.
+     * @param request - Inbound gateway request.
+     * @param ctx - Attempt execution context.
+     * @param lease - Acquired provider key lease.
+     * @param pre - Translation ticket prepared prior to lease acquisition.
+     * @returns Result wrapping the prepared provider request.
+     */
     buildRequest: (candidate, request: GatewayRequest, ctx, lease, pre) => ({
       ok: true as const,
       value: translation.prepareTicketRequest(pre, {
@@ -59,6 +82,16 @@ export function createTranslatedPreparer(
         streamIdleMs: ctx.streamIdleMs,
       }),
     }),
+
+    /**
+     * Classifies the response head using the target candidate provider protocol adapter.
+     *
+     * @param candidate - Target candidate descriptor.
+     * @param _request - Inbound gateway request.
+     * @param ctx - Attempt execution context.
+     * @param response - Received provider response head.
+     * @returns Classified attempt observation.
+     */
     classify: (candidate, _request, ctx, response) =>
       ctx.adapters[candidate.provider.protocol].classify(response, ctx.clock.nowWall().getTime()),
   };

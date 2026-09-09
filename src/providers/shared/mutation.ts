@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Ordered native mutation pipeline for same-protocol provider requests.
+ *
+ * Transforms an admitted client payload into an upstream provider request body by
+ * sequentially applying four mutation layers: defaults (insert absent paths), extra body
+ * (deep-merge provider extensions), overrides (replace or insert paths), and model
+ * replacement (swap public name for upstream ID).
+ *
+ * Tracks every inserted or modified leaf as an RFC 6901 JSON Pointer for dry-run
+ * previews and observability traces. Operates on deep clones to preserve immutability.
+ */
+
 import type { JsonObject, JsonValue, NativeMutations } from "../../domain/contracts.ts";
 import {
   cloneJson,
@@ -10,41 +22,37 @@ import {
 } from "../../domain/json.ts";
 
 /**
- * A mutable JSON object (the working copy the mutation pipeline writes into).
+ * Writable representation of {@link JsonObject} for internal pipeline mutations.
  */
 type MutableJsonObject = Record<string, JsonValue>;
 
 /**
  * Result of applying the ordered native mutation pipeline to a client body.
+ *
+ * Pairs the transformed request payload with an ordered list of RFC 6901 JSON
+ * Pointers recording every mutated path for auditing and dry-run reporting.
  */
 export interface NativeMutationResult {
-  /**
-   * Fully mutated request body (a fresh object; the inputs are never mutated).
-   */
+  /** Fully mutated request payload with all configured layers and model replacement applied. */
   readonly body: JsonObject;
 
-  /**
-   * RFC 6901 JSON Pointers recording every mutation in application order.
-   */
+  /** RFC 6901 JSON Pointers for every inserted or modified leaf, in application order. */
   readonly mutations: readonly string[];
 }
 
 /**
- * Applies the protocol-agnostic native mutation pipeline in deterministic order:
+ * Applies the ordered native mutation pipeline to a client body.
  *
- * 1. **defaults** — each leaf inserted only where the path is absent.
- * 2. **extraBody** — deep merge (recurse when both sides are plain objects).
- * 3. **overrides** — replace-or-insert each leaf.
- * 4. **model replacement** — `body.model = upstreamModel`, recorded last.
+ * Clones the input body and executes four deterministic mutation stages:
+ * 1. Defaults: Inserts values at absent paths without overwriting existing client values.
+ * 2. Extra body: Recursively deep-merges provider extensions into matching object trees.
+ * 3. Overrides: Unconditionally replaces or inserts values at specified paths.
+ * 4. Model replacement: Sets the `model` field to the upstream provider identifier.
  *
- * Unknown fields and array order survive; object key order and whitespace are
- * not preserved. The configured mutation maps are deep-frozen and are never
- * mutated; the returned body is a fresh deep clone of the client body.
- *
- * @param clientBody - Parsed, duplicate-free client request body.
- * @param mutations - Ordered native mutation maps.
- * @param upstreamModel - Upstream provider model ID substituted for the public name.
- * @returns The mutated body and the ordered list of mutation pointers.
+ * @param clientBody - Parsed and validated incoming JSON body.
+ * @param mutations - Configured defaults, extra body, and override mappings.
+ * @param upstreamModel - Upstream model identifier to substitute in the payload.
+ * @returns Mutated payload alongside RFC 6901 pointers for all applied mutations.
  */
 export function applyNativeMutations(
   clientBody: JsonObject,
@@ -54,7 +62,7 @@ export function applyNativeMutations(
   const body = cloneJson(clientBody) as MutableJsonObject;
   const pointers: string[] = [];
 
-  // 1. defaults: insert absent-only leaves.
+  // Apply defaults first so that explicit client choices survive and only absent paths gain values.
   if (mutations?.defaults) {
     forEachLeaf(mutations.defaults, (segments, value) => {
       if (pathIsWritable(body, segments) && getPath(body, segments) === undefined) {
@@ -64,12 +72,12 @@ export function applyNativeMutations(
     });
   }
 
-  // 2. extraBody: deep merge, recording each changed/inserted leaf.
+  // Merge the extra body second so that provider extensions overlay the defaulted body leaf by leaf.
   if (mutations?.extraBody) {
     mergeExtraBody(body, mutations.extraBody, pointers, []);
   }
 
-  // 3. overrides: replace-or-insert each changed leaf.
+  // Apply overrides third so that forced values win over the client body and both earlier layers.
   if (mutations?.overrides) {
     forEachLeaf(mutations.overrides, (segments, value) => {
       const existing = getPath(body, segments);
@@ -80,7 +88,7 @@ export function applyNativeMutations(
     });
   }
 
-  // 4. model replacement is recorded only when it actually changes.
+  // Replace the model last and record the pointer only on change, so audits show substitution at the end.
   if (body.model !== upstreamModel) {
     body.model = upstreamModel;
     pointers.push("/model");
@@ -90,9 +98,16 @@ export function applyNativeMutations(
 }
 
 /**
- * Deeply merges `source` into `target`, recursing only when both sides are
- * plain objects; otherwise the source leaf replaces the target value. Every
- * inserted or replaced leaf records its RFC 6901 pointer in application order.
+ * Recursively merges an extra body object into a mutable target.
+ *
+ * Recurses when both target and source values are plain objects; otherwise,
+ * overwrites the target leaf with a clone of the source value and appends an
+ * RFC 6901 pointer if the value changed.
+ *
+ * @param target - Mutable target object being modified in place.
+ * @param source - Extension object containing properties to merge.
+ * @param pointers - Accumulator array for recorded JSON Pointers.
+ * @param segments - Current path segments from the root of the target object.
  */
 function mergeExtraBody(
   target: MutableJsonObject,
@@ -118,7 +133,14 @@ function mergeExtraBody(
 }
 
 /**
- * `true` when every intermediate segment is absent or a plain object.
+ * Checks whether a default path can be created without overwriting existing scalar branches.
+ *
+ * Traverses intermediate segments from the root. Returns `false` if any intermediate
+ * step encounters an existing non-object value (e.g., a primitive scalar or array).
+ *
+ * @param target - Root JSON object being inspected.
+ * @param segments - Full path segments down to the desired leaf property.
+ * @returns `true` if all intermediate segments are objects or absent; `false` otherwise.
  */
 function pathIsWritable(target: JsonObject, segments: readonly string[]): boolean {
   let current: JsonValue | undefined = target;

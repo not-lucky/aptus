@@ -1,3 +1,13 @@
+/**
+ * @fileoverview Capture and egress projection of wire-only sidecar options.
+ *
+ * Preserves protocol facts excluded from provider-independent semantic representations:
+ * store flags, prompt cache options, metadata, moderation results, safety identifiers, and service tiers.
+ * Guarantees that unstated source facts remain absent rather than defaulting silently.
+ *
+ * Shared across OpenAI Chat and OpenAI Responses ingress decoders and egress/stream encoders.
+ */
+
 import type { Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
 import type { OutcomeWireOptions, PromptCacheBreakpoint, RequestWireOptions } from "../../contracts.ts";
@@ -5,19 +15,7 @@ import type { JsonObject, JsonValue } from "../../ir.ts";
 import { invalidRequest, ok } from "../../result.ts";
 import { firstUnknownKey, parseEnumLiteral } from "./controls.ts";
 
-/**
- * Capture and projection of the wire-only sidecar.
- *
- * Wire-only facts ride beside the IR because the IR carries no field for them:
- * storage flags, prompt-cache controls, metadata, safety identity, moderation,
- * and service tier on the request side; moderation and the service-tier echo
- * on the outcome side. Both directions are defined here so the capture rules
- * and the egress projections cannot drift apart, and so no codec has to restate
- * what a sidecar field means. Only explicitly captured values are ever emitted —
- * never a fabricated default.
- */
-
-/** C/R service-tier enum shared by Chat and Responses (request param and echo). */
+/** Service tier literals supported across OpenAI Chat and Responses formats. */
 const CHAT_RESPONSES_SERVICE_TIERS: ReadonlySet<string> = new Set([
   "auto",
   "default",
@@ -27,19 +25,24 @@ const CHAT_RESPONSES_SERVICE_TIERS: ReadonlySet<string> = new Set([
   "fast",
 ]);
 
-/** Result payload of {@link parsePromptCacheOptions}. */
+/** Internal container for parsed prompt cache configuration options. */
 interface PromptCacheOptions {
+  /** Prompt cache management mode (`implicit` or `explicit`), if declared. */
   readonly mode?: "implicit" | "explicit";
+
+  /** Cache entry time-to-live string (e.g. '30m'), if declared. */
   readonly ttl?: "30m";
 }
 
-/** Admitted `prompt_cache_options.mode` literals. */
+/** Supported prompt cache mode literals (`implicit`, `explicit`). */
 const PROMPT_CACHE_MODES: ReadonlySet<"implicit" | "explicit"> = new Set(["implicit", "explicit"]);
 
 /**
- * Parses a boolean wire flag (e.g. `store`). Absent passes through. The flag
- * is documented non-nullable on both Chat and Responses wires, so explicit
- * null fails closed like any other non-boolean value.
+ * Parses an optional boolean wire flag (e.g. `store`).
+ *
+ * @param field - Field name for error attribution.
+ * @param value - Raw wire value to validate.
+ * @returns Parsed boolean, `undefined` if absent, or an `invalid_request` failure.
  */
 function parseBooleanFlag(field: string, value: unknown): Result<boolean | undefined, NormalizedFailure> {
   if (value === undefined) return ok(undefined);
@@ -50,9 +53,11 @@ function parseBooleanFlag(field: string, value: unknown): Result<boolean | undef
 }
 
 /**
- * Parses a string-or-null wire identifier (prompt cache key, safety identifier).
- * Absent passes through as undefined; explicit null passes through as null so
- * explicit values are preserved verbatim; any other type fails `invalid_request`.
+ * Parses an optional string-or-null wire field (e.g. `safety_identifier`).
+ *
+ * @param field - Field name for error attribution.
+ * @param value - Raw wire value to validate.
+ * @returns Parsed string, `null`, `undefined` if absent, or an `invalid_request` failure.
  */
 function parseStringOrNull(field: string, value: unknown): Result<string | null | undefined, NormalizedFailure> {
   if (value === undefined) return ok(undefined);
@@ -64,21 +69,17 @@ function parseStringOrNull(field: string, value: unknown): Result<string | null 
 }
 
 /**
- * Parses a C/R metadata kv object: every value must be a string when the field
- * is present. The Chat wire documents metadata as "object OR null", so explicit
- * null is treated as absent. Size/count subset limits (≤16 entries, key ≤64,
- * value ≤512) are enforced by preflight, not here — the decoder has no
- * direction.
+ * Parses a metadata key-value record where all values must be strings.
+ *
+ * @param value - Raw metadata object.
+ * @returns Parsed string record, `undefined` if absent/null, or an `invalid_request` failure.
  */
 function parseMetadataRecord(value: unknown): Result<Record<string, string> | undefined, NormalizedFailure> {
   if (value === undefined || value === null) return ok(undefined);
   if (typeof value !== "object" || Array.isArray(value)) {
     return invalidRequest("metadata must be an object of string values");
   }
-  // Null prototype so client-supplied keys like "__proto__" survive as own
-  // data properties: plain-object string assignment would silently drop them
-  // through the inherited accessor, and egress spread projection relies on
-  // own-key enumeration for faithful capture.
+  // Null prototype preserves client keys like __proto__ as own properties.
   const record: Record<string, string> = Object.create(null);
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry !== "string") {
@@ -90,9 +91,10 @@ function parseMetadataRecord(value: unknown): Result<Record<string, string> | un
 }
 
 /**
- * Parses the C/R `prompt_cache_options` request object: `{mode?, ttl?}` with
- * the admitted literals only (`implicit|explicit`, `"30m"`). Unrecognized
- * sub-fields fail closed rather than being silently ignored.
+ * Parses a `prompt_cache_options` object containing optional `mode` and `ttl`.
+ *
+ * @param value - Raw prompt cache options value.
+ * @returns Parsed PromptCacheOptions, or an `invalid_request` failure.
  */
 function parsePromptCacheOptions(value: unknown): Result<PromptCacheOptions, NormalizedFailure> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -113,11 +115,11 @@ function parsePromptCacheOptions(value: unknown): Result<PromptCacheOptions, Nor
 }
 
 /**
- * Captures the C/R-shared request wire-only fields from one request body:
- * storage flag, prompt-cache key/options, metadata, legacy user, safety
- * identifier, moderation param, and service tier. Both C/R ingress decoders
- * call this so capability shape rules live in exactly one place; breakpoint
- * markers are NOT handled here because they are anchored during item walking.
+ * Captures request-side wire options from an OpenAI Chat or Responses request body.
+ * Extracts `store`, `metadata`, `prompt_cache_key`, `service_tier`, etc.
+ *
+ * @param body - Decoded source request body JSON object.
+ * @returns Populated RequestWireOptions sidecar, or an `invalid_request` failure.
  */
 export function parseChatResponsesWireOptions(body: JsonObject): Result<RequestWireOptions, NormalizedFailure> {
   const storeResult = parseBooleanFlag("store", body.store);
@@ -136,7 +138,6 @@ export function parseChatResponsesWireOptions(body: JsonObject): Result<RequestW
       return invalidRequest("moderation must be an object or null when present");
     }
   }
-  // Explicit null is a valid C/R wire value and round-trips verbatim.
   let tierValue: string | null | undefined;
   if (body.service_tier === null) {
     tierValue = null;
@@ -167,9 +168,11 @@ export function parseChatResponsesWireOptions(body: JsonObject): Result<RequestW
 }
 
 /**
- * Validates one per-part prompt-cache breakpoint marker on a C/R content part:
- * the documented wire shape is exactly `{mode: "explicit"}`. Any other shape
- * fails `invalid_request`.
+ * Validates a prompt cache breakpoint marker on a content part (`{mode: "explicit"}`).
+ *
+ * @param partPath - Content part path for error formatting.
+ * @param marker - Raw breakpoint marker value.
+ * @returns Success if valid, or an `invalid_request` failure.
  */
 function parseBreakpointMarker(partPath: string, marker: unknown): Result<void, NormalizedFailure> {
   if (typeof marker !== "object" || marker === null || Array.isArray(marker)) {
@@ -184,10 +187,13 @@ function parseBreakpointMarker(partPath: string, marker: unknown): Result<void, 
 }
 
 /**
- * Validates one per-part prompt-cache marker and records its IR anchor on the
- * shared C/R breakpoint list. Instruction anchors omit `partIndex`: a system
- * message's parts concatenate into one instruction item and every C/R
- * re-anchor is item-granular.
+ * Validates a prompt cache breakpoint marker and constructs an IR anchor.
+ *
+ * @param path - Content part path for error formatting.
+ * @param marker - Raw breakpoint marker value.
+ * @param itemIndex - Index of the parent IR item.
+ * @param partIndex - Optional index of the content part within the item.
+ * @returns PromptCacheBreakpoint anchor, or an `invalid_request` failure.
  */
 export function captureBreakpoint(
   path: string,
@@ -201,14 +207,10 @@ export function captureBreakpoint(
 }
 
 /**
- * Normalizes a moderation response-result side ({input, output} member) into
- * the singular-verdict normal form: a Chat `{type:"moderation_results", model,
- * results:[verdict]}` wrapper unwraps to its verdict; singular verdicts, error
- * variants, and any other shape pass through untouched. Both C and R hold one
- * verdict per side: a wrapper carrying zero or multiple verdicts fails closed
- * instead of truncating to the first entry or leaking the raw wrapper, and a
- * wrapper whose `results` field is absent or not an array fails closed too,
- * so the wrapper shape never leaks onto a Responses client.
+ * Normalizes one side of a moderation result into a bare singular verdict.
+ *
+ * @param side - Input or output moderation payload.
+ * @returns Normalized verdict value, or an `invalid_request` failure.
  */
 function normalizeModerationSide(side: JsonValue): Result<JsonValue, NormalizedFailure> {
   if (typeof side !== "object" || side === null || Array.isArray(side)) return ok(side);
@@ -221,21 +223,17 @@ function normalizeModerationSide(side: JsonValue): Result<JsonValue, NormalizedF
 }
 
 /**
- * Projects one normalized moderation result side onto the Chat client wire
- * shape: singular verdicts are wrapped as
- * `{type:"moderation_results", model, results:[verdict]}`; non-object sides
- * (including explicit null) pass through verbatim; already-wrapped or
- * error-shaped sides pass through unchanged (deterministic re-wrap only).
+ * Wraps a normalized moderation verdict into the Chat `moderation_results` envelope.
+ *
+ * @param side - Normalized moderation verdict.
+ * @returns Wrapped Chat moderation results object.
  */
 function encodeChatModerationSide(side: JsonValue): JsonValue {
   if (typeof side !== "object" || side === null || Array.isArray(side)) {
     return side;
   }
   const record = side as JsonObject;
-  // Already in wrapper form, or an error variant: nothing to re-wrap.
   if (record.type === "moderation_results" || record.type === "error") return record;
-  // Absence is never fabricated: a verdict without a model string re-wraps
-  // without one instead of synthesizing an empty-string placeholder.
   return {
     type: "moderation_results",
     ...(typeof record.model === "string" ? { model: record.model } : {}),
@@ -244,11 +242,10 @@ function encodeChatModerationSide(side: JsonValue): JsonValue {
 }
 
 /**
- * Copies a normalized `{input, output}` moderation result object, preserving
- * each side's presence exactly as the source carried it: an absent side stays
- * absent on the target wire instead of being fabricated as null (absence is
- * distinct from value everywhere in the translation layer). Any other top-level
- * key fails closed — unrecognized moderation facts are never silently dropped.
+ * Deep-copies and normalizes an `{input, output}` moderation result object.
+ *
+ * @param moderation - Raw moderation result object.
+ * @returns Normalized moderation object, or an `invalid_request` failure.
  */
 function copyModerationResult(moderation: JsonObject): Result<JsonObject, NormalizedFailure> {
   if (firstUnknownKey(moderation, ["input", "output"]) !== undefined) {
@@ -273,13 +270,12 @@ function copyModerationResult(moderation: JsonObject): Result<JsonObject, Normal
 }
 
 /**
- * Captures the C/R-shared response-side wire-only facts from one outcome
- * record (or per-chunk stream record): the moderation result — normalized to
- * the unwrapped `{input, output}` form after its strict object-or-null shape
- * check — and the service-tier echo. Merges over any previously captured
- * options so per-chunk last-write-wins capture never drops an earlier fact.
- * Shared by both complete-path outcome decoders and both C/R provider stream
- * decoders so the envelope rules live in exactly one place.
+ * Captures outcome wire facts (`service_tier`, `moderation`) from response bodies or stream chunks.
+ *
+ * @param record - Decoded outcome wire record or stream frame.
+ * @param existing - Accumulator of previously captured outcome wire options.
+ * @param label - Protocol label for error reporting.
+ * @returns Merged OutcomeWireOptions, or an `invalid_request` failure.
  */
 export function captureOutcomeWireFacts(
   record: Record<string, unknown>,
@@ -302,12 +298,10 @@ export function captureOutcomeWireFacts(
 }
 
 /**
- * Projects the response-side wire options onto Chat client fields: the
- * moderation result re-wrapped into the Chat verdict envelope per present side
- * (the `{input, output}` split is preserved; sides absent at capture stay
- * absent), plus the service-tier echo. Out-of-vocabulary tier echoes are
- * stripped by direction normalization before this projection runs. Shared by
- * the complete egress and the streaming client encoder.
+ * Projects outcome wire options onto Chat response envelope fields (`moderation`, `service_tier`).
+ *
+ * @param options - Captured outcome wire options.
+ * @returns Record of Chat response wire fields.
  */
 export function chatOutcomeWireFields(options: OutcomeWireOptions | undefined): Record<string, JsonValue> {
   if (options === undefined) return {};
@@ -326,10 +320,10 @@ export function chatOutcomeWireFields(options: OutcomeWireOptions | undefined): 
 }
 
 /**
- * Projects the response-side wire options onto Responses client fields: the
- * moderation result in its stored singular-verdict normal form plus the
- * service-tier echo. Shared by the complete egress and the streaming client
- * encoder so complete-vs-stream wire parity is structural.
+ * Projects outcome wire options onto Responses envelope fields (`moderation`, `service_tier`).
+ *
+ * @param options - Captured outcome wire options.
+ * @returns Record of Responses response wire fields.
  */
 export function responsesOutcomeWireFields(options: OutcomeWireOptions | undefined): Record<string, JsonValue> {
   if (options === undefined) return {};
@@ -340,10 +334,10 @@ export function responsesOutcomeWireFields(options: OutcomeWireOptions | undefin
 }
 
 /**
- * Projects the C/R-shared request wire options onto their common top-level
- * field names (`store`, `prompt_cache_key`, `prompt_cache_options`, `metadata`,
- * `user`, `safety_identifier`, `moderation`, `service_tier`). Only explicitly
- * captured values are emitted — never a fabricated default.
+ * Projects request wire options onto common Chat/Responses request fields (`store`, `metadata`, etc.).
+ *
+ * @param options - Captured request wire options.
+ * @returns Record of wire request fields.
  */
 export function chatResponsesRequestFields(options: RequestWireOptions | undefined): Record<string, JsonValue> {
   if (options === undefined) return {};

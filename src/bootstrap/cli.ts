@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+/**
+ * @packageDocumentation Command-line entry point for the Aptus gateway process.
+ *
+ * Handles argument parsing, configuration loading, runtime initialization, and process
+ * lifecycle. Exits with code 78 (`EX_CONFIG`) on configuration or binding failures, and
+ * code 1 on unexpected errors. Listens for SIGINT/SIGTERM to initiate graceful shutdown.
+ */
+
 import { formatStartupError } from "../config/errors.ts";
 import { loadConfig, resolveConfigPath } from "../config/load.ts";
 import { type Runtime, startRuntime } from "./run.ts";
@@ -7,7 +15,9 @@ const argv = process.argv.slice(2);
 const env = process.env;
 
 /**
- * Emits startup errors to standard error and terminates the process with EX_CONFIG (exit code 78).
+ * Emits startup errors to standard error and terminates the process with exit code 78 (`EX_CONFIG`).
+ *
+ * @param errorLines - Pre-formatted error lines to print to stderr.
  */
 function fail(errorLines: readonly string[]): never {
   for (const line of errorLines) {
@@ -18,10 +28,10 @@ function fail(errorLines: readonly string[]): never {
 
 /**
  * Main CLI entry point:
- * 1. Resolves config path from CLI flags / env / default.
- * 2. Loads and verifies configuration through fail-closed pipeline.
- * 3. Starts runtime listeners.
- * 4. Installs SIGINT and SIGTERM lifecycle signal handlers.
+ * 1. Resolves configuration path from CLI flags, environment, or defaults.
+ * 2. Loads and validates configuration through the fail-closed pipeline.
+ * 3. Starts runtime listeners and reports readiness.
+ * 4. Installs SIGINT and SIGTERM graceful shutdown signal handlers.
  */
 async function main(): Promise<void> {
   const pathResult = resolveConfigPath(argv, env);
@@ -48,26 +58,21 @@ async function main(): Promise<void> {
 /**
  * Registers OS signal listeners (`SIGTERM` and `SIGINT`) for graceful shutdown management.
  *
- * Behavior:
- * - First signal: Initiates graceful shutdown (`runtime.shutdown.run()`), allowing in-flight requests to finish within the drain window.
- * - Second signal: Triggers immediate abort (`runtime.shutdown.abort()`), cancelling in-flight work immediately.
+ * - First signal: Initiates graceful drain (`runtime.shutdown.run()`), allowing in-flight requests to complete.
+ * - Second signal: Triggers immediate abort (`runtime.shutdown.abort()`), cancelling in-flight work.
  *
  * @param runtime - Active runtime instance with shutdown coordinator.
  */
 export function installSignalHandlers(runtime: Runtime): void {
   let shuttingDown = false;
   const onSignal = (): void => {
-    // If signal received while already shutting down, force immediate abort.
     if (shuttingDown) {
       runtime.shutdown.abort();
       return;
     }
     shuttingDown = true;
     void runtime.shutdown.run().then(async () => {
-      // LogTape's console sink writes through process.stdout/process.stderr,
-      // which queue asynchronously when piped. Flush both streams before
-      // exiting so the trailing `aptus.shutdown.completed` line (and any other
-      // final log records) is deterministically observable by supervisors.
+      // Flush stdout/stderr before exiting so final shutdown logs are captured by supervisors
       await flushStream(process.stdout);
       await flushStream(process.stderr);
       process.exit(0);
@@ -78,9 +83,7 @@ export function installSignalHandlers(runtime: Runtime): void {
 }
 
 /**
- * Drains all pending writes on a stream by queueing an empty write and
- * waiting for its completion callback (writes are serialized per stream, so
- * the callback fires only after every previously queued write flushed).
+ * Drains all pending writes on a stream by queueing an empty write and waiting for completion.
  */
 async function flushStream(stream: NodeJS.WriteStream): Promise<void> {
   await new Promise<void>((resolve) => stream.write("", () => resolve()));

@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Process-local Prometheus metrics registry and label sanitization.
+ *
+ * Defines and registers all operational gateway metrics: request counts, latencies,
+ * time to first byte, in-flight gauges, provider attempts, retries, and key pool status.
+ *
+ * Invariants: Label cardinality is strictly bounded. All label values are sanitized
+ * against finite known sets (protocols, failure categories, configured provider/model names);
+ * unbounded identifiers such as request IDs, API keys, and raw URLs are never used as labels.
+ */
+
 import { Counter, Gauge, Histogram, Registry } from "prom-client";
 
 /**
@@ -63,6 +74,12 @@ const VALID_OPERATIONS_ENDPOINTS: ReadonlySet<string> = new Set(["metrics", "hea
 
 /**
  * Options for configuring bounded metric label validation domains.
+ *
+ * Both fields are optional. When a domain is supplied, labels are checked
+ * against it and unknown values become `unknown`; when it is omitted, any
+ * non-empty value is accepted as-is (still guarded against empty strings).
+ * Supplying the configured names is the production posture because it keeps
+ * the label cardinality tied to configuration rather than to traffic.
  */
 export interface MetricsRegistryOptions {
   /** Configured provider names for bounded label validation. */
@@ -72,14 +89,18 @@ export interface MetricsRegistryOptions {
 }
 
 /**
- * The single process-local Prometheus registry surface.
+ * Process-local Prometheus metrics recording surface.
  *
- * Each method records one bounded metric with its documented labels. Values are
- * always drawn from the finite label sets; request IDs, keys, model IDs, and
- * URLs are never labels.
+ * Exposes synchronous, non-throwing methods for recording gateway telemetry.
+ * All label values are validated against bounded domains, mapping unexpected
+ * values to safe fallbacks (e.g. `"unknown"`) to prevent cardinality explosion.
  */
 export interface MetricsRegistry {
-  /** Serializes all metrics into Prometheus text exposition format. */
+  /**
+   * Serializes all registered metrics into Prometheus text exposition format.
+   *
+   * @returns Promise resolving to Prometheus text exposition format string.
+   */
   render(): Promise<string>;
 
   /** Records an accepted/rejected/completed HTTP client request. */
@@ -156,13 +177,13 @@ export interface MetricsRegistry {
 }
 
 /**
- * Creates the single Prometheus metrics registry.
+ * Creates and registers the Prometheus metrics registry.
  *
- * Every metric name, help text, label set, and bucket boundary follows
- * operational metric specifications.
+ * Initializes counters, gauges, and duration histograms with bounded label sets,
+ * and sets up sanitizers to constrain dynamic label values to known domains.
  *
- * @param options - Optional finite configured provider and public name domains.
- * @returns A {@link MetricsRegistry} instance.
+ * @param options - Optional sets of configured provider and public model names for label validation.
+ * @returns A {@link MetricsRegistry} recording interface.
  */
 export function createMetricsRegistry(options?: MetricsRegistryOptions): MetricsRegistry {
   const registry = new Registry();

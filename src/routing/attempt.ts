@@ -1,3 +1,13 @@
+/**
+ * @fileoverview
+ * Shared candidate attempt execution mechanics and key lease lifecycle management.
+ *
+ * Implements the core execution pipeline for dispatching an attempt to an upstream provider:
+ * pre-lease preparation, key acquisition with deadline-aware cooldown sleep, provider request
+ * construction, network dispatch, response head classification, and key health settlement.
+ * Serves both native requests (via {@link executeAttempt}) and translated paths (via {@link dispatchOneAttempt}).
+ */
+
 import type {
   AttemptObservation,
   GatewayRequest,
@@ -19,14 +29,7 @@ import type { Clock, Sleeper } from "./timing.ts";
 
 const utf8Decoder = new TextDecoder();
 
-/**
- * The outcome of one candidate attempt, consumed by the Gateway's policy loop.
- *
- * `AttemptHeadOutcome` holds the candidate-level terminal conditions shared by
- * every path (client cancellation, deadline expiry, preparation failure, key
- * exhaustion, or transport dispatch failure); success shapes differ per path
- * and are unioned separately.
- */
+/** Terminal conditions occurring prior to or during provider dispatch. */
 export type AttemptHeadOutcome =
   | { readonly kind: "key_unavailable" }
   | { readonly kind: "deadline_exceeded" }
@@ -34,6 +37,7 @@ export type AttemptHeadOutcome =
   | { readonly kind: "prepare_failed"; readonly failure: NormalizedFailure }
   | { readonly kind: "dispatch_failed"; readonly failure: NormalizedFailure };
 
+/** Full outcome of a native candidate attempt, including successful response heads. */
 export type AttemptOutcome =
   | AttemptHeadOutcome
   | {
@@ -45,30 +49,34 @@ export type AttemptOutcome =
       readonly streamRequested: boolean;
     };
 
-/**
- * Execution dependencies shared by every attempt of one request.
- */
+/** Shared context and service dependencies provided to each attempt of a request. */
 export interface AttemptContext {
-  /** Protocol adapters keyed by protocol. */
+  /** Protocol adapters keyed by protocol identifier. */
   readonly adapters: Readonly<Record<Protocol, ProtocolAdapter>>;
-  /** Network dispatcher. */
+  /** Network dispatcher executing provider HTTP requests. */
   readonly dispatcher: ProviderDispatcher;
-  /** Active trace session for this request. */
+  /** Active trace session recording attempt stages. */
   readonly trace: TraceSession;
-  /** Telemetry observer. */
+  /** Telemetry observer tracking request lifecycle events. */
   readonly observer: GatewayObservability;
-  /** Monotonic clock seam. */
+  /** Monotonic clock source. */
   readonly clock: Clock;
-  /** Abortable sleeper seam. */
+  /** Abortable sleep timer for cooldown waits. */
   readonly sleeper: Sleeper;
-  /** Absolute monotonic request deadline in milliseconds. */
+  /** Monotonic millisecond request deadline. */
   readonly deadlineMs: number;
-  /** Stream idle limit passed to the prepared provider request. */
+  /** Inactivity timeout for chunk streaming in milliseconds. */
   readonly streamIdleMs: number;
-  /** Allocates the next global attempt number for this request. */
+  /** Allocates the next one-based attempt counter for this request. */
   nextAttemptNumber(): number;
 }
 
+/**
+ * Classifies an abort signal reason into standardized gateway cancellation categories.
+ *
+ * @param signal - Aborted signal to inspect.
+ * @returns Classified cause: "timeout", "shutdown", or "client".
+ */
 export function classifyAbortReason(signal: AbortSignal): "timeout" | "shutdown" | "client" {
   if (signal.reason === "timeout") return "timeout";
   if (signal.reason === "shutdown") return "shutdown";
@@ -76,27 +84,17 @@ export function classifyAbortReason(signal: AbortSignal): "timeout" | "shutdown"
 }
 
 /**
- * Per-path request preparation adapter behind the unified attempt seam.
- *
- * The unified attempt core owns lease, dispatch, classify, and bookkeeping
- * once; each adapter supplies only path-specific preparation. Native prepares
- * via `prepareNative`, translated paths via the coordinator ticket.
+ * Protocol preparation adapter isolating native from translated attempt transformations.
  */
 export interface AttemptPreparer<Pre> {
-  /**
-   * Runs before any key lease (translate for cross-protocol paths, no-op for
-   * native). Records its own `ir_request` traces; a failure returns with zero
-   * lease and zero dispatch.
-   */
+  /** Runs pre-lease preparation (e.g. cross-protocol translation IR mapping). */
   prepareBeforeLease(
     candidate: CandidateDescriptor,
     request: GatewayRequest,
     ctx: AttemptContext,
   ): Promise<Result<Pre, NormalizedFailure>>;
-  /**
-   * Builds the dispatchable provider request from the leased key and the
-   * pre-lease product. A failure is recorded as `prepare_failed`.
-   */
+
+  /** Builds the concrete dispatchable provider request using the acquired key lease. */
   buildRequest(
     candidate: CandidateDescriptor,
     request: GatewayRequest,
@@ -104,34 +102,20 @@ export interface AttemptPreparer<Pre> {
     lease: KeyLease,
     pre: Pre,
   ): Result<PreparedProviderRequest, NormalizedFailure>;
-  /**
-   * Classifies the response head with the path's owning adapter
-   * (`request.protocol` for native, target protocol for translated).
-   */
+
+  /** Classifies the upstream response head using protocol-specific rules. */
   classify(
     candidate: CandidateDescriptor,
     request: GatewayRequest,
     ctx: AttemptContext,
     response: ProviderResponse,
   ): AttemptObservation;
-  /**
-   * When true, the core records the native `mutation` trace (defaults,
-   * extraBody, overrides, upstreamModel). Translated paths leave this false:
-   * they apply no native mutations and historically emit no such stage, so
-   * emitting one would shift trace numbering.
-   */
+
+  /** Whether the core should record a native mutation trace stage. */
   readonly traceNativeMutation?: boolean;
 }
 
-/**
- * Result of dispatching one attempt head without key observation.
- *
- * The core owns lease, dispatch, and classify mechanics; the caller owns the
- * single `finishAttempt` observation so translated paths can settle with the
- * post-success (spooled outcome / bootstrap) category instead of the raw head.
- * The dispatched variant carries the preparer product (e.g. the translation
- * ticket) so callers need no closure capture to continue post-success work.
- */
+/** Result of dispatching an attempt head, deferring key health observation to the caller. */
 export type DispatchedAttempt<Pre> =
   | AttemptHeadOutcome
   | {
@@ -146,13 +130,14 @@ export type DispatchedAttempt<Pre> =
     };
 
 /**
- * Dispatches one attempt head: pre-lease preparation, lease, build, dispatch,
- * and classify — without key observation.
+ * Dispatches a single attempt head through pre-lease preparation, key leasing, request building,
+ * dispatch, and response classification without settling the key observation.
  *
- * Single owner of pairing faults: abort checks, key selection telemetry,
- * `provider_request` / `provider_response_head` traces, attempt numbering,
- * and dispatch error mapping live here once. Callers perform exactly one
- * `finishAttempt` with the final (possibly post-success) observation.
+ * @param candidate - Selected candidate descriptor.
+ * @param request - Inbound gateway request.
+ * @param ctx - Shared attempt execution context.
+ * @param preparer - Protocol preparation adapter.
+ * @returns Dispatched attempt outcome or pre-dispatch terminal failure.
  */
 export async function dispatchOneAttempt<Pre>(
   candidate: CandidateDescriptor,
@@ -308,14 +293,12 @@ export async function dispatchOneAttempt<Pre>(
 }
 
 /**
- * Executes exactly one attempt on a candidate: key acquisition (rotating to an
- * available key, waiting out cooldowns inside the deadline), native request
- * preparation, dispatch, response-head classification, and key observation.
+ * Executes a native attempt on a candidate, including key leasing, dispatch, and inline observation settlement.
  *
- * Native preparation and same-protocol classification supply the path-specific
- * seam of the shared dispatch core; the head observation is final here, so it
- * settles inline (translated paths use `dispatchOneAttempt` directly to defer
- * settlement past spool/bootstrap).
+ * @param candidate - Target candidate descriptor.
+ * @param request - Inbound gateway request.
+ * @param ctx - Attempt execution context.
+ * @returns Final native attempt outcome.
  */
 export async function executeAttempt(
   candidate: CandidateDescriptor,
@@ -365,6 +348,7 @@ export async function executeAttempt(
   };
 }
 
+/** Outcome variants resulting from key lease acquisition. */
 export type LeaseResult =
   | { readonly kind: "lease"; readonly lease: KeyLease }
   | { readonly kind: "unavailable" }
@@ -372,9 +356,12 @@ export type LeaseResult =
   | { readonly kind: "cancelled"; readonly phase: "wait" };
 
 /**
- * Acquires a key from the candidate's pool, waiting out cooldowns while the
- * request deadline allows it. Rotation is implicit: `acquire` always prefers an
- * available key, so a wait happens only when every enabled key is cooling down.
+ * Acquires an active key lease from the provider pool, sleeping through cooldowns if within request deadline.
+ *
+ * @param candidate - Target candidate descriptor.
+ * @param request - Inbound gateway request.
+ * @param ctx - Attempt execution context.
+ * @returns Lease acquisition outcome.
  */
 export async function acquireLease(
   candidate: CandidateDescriptor,
@@ -424,10 +411,18 @@ export async function acquireLease(
 }
 
 /**
- * Emits attempt-completion telemetry, records the key observation, and
- * republishes the pool availability gauge.
+ * Finalizes an attempt by reporting completion telemetry and updating key pool health.
  *
- * @returns The cooldown delay the key pool scheduled, if any.
+ * @param ctx - Attempt execution context.
+ * @param request - Inbound gateway request.
+ * @param candidate - Executed candidate descriptor.
+ * @param lease - Provider key lease used.
+ * @param attemptNumber - Attempt index for this request.
+ * @param observation - Attempt result observation.
+ * @param status - HTTP response status code, if received.
+ * @param durationMs - Attempt dispatch duration in milliseconds.
+ * @param stream - Whether the request was dispatched in streaming mode.
+ * @returns Applied cooldown delay in milliseconds, if any.
  */
 export function finishAttempt(
   ctx: AttemptContext,
@@ -459,6 +454,14 @@ export function finishAttempt(
   return cooldownMs;
 }
 
+/**
+ * Records cancellation in durable trace logs and live telemetry.
+ *
+ * @param ctx - Attempt execution context.
+ * @param request - Inbound gateway request.
+ * @param phase - Processing phase during which cancellation was detected.
+ * @param by - Cause of the cancellation ("shutdown" or "client").
+ */
 export async function recordCancellation(
   ctx: AttemptContext,
   request: GatewayRequest,
@@ -470,7 +473,10 @@ export async function recordCancellation(
 }
 
 /**
- * Parses UTF-8 JSON bytes into a JSON value (falling back to `null`).
+ * Parses UTF-8 JSON bytes into a JSON value, returning null on error.
+ *
+ * @param bytes - Byte buffer containing serialized JSON.
+ * @returns Parsed JSON value, or null on parse failure.
  */
 export function parseJsonBytes(bytes: Uint8Array): JsonValue {
   try {

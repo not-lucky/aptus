@@ -1,3 +1,15 @@
+/**
+ * @fileoverview Ingress decoder for the OpenAI Chat Completions protocol.
+ *
+ * Translates OpenAI Chat Completions request and response payloads into the gateway's
+ * intermediate representation (IR). Request decoding normalizes messages, parses tool
+ * definitions, enforces generation bounds, and captures wire-only options into request sidecars.
+ * Outcome decoding maps choices, finish reasons, usage metrics, and moderation details into IR outcomes.
+ *
+ * Native-only capabilities without gateway equivalence fail closed with exact matrix capability IDs.
+ * The request parser is shared verbatim between complete and streaming decoders.
+ */
+
 import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
@@ -42,6 +54,7 @@ import { parseToolArray, parseToolChoice, type ToolWireSpec } from "../shared/to
 import { parseChatUsage } from "../shared/usage.ts";
 import { captureBreakpoint, captureOutcomeWireFacts, parseChatResponsesWireOptions } from "../shared/wire-options.ts";
 
+/** Set of documented top-level OpenAI Chat request fields recognized by the decoder. */
 const RECOGNIZED_CHAT_REQUEST_FIELDS = new Set([
   "model",
   "messages",
@@ -81,12 +94,15 @@ const RECOGNIZED_CHAT_REQUEST_FIELDS = new Set([
   "prompt_cache_options",
 ]);
 
+/** Intermediate representation of a Chat custom tool format specification. */
 type IrCustomToolFormat = Extract<IrTool, { type: "custom" }>["format"];
 
 /**
- * Parses the nested Chat custom-tool `format` field: absent means text,
- * `{type:"text"}` is the documented literal, and grammar formats nest their
- * definition under `grammar` (research C:140).
+ * Parses the nested Chat custom tool `format` field into its IR representation.
+ *
+ * @param value - Raw format specification from the tool definition.
+ * @param context - Diagnostic path prefix for error reporting.
+ * @returns Result containing the parsed IR tool format or validation failure.
  */
 function parseChatCustomFormat(value: unknown, context: string): Result<IrCustomToolFormat, NormalizedFailure> {
   if (value === undefined) return ok({ type: "text" });
@@ -110,7 +126,7 @@ function parseChatCustomFormat(value: unknown, context: string): Result<IrCustom
   return ok({ type: "grammar" as const, ...grammarResult.value });
 }
 
-/** Shared spec for the nested Chat client-tool definition and choice shapes. */
+/** Tool wire specification for OpenAI Chat tool definitions and tool choice options. */
 const CHAT_TOOL_SPEC: ToolWireSpec = {
   shape: "nested",
   schemaField: "parameters",
@@ -127,9 +143,11 @@ const CHAT_TOOL_SPEC: ToolWireSpec = {
 };
 
 /**
- * Parses one Chat tool-call entry (`{id, type:"function"|"custom", ...}`),
- * shared by request assistant messages and response messages. Call IDs are
- * required and never fabricated.
+ * Parses a single Chat tool call entry into an IR tool call structure.
+ *
+ * @param entry - Raw tool call object containing `id`, `type`, and call details.
+ * @param context - Diagnostic path prefix for error reporting.
+ * @returns Result containing the normalized IR tool call or failure.
  */
 function parseChatToolCallEntry(entry: unknown, context: string): Result<IrToolCall, NormalizedFailure> {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -177,9 +195,13 @@ function parseChatToolCallEntry(entry: unknown, context: string): Result<IrToolC
 }
 
 /**
- * Parses a Chat request body shared verbatim by the complete ingress decoder
- * and the streaming request decoder: capability rejections, sidecar capture,
- * transcript items, and generation controls are defined exactly once.
+ * Parses an OpenAI Chat request body into an IR request and wire-options sidecar.
+ *
+ * Shared verbatim by complete and streaming request ingress paths to ensure semantic parity.
+ *
+ * @param body - Parsed Chat request JSON body.
+ * @param delivery - Expected delivery mode (`complete` or `stream`).
+ * @returns Result containing the decoded IR request and wire sidecar or validation failure.
  */
 export function parseChatRequestBody(
   body: JsonObject,
@@ -193,11 +215,11 @@ export function parseChatRequestBody(
     return invalidRequest("Chat request missing required non-empty array property 'messages'");
   }
 
-  // Decoder-level capability rejections for recognized non-admitted wire facts.
-  // Admitted wire-only fields (store, metadata/user, moderation, service_tier,
-  // safety_identifier, prompt-cache controls) are captured into the sidecar
-  // below instead of rejected — the decoder has no direction, so it must not
-  // decide T1 vs T2 vs T3.
+  // Reject recognized native-only facts with their exact capability rows here.
+  // Admitted wire-only facts such as storage flags, metadata, user identity, moderation controls,
+  // service tiers, safety identity, and prompt cache controls are captured into the sidecar below
+  // instead of rejected. The decoder has no direction information, so the decoder never decides
+  // which tier a direction assigns to an admitted fact.
   if (body.n !== undefined && body.n !== 1) {
     return unsupportedCapability("multiple-candidates");
   }
@@ -219,9 +241,9 @@ export function parseChatRequestBody(
   if (body.prediction !== undefined) {
     return unsupportedCapability("chat-predicted-outputs");
   }
-  // Complete-path requests reject the stream usage carrier outright
-  // (`stream-final-usage` row); the streaming request decoder parses
-  // `stream_options.include_usage` instead.
+  // Reject the stream usage carrier on the complete path outright.
+  // The streaming request decoder parses `stream_options.include_usage` instead,
+  // so a complete-path request that carries `stream_options` fails with the usage row.
   if (delivery === "complete" && body.stream_options !== undefined) {
     return unsupportedCapability("stream-final-usage");
   }
@@ -306,14 +328,14 @@ export function parseChatRequestBody(
     return unsupportedCapability("audio-output");
   }
 
-  // Check for unknown request fields outside recognized schema
+  // Reject any top-level field outside the recognized schema so unknown wire never passes silently.
   for (const key of Object.keys(body)) {
     if (!RECOGNIZED_CHAT_REQUEST_FIELDS.has(key)) {
       return unsupportedCapability("unknown-request-field");
     }
   }
 
-  // ---- Wire-only sidecar capture (admitted fields, verbatim) ----
+  // Capture admitted wire-only facts verbatim into the sidecar for preflight to judge later.
   const breakpoints: PromptCacheBreakpoint[] = [];
   const providerFileRefs: ProviderFileRef[] = [];
   const sidecarResult = parseChatResponsesWireOptions(body);
@@ -323,7 +345,7 @@ export function parseChatRequestBody(
     wireOptions = { ...wireOptions, legacyJsonObject: true };
   }
 
-  // ---- Client tool surfaces (definitions, choice, parallelism) ----
+  // Parse client tool definitions, the tool choice, and the parallelism flag together.
   const toolsResult = parseToolArray(body.tools, "tools", CHAT_TOOL_SPEC);
   if (!toolsResult.ok) return toolsResult;
   const tools = toolsResult.value.tools;
@@ -346,7 +368,7 @@ export function parseChatRequestBody(
     parallelToolCalls = body.parallel_tool_calls;
   }
 
-  // Decode messages
+  // Walk the message array in order because breakpoint anchors refer to IR item positions.
   const items: IrItem[] = [];
   for (let i = 0; i < body.messages.length; i++) {
     const msg = body.messages[i];
@@ -360,8 +382,7 @@ export function parseChatRequestBody(
       return unsupportedCapability("message-name");
     }
 
-    // Item index this message's IR item will occupy; breakpoint anchors on
-    // its content parts refer to this position.
+    // Record the IR item position now because content part breakpoints anchor to this message.
     const itemIndex = items.length;
 
     if (role === "system" || role === "developer") {
@@ -421,8 +442,7 @@ export function parseChatRequestBody(
             const imgObj = rawPart.image_url;
             let url: string;
             let detail: "auto" | "low" | "high" | undefined;
-            // Chat pins image_url to the {url, detail?} object form; the bare
-            // string spelling belongs to Responses input_image, not this wire.
+            // Accept only the documented object spelling here because the bare string belongs elsewhere.
             if (
               typeof imgObj === "object" &&
               imgObj !== null &&
@@ -499,11 +519,9 @@ export function parseChatRequestBody(
               if (typeof file.file_data !== "string" || file.file_data.trim() === "") {
                 return invalidRequest(`message [${i}] part [${pIdx}]: file_data must be a non-empty base64 string`);
               }
-              // A Chat file part is a bytes part: `file_data` crosses to
-              // Responses byte-verbatim (the document-inline-bytes T1 cell) and
-              // into Messages only as PDF, so the filename infers a media type
-              // and never selects a text representation. Text-source documents
-              // are reachable only from Responses and Messages ingress.
+              // Treat a Chat file part as a bytes part whose filename only infers the media type.
+              // The payload crosses to Responses byte-verbatim and reaches Messages only as PDF,
+              // so the filename never selects a text representation here.
               const inferred = inferExtensionMediaType(filename);
               parts.push({
                 type: "document",
@@ -628,8 +646,7 @@ export function parseChatRequestBody(
       if (typeof rawMsg.content === "string") {
         parts.push({ type: "text", text: rawMsg.content });
       } else if (Array.isArray(rawMsg.content)) {
-        // Chat tool content is text-only: multi-element arrays are multipart
-        // results originating from Chat and fail closed at decode time.
+        // Reject multi-element arrays because Chat tool content is text-only and multipart results fail closed.
         if (rawMsg.content.length >= 2) {
           return unsupportedCapability("tool-result-multipart");
         }
@@ -667,7 +684,7 @@ export function parseChatRequestBody(
     wireOptions = { ...wireOptions, providerFileRefs };
   }
 
-  // ---- Generation controls (strict bounds; never clamped, never dropped) ----
+  // Project generation controls with strict bounds that are never clamped and never dropped.
   const temperatureResult = parseUnitIntervalControl("temperature", body.temperature, "temperature-0-1");
   if (!temperatureResult.ok) return temperatureResult;
   const topPResult = parseUnitIntervalControl("top_p", body.top_p, "top-p-0-1");
@@ -686,8 +703,8 @@ export function parseChatRequestBody(
     }
     stopSequences = [body.stop];
   } else if (Array.isArray(body.stop)) {
-    // The Chat schema admits 1-4 entries; larger sets are invalid Chat wire.
-    // (The >4 stop-sequence-request rejection applies to M-origin sets only.)
+    // Enforce the Chat schema limit of one to four entries on this wire.
+    // Larger originating sets from other protocols are rejected under their own row.
     if (body.stop.length === 0 || body.stop.length > 4) {
       return invalidRequest("stop must contain between 1 and 4 entries");
     }
@@ -730,21 +747,30 @@ export function parseChatRequestBody(
 }
 
 /**
- * Ingress decoder for OpenAI Chat Completions requests and responses.
+ * Ingress decoder for OpenAI Chat Completions requests and response envelopes.
  *
- * Request decoding delegates to {@link parseChatRequestBody}, which projects
- * admitted generation controls into the IR and captures matrix-admitted
- * wire-only fields (storage, prompt-cache controls, metadata, safety identity,
- * moderation, service tier) into the request wire-options sidecar; direction
- * feasibility for those fields is decided later by preflight, not here.
- * Recognized native-only facts fail closed immediately with their exact matrix
- * capability ID.
+ * Implements {@link IngressDecoder} for `openai-chat`. Delegates request decoding to
+ * {@link parseChatRequestBody} and projects completion responses into IR outcomes.
  */
 export class ChatIngressDecoder implements IngressDecoder {
+  /**
+   * Decodes an OpenAI Chat request body into an IR request structure and sidecar.
+   *
+   * @param body - Client request body to decode.
+   * @returns Result containing the decoded IR request and request wire options.
+   */
   decodeRequest(body: JsonObject): Result<RequestDecodeResult, NormalizedFailure> {
     return parseChatRequestBody(body, body.stream === true ? "stream" : "complete");
   }
 
+  /**
+   * Decodes an OpenAI Chat completion response body into an IR outcome and sidecar.
+   *
+   * @param _status - HTTP status code (unused by Chat outcome decoding).
+   * @param _headers - HTTP headers (unused by Chat outcome decoding).
+   * @param body - Provider response body to decode.
+   * @returns Result containing the decoded IR outcome and outcome wire options.
+   */
   decodeOutcome(
     _status: number,
     _headers: HeaderMap,
@@ -773,8 +799,7 @@ export class ChatIngressDecoder implements IngressDecoder {
     }
 
     if (message.refusal !== undefined && message.refusal !== null) {
-      // A present-but-malformed refusal fabricates nothing: only a string
-      // carries refusal text, anything else fails closed.
+      // Fabricate no refusal text because only a string value carries refusal content here.
       if (typeof message.refusal !== "string") {
         return invalidRequest("Chat response message.refusal must be a string when present");
       }
@@ -816,17 +841,14 @@ export class ChatIngressDecoder implements IngressDecoder {
       return unsupportedCapability("finish-other-unknown");
     }
 
-    // Usage counters plus the cache/reasoning subdivisions (`usage-cache-read`,
-    // `usage-cache-write`, `usage-reasoning`), parsed once in shared/usage.ts so the
-    // complete and stream paths cannot drift. Subdivisions are observations and
-    // are never re-added to totals; absence of the whole usage object stays
-    // absence (never fabricated as zeros).
+    // Parse usage through the shared parser so the complete and stream paths cannot drift.
+    // Subdivisions are observations that never inflate the totals, and an absent usage object
+    // stays absent instead of being fabricated as zeros.
     const usageResult = parseChatUsage(body.usage);
     if (!usageResult.ok) return usageResult;
     const usage = usageResult.value;
 
-    // Response-side wire-only facts: the moderation result (stored in normal,
-    // unwrapped form) and the effective service-tier echo.
+    // Capture the moderation result in normal unwrapped form plus the service tier echo.
     const factsResult = captureOutcomeWireFacts(body, {}, "Chat response");
     if (!factsResult.ok) return factsResult;
 

@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Complete outcome decoder for the Anthropic Messages protocol.
+ *
+ * Translates provider HTTP responses (status, body, and headers) into intermediate representation
+ * (IR) outcomes and sidecars. Normalizes text content, citations, and tool call blocks into output
+ * parts, maps stop reasons to the IR finish vocabulary, and aggregates usage token metrics.
+ *
+ * Evaluates provider outcomes independently of request structure to support cross-protocol translation.
+ * Non-2xx statuses and error-shaped responses are normalized into provider failures.
+ */
+
 import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
@@ -13,7 +24,17 @@ import {
   parseMessagesToolUseBlock,
 } from "./content.ts";
 
-/** Decodes one complete Anthropic Messages outcome independently of request parsing. */
+/**
+ * Decodes an Anthropic Messages HTTP response into an IR outcome and sidecar.
+ *
+ * Normalizes content blocks, processes citations, validates stop reasons, and calculates
+ * token usage metrics independently of originating request parameters.
+ *
+ * @param status - Provider response HTTP status code.
+ * @param body - Decoded Messages response JSON object.
+ * @param headers - Optional HTTP response headers (consulted for `retry-after`).
+ * @returns Result containing decoded IR outcome and wire sidecar or normalized failure.
+ */
 export function parseMessagesOutcome(
   status: number,
   body: JsonObject,
@@ -53,9 +74,9 @@ export function parseMessagesOutcome(
         }
         const citations: IrCitation[] = [];
         if (Array.isArray(b.citations)) {
-          // Citation translation never drops information: an entry that cannot
-          // be fully parsed terminates the outcome instead of translating a
-          // success that omits provider-supplied citations (protocol-ir.md).
+          // Citation translation never drops information: an entry that cannot be fully parsed
+          // terminates the outcome instead of translating a success that omits provider-supplied
+          // citations.
           for (const c of b.citations) {
             const cit = c as Record<string, unknown> | undefined;
             if (cit === null || typeof cit !== "object") {

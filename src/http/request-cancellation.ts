@@ -1,47 +1,53 @@
 /**
- * Registry for tracking in-flight request abort controllers to support graceful shutdown drains and immediate aborts.
+ * @fileoverview Registry of in-flight request abort controllers for graceful shutdown.
+ *
+ * Tracks active request abort controllers and finalization promises. Enables the shutdown
+ * coordinator to broadcast abort signals to all in-flight requests simultaneously and await
+ * terminal telemetry settlement within a bounded grace window.
+ */
+
+/**
+ * Registry tracking active request abort controllers and finalization promises.
  */
 export interface RequestCancellationRegistry {
   /**
-   * Registers an active request's `AbortController` and optional finalization promise.
+   * Registers an active request's abort controller and optional finalization promise.
    *
-   * @param controller - The `AbortController` bound to the active request lifecycle.
-   * @param finalized - Optional promise resolving when request coordinator finalizes.
-   * @returns Idempotent unregister cleanup function.
+   * @param controller - Request abort controller.
+   * @param finalized - Promise that settles when request terminal bookkeeping finishes.
+   * @returns Idempotent unregister callback to invoke on request completion.
    */
   register(controller: AbortController, finalized?: Promise<void>): () => void;
 
   /**
-   * Returns the count of currently registered active requests.
+   * Returns the count of currently registered in-flight requests.
    */
   size(): number;
 
   /**
-   * Returns the total number of requests ever registered (monotonic, never
-   * decremented). Used by shutdown telemetry to account for requests admitted
-   * in the gap between shutdown start and when the listener stops accepting.
+   * Returns the cumulative total of all requests registered since initialization.
    */
   registeredCount(): number;
 
   /**
-   * Signals abort on all currently registered in-flight request controllers.
+   * Triggers abort on all currently registered request controllers.
    *
-   * @param reason - Optional abort reason string passed to `controller.abort(reason)`.
+   * @param reason - Optional abort reason passed to each controller (e.g. `"shutdown"`).
    */
   abortAll(reason?: string): void;
 
   /**
-   * Waits for all registered request finalizations to settle, bounded by a maximum grace period.
+   * Awaits settlement of all registered finalization promises within a bounded grace window.
    *
-   * @param graceMs - Maximum wait duration in milliseconds before giving up.
+   * @param graceMs - Maximum duration in milliseconds to wait before timing out.
    */
   awaitSettled(graceMs: number): Promise<void>;
 }
 
 /**
- * Instantiates a registry for managing active request abort signals.
+ * Creates a request cancellation registry.
  *
- * @returns A {@link RequestCancellationRegistry} instance.
+ * @returns An empty {@link RequestCancellationRegistry} instance.
  */
 export function createRequestCancellationRegistry(): RequestCancellationRegistry {
   const entries = new Set<{ readonly controller: AbortController; readonly finalized?: Promise<void> }>();
@@ -65,7 +71,6 @@ export function createRequestCancellationRegistry(): RequestCancellationRegistry
       return registrations;
     },
     abortAll(reason?: string) {
-      // Abort all in-flight request controllers during forced shutdown.
       for (const entry of entries) {
         entry.controller.abort(reason);
       }

@@ -1,53 +1,60 @@
+/**
+ * @fileoverview Secret discovery and environment resolution for startup configuration in the Aptus gateway.
+ *
+ * Scans parsed YAML abstract syntax trees to resolve environment references (`${ENV_NAME}`)
+ * at declared secret paths (`/auth/clientKeys/<index>/secret` and `/providers/<index>/keys/<index>/secret`).
+ * Non-secret scalar fields containing `${...}` patterns are rejected to prohibit unintended interpolation.
+ *
+ * Resolved credential values are overlaid into the raw configuration tree for schema validation, while
+ * a pointer-to-variable map is retained so the config revision digest can hash variable names instead of secrets.
+ */
+
 import { type Document, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
 import { jsonPointer, setPath } from "../domain/json.ts";
 import { type StartupError, startupError } from "./errors.ts";
 
-/**
- * Internal record of a discovered secret environment reference.
- */
+/** Discovered credential reference mapping a YAML path to an environment variable name. */
 interface ResolvedSecret {
-  /** RFC 6901 JSON pointer segments locating the secret field. */
+  /** JSON Pointer path segments leading to the secret field. */
   readonly segments: readonly (string | number)[];
-  /** Name of the referenced environment variable (e.g., `"OPENAI_API_KEY"`). */
+  /** Name of the referenced environment variable. */
   readonly envName: string;
 }
 
 /**
- * Result of secret discovery and environment resolution.
+ * Result of secret resolution, returning an overlaid configuration tree or startup errors.
  */
 export type ResolveSecretsResult =
   | {
+      /** Discriminator indicating successful secret resolution. */
       readonly ok: true;
-      /** Javascript object representation of the parsed YAML with resolved secrets overlaid. */
+      /** Plain configuration tree with resolved credential values overlaid. */
       readonly raw: unknown;
-      /** Map of secret JSON pointer paths to their referenced environment variable names. */
+      /** Mapping from RFC 6901 JSON Pointers to referenced environment variable names. */
       readonly references: Map<string, string>;
     }
   | {
+      /** Discriminator indicating secret resolution failure. */
       readonly ok: false;
-      /** Validation and resolution errors encountered. */
+      /** Startup errors encountered during secret discovery or environment lookup. */
       readonly errors: readonly StartupError[];
     };
 
-/** Matches an exact `${ENV_VAR_NAME}` pattern with a valid identifier. */
+/** Pattern matching exact `${ENV_NAME}` references in declared secret fields. */
 const SECRET_REFERENCE_PATTERN = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
-/** Matches any `${NAME}` substring, used to detect illegal interpolation in non-secret scalar values. */
+/** Pattern detecting `${...}` substrings outside declared secret fields. */
 const INTERPOLATION_PATTERN = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/;
 
 /**
- * Scans the parsed YAML AST to resolve declared secret fields and enforce strict secret grammar:
+ * Resolves environment credentials in a parsed YAML document and enforces interpolation rules.
  *
- * Rules:
- * 1. Only declared secret fields (`/auth/clientKeys/<i>/secret` and `/providers/<i>/keys/<j>/secret`) may contain `${ENV_NAME}`.
- * 2. In declared secret fields, the value must be an exact `${ENV_NAME}` token (no partial interpolation, whitespace, or prefix/suffix).
- * 3. The referenced environment variable must exist and be non-empty.
- * 4. `${...}` interpolation patterns in any non-secret scalar string are strictly rejected (`CONFIG_INTERPOLATION_FORBIDDEN`).
- * 5. Mapping keys are never evaluated for secret grammar or interpolation.
+ * Validates that only declared secret fields use `${ENV_NAME}` references, that referenced
+ * variables exist and are non-empty, and that no interpolation syntax appears in ordinary fields.
  *
- * @param document - The parsed YAML AST document.
- * @param env - Environment variable map.
- * @returns {@link ResolveSecretsResult} containing the overlaid raw data tree and references map, or errors.
+ * @param document - Parsed YAML document AST to inspect.
+ * @param env - Environment variable map for credential lookups.
+ * @returns An overlaid configuration tree and reference map on success, or startup errors on failure.
  */
 export function resolveSecrets(
   document: Document.Parsed,
@@ -60,10 +67,10 @@ export function resolveSecrets(
     return { ok: false, errors };
   }
 
-  // Convert YAML AST to plain JS objects.
+  // Convert the node graph to plain objects so later stages work with ordinary values.
   const raw = document.toJS();
   const references = new Map<string, string>();
-  // Overlay actual resolved secret values into the raw object tree and record their env variable names.
+  // Overlay each resolved credential into the plain tree and record the variable name for redaction.
   for (const entry of resolved) {
     setPath(raw, entry.segments, env[entry.envName]);
     references.set(jsonPointer(entry.segments), entry.envName);
@@ -72,7 +79,13 @@ export function resolveSecrets(
 }
 
 /**
- * Recursive visitor traversing YAML AST nodes to locate secret fields and validate against illegal interpolation.
+ * Recursively traverses YAML AST nodes to resolve credentials and detect illegal interpolation.
+ *
+ * @param node - Current YAML AST node to inspect.
+ * @param path - Current path segments from the document root.
+ * @param env - Environment variable map for credential lookup.
+ * @param errors - Sink for accumulated startup error records.
+ * @param resolved - Sink for valid discovered secret references.
  */
 function walkSecrets(
   node: YamlNode | null,
@@ -86,7 +99,7 @@ function walkSecrets(
       for (const pair of node.items) {
         const key = pair.key as YamlNode | null;
         const keySegment = key instanceof Scalar && typeof key.value === "string" ? key.value : null;
-        // Mapping keys are never checked for interpolation or secret grammar.
+        // Skip keys for grammar checks so key text can never trigger a secret failure.
         walkSecrets(
           pair.value as YamlNode | null,
           keySegment === null ? path : [...path, keySegment],
@@ -104,7 +117,7 @@ function walkSecrets(
   }
 
   const value = node.value;
-  // If this AST node is located at a declared secret path:
+  // Handle declared secret fields with exact-token validation and environment lookup.
   if (isSecretPath(path)) {
     if (typeof value !== "string") {
       errors.push(
@@ -134,7 +147,7 @@ function walkSecrets(
       resolved.push({ segments: path, envName });
       return;
     }
-    // Check if the secret value looks like an invalid environment reference (e.g. invalid chars).
+    // Treat brace-wrapped text with an invalid name as a malformed reference rather than a literal.
     if (value.startsWith("${") && value.endsWith("}")) {
       errors.push(
         startupError(
@@ -145,7 +158,7 @@ function walkSecrets(
       );
       return;
     }
-    // Plain literal string or other non-exact pattern in secret field.
+    // Handle plain text and partial interpolation in secret fields as literal violations.
     errors.push(
       startupError(
         "CONFIG_SECRET_LITERAL",
@@ -156,7 +169,7 @@ function walkSecrets(
     );
     return;
   }
-  // If not a declared secret field, ensure no ${...} interpolation pattern is present in scalar strings.
+  // Reject interpolation patterns in ordinary scalar strings outside secret fields.
   if (typeof value === "string" && INTERPOLATION_PATTERN.test(value)) {
     errors.push(
       startupError(
@@ -169,9 +182,10 @@ function walkSecrets(
 }
 
 /**
- * Checks whether a given path corresponds to a declared secret field:
- * - `/auth/clientKeys/<i>/secret` (length 4)
- * - `/providers/<i>/keys/<j>/secret` (length 5)
+ * Determines whether the specified path segments match a declared secret field location.
+ *
+ * @param path - Path segments from document root.
+ * @returns `true` if path points to `/auth/clientKeys/<index>/secret` or `/providers/<index>/keys/<index>/secret`.
  */
 function isSecretPath(path: readonly (string | number)[]): boolean {
   return (

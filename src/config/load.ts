@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Fail-closed configuration loading pipeline for the Aptus gateway.
+ *
+ * Implements the seven-stage startup sequence: file reading, strict YAML AST parsing,
+ * environment credential resolution, Zod structural validation, semantic cross-reference
+ * checks, trace root storage probing, and deep-freezing with canonical SHA-256 revision hashing.
+ *
+ * Aborts startup deterministically on any failure before listeners bind, guaranteeing that
+ * the gateway process only runs against a fully validated, immutable configuration snapshot.
+ */
+
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Alias, parseAllDocuments, Scalar, YAMLMap, YAMLSeq, type Node as YamlNode } from "yaml";
@@ -12,31 +23,31 @@ import type { AptusConfig } from "./types.ts";
 import { validateCrossReferences } from "./validate.ts";
 
 /**
- * Result of a successful configuration load and verification.
+ * Verified runtime configuration snapshot produced by a successful load.
  */
 export interface LoadedConfig {
-  /** Deep-frozen resolved configuration snapshot. */
+  /** Deep-frozen resolved configuration snapshot shared across the gateway process. */
   readonly config: AptusConfig;
-  /** `sha256:` digest computed over the canonical redacted configuration JSON. */
+
+  /** SHA-256 revision digest computed over canonical redacted configuration JSON. */
   readonly revision: string;
 }
 
 /**
- * Resolves the configuration file path using strict precedence:
- * 1. CLI flag `--config <path>`
- * 2. Environment variable `APTUS_CONFIG`
- * 3. Default fallback `./aptus.yaml`
+ * Resolves the configuration file path from CLI flags, environment variables, or default location.
  *
- * @param argv - Process CLI argument list.
- * @param env - Process environment variable dictionary.
- * @returns Result containing the resolved configuration path or startup errors for invalid arguments.
+ * Precedence: `--config <path>` flag > `APTUS_CONFIG` environment variable > `./aptus.yaml`.
+ *
+ * @param argv - CLI argument list (excluding node and script paths).
+ * @param env - Environment variable map.
+ * @returns Result containing the resolved path or startup configuration errors.
  */
 export function resolveConfigPath(
   argv: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
 ): Result<string, readonly StartupError[]> {
   const firstFlag = argv.indexOf("--config");
-  // Check for duplicate --config flags.
+  // Reject repeated flags so two paths can never compete silently for precedence.
   if (firstFlag !== -1 && argv.indexOf("--config", firstFlag + 1) !== -1) {
     return { ok: false, error: [startupError("CONFIG_CLI_ARGUMENT", "", "--config must be provided at most once")] };
   }
@@ -58,25 +69,20 @@ export function resolveConfigPath(
 }
 
 /**
- * Executes the complete fail-closed configuration loading and validation pipeline:
+ * Executes the seven-stage fail-closed configuration loading and validation pipeline.
  *
- * 1. File reading: Read YAML file into memory.
- * 2. YAML syntax & AST rules: Exactly 1 document; reject aliases, merge keys (`<<`), non-string keys, and custom tags.
- * 3. Secret resolution: Resolve declared `${ENV_NAME}` references against environment variables.
- * 4. Structural validation: Validate shapes, defaults, and bounds with Zod schema.
- * 5. Semantic & policy validation: Verify cross-references, URL normalization, and namespace uniqueness.
- * 6. Filesystem probe: Verify trace storage root permissions and writeability when tracing is enabled.
- * 7. Revision & freeze: Compute deterministic SHA-256 revision over redacted config and deep-freeze the object.
+ * Reads and parses YAML, resolves secrets, validates structure and cross references,
+ * probes trace storage, and produces a frozen configuration with a revision digest.
  *
- * @param path - Path to the YAML configuration file.
- * @param env - Environment variable dictionary (defaults to `process.env`).
- * @returns Promise resolving to {@link LoadedConfig} on success, or a sorted array of {@link StartupError} on failure.
+ * @param path - File path to the YAML configuration document.
+ * @param env - Environment variable map for credential lookups (defaults to `process.env`).
+ * @returns A promise resolving to a {@link LoadedConfig} snapshot or sorted startup errors.
  */
 export async function loadConfig(
   path: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<Result<LoadedConfig, readonly StartupError[]>> {
-  // Stage 1: Read configuration file.
+  // Read the file into memory as the first stage, failing fast when the path is unreadable.
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -84,7 +90,7 @@ export async function loadConfig(
     return { ok: false, error: [startupError("CONFIG_FILE_READ", "", `cannot read config file "${path}"`)] };
   }
 
-  // Stage 2: Parse YAML document and check AST constraints.
+  // Parse the YAML document with strict options as the second stage, keeping source tokens for locations.
   const documents = parseAllDocuments(text, { keepSourceTokens: true, merge: false, uniqueKeys: true, schema: "core" });
   const document = documents[0];
   if (documents.length !== 1 || document === undefined) {
@@ -107,12 +113,12 @@ export async function loadConfig(
   }
   collectYamlViolations(document.contents, [], errors);
 
-  // Parse-level errors make the document tree unreliable; never feed it to the schema.
+  // Stop before schema validation when syntax failed, because the node graph is unreliable in that state.
   if (document.errors.length > 0) {
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 3: Exact secret resolution at declared secret paths only.
+  // Resolve credentials at declared secret paths as the third stage, stopping when any rule fails.
   const secretResult = resolveSecrets(document, env);
   if (!secretResult.ok) {
     errors.push(...secretResult.errors);
@@ -125,7 +131,7 @@ export async function loadConfig(
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 4: Strict structural validation with defaults.
+  // Validate structure with defaults as the fourth stage, mapping each issue to a located error.
   const parsed = aptusConfigSchema.safeParse(raw);
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
@@ -142,13 +148,13 @@ export async function loadConfig(
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 5: Cross-reference and policy validation (normalizes baseUrl in place).
+  // Validate cross references as the fifth stage, normalizing provider addresses in place.
   errors.push(...validateCrossReferences(parsed.data));
   if (errors.length > 0) {
     return { ok: false, error: sortStartupErrors(errors) };
   }
 
-  // Stage 6: Trace startup probe when tracing is enabled (the default).
+  // Probe the trace directory as the sixth stage, but only when tracing is enabled.
   if (parsed.data.tracing.enabled) {
     const probeError = await probeTraceRoot(parsed.data.tracing.root);
     if (probeError !== null) {
@@ -157,7 +163,7 @@ export async function loadConfig(
     }
   }
 
-  // Stage 7: Redacted revision over a clone with env names at secret paths, then freeze.
+  // Build the redacted revision over a clone as the seventh stage, then freeze the live snapshot.
   const redacted = structuredClone(parsed.data);
   for (const [pointer, envName] of secretResult.references) {
     setPath(redacted, segmentsFromPointer(pointer), envName);
@@ -170,17 +176,12 @@ export async function loadConfig(
 }
 
 /**
- * Serializes a value into deterministic canonical JSON format:
- * - Object keys sorted lexicographically
- * - No whitespace
- * - Non-finite numbers coerced to `null`
+ * Serializes a value to deterministic canonical JSON with sorted keys and no whitespace.
  *
- * @param value - Value to serialize into canonical JSON string.
- * @returns Deterministic JSON string.
+ * Used for hashing configuration revisions independently of property insertion order or spacing.
  *
- * @remarks
- * Resolved secret values are never passed directly to this function; the caller overlays
- * environment variable names first to ensure secret material is excluded from config digests.
+ * @param value - Value to serialize into canonical JSON.
+ * @returns Deterministic JSON string representation.
  */
 export function canonicalJson(value: unknown): string {
   if (value === null || value === undefined) {
@@ -203,11 +204,11 @@ export function canonicalJson(value: unknown): string {
 }
 
 /**
- * Recursively freezes an object and all nested properties using `Object.freeze()`.
+ * Recursively freezes an object graph to enforce runtime immutability.
  *
- * @typeParam T - Object type to freeze.
- * @param value - Object or primitive to freeze.
- * @returns Deeply frozen immutable reference to `value`.
+ * @typeParam T - Object type being frozen.
+ * @param value - Target object or primitive to freeze.
+ * @returns The deeply frozen immutable reference.
  */
 export function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== "object") {
@@ -221,7 +222,10 @@ export function deepFreeze<T>(value: T): T {
 }
 
 /**
- * Produces a safe, bounded human error message for a Zod issue without reflecting raw input values.
+ * Translates a Zod validation issue into a safe diagnostic message without leaking raw input values.
+ *
+ * @param issue - Zod validation issue.
+ * @returns Safe human-readable error description.
  */
 function safeSchemaMessage(issue: $ZodIssue): string {
   switch (issue.code) {
@@ -251,11 +255,11 @@ function safeSchemaMessage(issue: $ZodIssue): string {
 }
 
 /**
- * Traverses a YAML AST node tree to detect forbidden constructs:
- * - YAML anchors / aliases (`*alias`)
- * - YAML merge keys (`<<`)
- * - Non-string mapping keys
- * - Non-standard / custom YAML tags
+ * Traverses a YAML AST to detect forbidden syntax features: aliases, merge keys, non-string keys, and custom tags.
+ *
+ * @param node - YAML AST node to inspect.
+ * @param path - Current path segments from document root.
+ * @param errors - Sink for discovered startup error records.
  */
 function collectYamlViolations(
   node: YamlNode | null,
@@ -269,7 +273,7 @@ function collectYamlViolations(
     errors.push(startupError("CONFIG_YAML_ALIAS", jsonPointer(path), "YAML aliases are not allowed"));
     return;
   }
-  // Check for custom YAML type tags (only standard 2002 core tags allowed).
+  // Reject custom type tags so only the standard core tag namespace reaches later stages.
   if (node.tag !== undefined && node.tag !== null && !node.tag.startsWith("tag:yaml.org,2002:")) {
     errors.push(startupError("CONFIG_YAML_CUSTOM_TAG", jsonPointer(path), "YAML custom tags are not allowed"));
   }
@@ -301,7 +305,12 @@ function collectYamlViolations(
 }
 
 /**
- * Finds the deepest path in the YAML AST whose source character range encloses `offset`.
+ * Resolves the deepest YAML AST node path whose source range contains the given character offset.
+ *
+ * @param node - YAML AST root or subtree to search.
+ * @param offset - Character offset in source text.
+ * @param path - Accumulated path segments.
+ * @returns Path segments to the enclosing AST node.
  */
 function deepestPath(
   node: YamlNode | null,
@@ -335,7 +344,10 @@ function deepestPath(
 }
 
 /**
- * Computes a hex-encoded SHA-256 digest of the provided string.
+ * Computes the lowercase hexadecimal SHA-256 digest of a text string.
+ *
+ * @param text - Input text to hash.
+ * @returns 64-character hexadecimal SHA-256 hash.
  */
 function sha256Hex(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");

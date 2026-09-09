@@ -1,3 +1,12 @@
+/**
+ * @fileoverview Ingress decoding of OpenAI Responses requests and response envelopes.
+ *
+ * Translates OpenAI Responses requests into intermediate representation (IR) requests
+ * and sidecar options, and maps provider response envelopes into IR outcomes. Enforces
+ * fail-closed capability rejection for native-only features (hosted tools, reasoning items,
+ * provider file references), and shares item grammar with streaming decoders.
+ */
+
 import { randomUUID } from "node:crypto";
 import type { HeaderMap, JsonObject, Result } from "../../../domain/contracts.ts";
 import type { NormalizedFailure } from "../../../domain/operations.ts";
@@ -86,13 +95,13 @@ const RECOGNIZED_RESPONSES_REQUEST_FIELDS = new Set([
   "modalities",
 ]);
 
+/**
+ * Allowed caller tokens documented for the Responses `allowed_callers` tool extension.
+ */
 const RESPONSES_ALLOWED_CALLERS: ReadonlySet<string> = new Set(["direct", "programmatic"]);
 
 /**
- * Resolves the owning matrix row for a hosted/provider Responses item:
- * `web_search_call` refines on its action type, computer items refine on
- * their safety-check fields, and every other entry rejects on type alone.
- * Shared by replayed input items and output items.
+ * Resolves the matrix capability row for hosted or provider Responses items.
  */
 function responsesHostedItemCapability(itemObj: Record<string, unknown>): MatrixRowId | undefined {
   const type = itemObj.type;
@@ -135,6 +144,12 @@ function parseResponsesCustomFormat(
   return ok({ type: "grammar", ...grammarResult.value });
 }
 
+/**
+ * Rejects native-only features in Responses tool definitions (hosted tools, vector stores, output schemas).
+ *
+ * @param raw - Raw tool definition entry.
+ * @returns Normalized failure if a native-only capability is present, or undefined to proceed.
+ */
 function rejectResponsesToolNative(raw: Record<string, unknown>): NormalizedFailure | undefined {
   if (raw.vector_store_ids !== undefined) return unsupportedCapabilityFailure("provider-vector-store");
   if (typeof raw.type === "string") {
@@ -146,6 +161,9 @@ function rejectResponsesToolNative(raw: Record<string, unknown>): NormalizedFail
   return undefined;
 }
 
+/**
+ * Tool wire specification for the OpenAI Responses protocol.
+ */
 const RESPONSES_TOOL_SPEC: ToolWireSpec = {
   shape: "flat",
   schemaField: "parameters",
@@ -160,10 +178,7 @@ const RESPONSES_TOOL_SPEC: ToolWireSpec = {
 };
 
 /**
- * Parses the shared content rules for `function_call_output` and
- * `custom_tool_call_output` payloads: a string is one text part; array
- * elements admit text blocks and fail closed on images, uploaded files, and
- * inline documents.
+ * Parses `function_call_output` and `custom_tool_call_output` payload contents into IR input parts.
  */
 function parseResponsesToolOutputPayload(value: unknown, context: string): Result<IrInputPart[], NormalizedFailure> {
   if (typeof value === "string") {
@@ -339,16 +354,12 @@ function parseResponsesFilePart(
 }
 
 /**
- * Parses one Responses output-text annotation into an IR citation. This is the
- * single authority for annotation citation semantics, shared by the
- * complete-outcome decoder and the stream decoder so the two paths cannot
- * drift: only a `url_citation` carrying a `url` yields a citation; every other
- * annotation fails closed with its owning capability row and never silently
- * drops provider-supplied citation content.
+ * Parses a Responses output-text annotation into an {@link IrCitation}.
  *
- * Callers reject `container_file_citation` before calling: it is the
- * provider-container row's cited-file surface (research R:193) and fails with
- * `provider-container` regardless of surrounding decoder state.
+ * Shared between complete-outcome and streaming decoders. Only `url_citation` yields a valid citation.
+ *
+ * @param annot - Raw annotation object.
+ * @returns Decoded citation or normalized capability failure.
  */
 export function parseResponsesAnnotation(annot: Record<string, unknown>): Result<IrCitation, NormalizedFailure> {
   if (annot.type === "url_citation") {
@@ -374,9 +385,7 @@ export function parseResponsesAnnotation(annot: Record<string, unknown>): Result
 }
 
 /**
- * Validates the two fields every Responses tool-call item carries. Shared by
- * replayed request items and outcome output items so the two decode paths
- * cannot drift.
+ * Validates `call_id` and `name` identity fields on Responses tool-call items.
  */
 function parseResponsesCallIdentity(
   itemObj: Record<string, unknown>,
@@ -435,11 +444,7 @@ function parseResponsesCustomCall(
 }
 
 /**
- * Parses the `reasoning` request object: `effort` is the only admitted
- * sub-field (common five-literal set); summary controls, style/context modes,
- * and unrecognized sub-fields fail closed with their exact matrix capability
- * IDs instead of a blanket rejection. Shared by the complete and stream
- * request decoders.
+ * Parses the `reasoning` request object, extracting the admitted `effort` level.
  */
 function parseResponsesReasoning(
   value: unknown,
@@ -465,8 +470,13 @@ function parseResponsesReasoning(
 }
 
 /**
- * Parses a Responses request body shared verbatim by the complete ingress
- * decoder and the streaming request decoder.
+ * Parses an OpenAI Responses request body into an {@link IrRequest} and wire options.
+ *
+ * Shared between complete-path and streaming request decoders.
+ *
+ * @param body - Raw request body JSON object.
+ * @param delivery - Request delivery mode (`complete` or `stream`).
+ * @returns Decoded request result or normalized failure.
  */
 export function parseResponsesRequestBody(
   body: JsonObject,
@@ -992,19 +1002,27 @@ export function parseResponsesRequestBody(
 }
 
 /**
- * Ingress decoder for OpenAI Responses requests and responses.
- *
- * Request decoding delegates to {@link parseResponsesRequestBody}, which
- * projects admitted generation controls (including the `reasoning.effort`
- * sub-field) into the IR and captures matrix-admitted wire-only fields into
- * the request wire-options sidecar; native-only state and diagnostic facts
- * fail closed with their exact matrix capability ID.
+ * Ingress decoder for OpenAI Responses requests and response envelopes.
  */
 export class ResponsesIngressDecoder implements IngressDecoder {
+  /**
+   * Decodes an OpenAI Responses request body into an {@link IrRequest}.
+   *
+   * @param body - Raw request body JSON object.
+   * @returns Decoded IR request with request wire options, or normalized failure.
+   */
   decodeRequest(body: JsonObject): Result<RequestDecodeResult, NormalizedFailure> {
     return parseResponsesRequestBody(body, body.stream === true ? "stream" : "complete");
   }
 
+  /**
+   * Decodes a provider response envelope into an {@link IrOutcome}.
+   *
+   * @param status - HTTP response status code.
+   * @param headers - HTTP response headers.
+   * @param body - Raw response body JSON object.
+   * @returns Decoded IR outcome with outcome wire options, or normalized failure.
+   */
   decodeOutcome(status: number, headers: HeaderMap, body: JsonObject): Result<OutcomeDecodeResult, NormalizedFailure> {
     if (typeof body !== "object" || body === null) {
       return invalidRequest("Responses response body must be an object");

@@ -1,18 +1,25 @@
+/**
+ * @fileoverview Structural Zod schema for startup configuration in the Aptus gateway.
+ *
+ * Defines the complete structural validation schema for `AptusConfig`, specifying field types,
+ * mandatory bounds, default values, and strict object handling to reject unexpected properties.
+ *
+ * Executed as stage four of config loading after secret resolution and prior to semantic cross-reference
+ * validation in `src/config/validate.ts`. Failures emit `CONFIG_SCHEMA` startup errors.
+ */
+
 import { z } from "zod";
 import type { HeaderMap, JsonObject, JsonValue } from "../domain/contracts.ts";
 import { PUBLIC_NAME_PATTERN } from "../domain/names.ts";
 import type { AptusConfig, SecretString } from "./types.ts";
 
-/** Validates canonical names (1-128 chars, alphanumeric start, dots, underscores, dashes). */
+/** Validates canonical names matching the public identifier format. */
 const nameSchema = z.string().regex(PUBLIC_NAME_PATTERN);
 
-/** Positive integer validator (> 0). */
+/** Validates positive integers for ports, limits, timeouts, and counters. */
 const positiveInt = z.number().int().positive();
 
-/**
- * Recursive schema for arbitrary JSON values.
- * Uses `z.lazy()` to handle nested arrays and records without infinite recursion during type synthesis.
- */
+/** Recursive validator for arbitrary read-only JSON values. */
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.null(),
@@ -24,21 +31,18 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   ]),
 );
 
-/** Schema validating a plain JSON object record. */
+/** Validates plain JSON objects used for payload fragments and overrides. */
 const jsonObjectSchema: z.ZodType<JsonObject> = z.record(z.string(), jsonValueSchema).readonly();
 
-/**
- * Validates an HTTP header dictionary.
- * Keys must be valid lower-case HTTP token characters; values must be strings.
- */
+/** Validates static provider headers with lowercase token names. */
 const headerMapSchema: z.ZodType<HeaderMap> = z
   .record(z.string().regex(/^[a-z0-9!#$%&'*+.^_`|~-]+$/), z.string())
   .readonly();
 
-/** Custom validator for non-empty secret strings. */
+/** Validates resolved non-empty credential strings. */
 const secretSchema = z.custom<SecretString>((value) => typeof value === "string" && value.length > 0);
 
-/** Canonical 13-member failure category enum schema. */
+/** Validates protocol-neutral failure categories for route retry and fallback rules. */
 const failureCategorySchema = z.enum([
   "invalid_request",
   "authentication",
@@ -55,7 +59,7 @@ const failureCategorySchema = z.enum([
   "stream_interrupted",
 ]);
 
-/** Schema for multi-protocol model catalog metadata. */
+/** Validates multi-protocol catalog metadata for model and route discovery. */
 const catalogSchema = z
   .object({
     openai: z.object({ created: z.number().int().nonnegative(), ownedBy: z.string().min(1) }).strict(),
@@ -82,7 +86,7 @@ const catalogSchema = z
   })
   .strict();
 
-/** Schema for unit pricing rates in USD per million tokens. */
+/** Validates token pricing rates per million tokens in USD. */
 const pricingSchema = z
   .object({
     inputUsdPerMillionTokens: z.string().regex(/^\d+(?:\.\d+)?$/),
@@ -99,13 +103,10 @@ const pricingSchema = z
   .strict();
 
 /**
- * Strict structural Zod schema for validating the resolved startup configuration.
+ * Strict structural Zod schema for the resolved startup configuration snapshot.
  *
- * Enforces strict object shapes (`.strict()`), default values, port bounds, positive limits,
- * and URI formats.
- *
- * @remarks
- * Structural validation occurs after secret resolution and before cross-reference semantic checks.
+ * Enforces field types, default values, bounds, and strict unknown-property rejection
+ * across all server, auth, provider, model, route, tracing, and operational settings.
  */
 export const aptusConfigSchema: z.ZodType<AptusConfig, unknown> = z
   .object({

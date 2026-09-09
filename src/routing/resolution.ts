@@ -1,20 +1,29 @@
+/**
+ * @fileoverview
+ * Canonical public name resolution and client authorization index.
+ *
+ * Resolves requested model and alias names to canonical identifiers and validates client key
+ * allowlist access permissions. Constructs precomputed {@link NameIndex} snapshots from configuration,
+ * providing fast in-memory authorization during HTTP request admission.
+ */
+
 import type { AptusConfig, ClientKeyConfig } from "../config/types.ts";
 
 /**
- * Precomputed index for fast model/route resolution and client authorization checks.
+ * Precomputed lookup maps for model/route resolution and client key authorization.
  */
 export interface NameIndex {
-  /** Map from all public names and aliases to their canonical model/route name. */
+  /** Map of public model names and aliases to their canonical model or route identifier. */
   readonly canonicalNames: ReadonlyMap<string, string>;
-  /** Map from client key name to its allowed canonical model/route names (`undefined` if client has no whitelist and can access all models). */
+  /** Map of client key names to their optional allowlist of authorized canonical names (undefined allows all). */
   readonly allowedNamesByClient: ReadonlyMap<string, ReadonlySet<string> | undefined>;
 }
 
 /**
- * Precomputes lookup maps for canonical model name resolution and client permission sets.
+ * Precomputes the name and authorization index from the gateway configuration snapshot.
  *
- * @param config - Deep-frozen startup configuration snapshot.
- * @returns An immutable {@link NameIndex}.
+ * @param config - Validated gateway configuration.
+ * @returns Precomputed immutable {@link NameIndex} instance.
  */
 export function createNameIndex(config: AptusConfig): NameIndex {
   const canonicalNames = canonicalNameIndex(config);
@@ -29,35 +38,31 @@ export function createNameIndex(config: AptusConfig): NameIndex {
 }
 
 /**
- * Resolves a client-requested model or alias name into a canonical model/route name and checks authorization.
+ * Resolves a requested model name or alias and verifies caller authorization.
  *
- * @param index - Precomputed name and client authorization index.
- * @param clientKeyName - Name of the authenticated client key.
- * @param requestedName - Raw model name string extracted from the request body.
- * @returns The canonical public model/route name if found and authorized; otherwise `undefined`.
+ * @param index - Precomputed name and authorization index.
+ * @param clientKeyName - Authenticated client key name.
+ * @param requestedName - Raw model or route name from the client request payload.
+ * @returns Canonical model or route name if authorized; undefined if unresolvable or unauthorized.
  */
 export function authorizePublicName(
   index: NameIndex,
   clientKeyName: string,
   requestedName: string,
 ): string | undefined {
-  // Reject if client key is unknown to the index.
   if (!index.allowedNamesByClient.has(clientKeyName)) return undefined;
-  // Resolve alias or canonical name to the canonical identifier.
   const canonical = index.canonicalNames.get(requestedName);
   if (canonical === undefined) return undefined;
-  // If client has no allowlist, all known canonical names are permitted.
   const allowed = index.allowedNamesByClient.get(clientKeyName);
   if (allowed === undefined) return canonical;
-  // Otherwise check if canonical name is present in client's allowlist set.
   return allowed.has(canonical) ? canonical : undefined;
 }
 
 /**
- * Builds a map from every canonical model/route name and every declared alias to its canonical name.
+ * Builds a lookup map from all configured model names, route names, and aliases to their canonical name.
  *
- * @param config - Active configuration snapshot.
- * @returns Readonly map from alias/canonical name to canonical name.
+ * @param config - Validated gateway configuration.
+ * @returns Read-only mapping of aliases and public names to canonical names.
  */
 export function canonicalNameIndex(config: AptusConfig): ReadonlyMap<string, string> {
   const names = new Map<string, string>();
@@ -69,11 +74,11 @@ export function canonicalNameIndex(config: AptusConfig): ReadonlyMap<string, str
 }
 
 /**
- * Resolves references declared in a client key's `allow` array into a set of canonical names.
+ * Resolves the configured allowlist entries for a client key into a set of canonical names.
  *
- * @param clientKey - Client key configuration.
- * @param aliases - Canonical name lookup map.
- * @returns Set of authorized canonical model/route names.
+ * @param clientKey - Client key configuration entry.
+ * @param aliases - Precomputed alias-to-canonical name mapping.
+ * @returns Set of canonical names permitted for this key.
  */
 export function allowedCanonicalNames(
   clientKey: ClientKeyConfig,
