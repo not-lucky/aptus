@@ -22,12 +22,13 @@ import type {
   TerminalCoordinator,
   TraceRecorder,
 } from "../domain/contracts.ts";
-import type { ErrorEncoder, TraceTerminal } from "../domain/operations.ts";
+import type { ErrorEncoder } from "../domain/operations.ts";
 import { type AptusRequestId, createRequestId } from "../domain/request-id.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import type { Redactor } from "../observability/trace/redaction.ts";
 import { timeoutFailure } from "../routing/failures.ts";
 import { createNameIndex, type NameIndex } from "../routing/resolution.ts";
+import { finalizeTerminal, type TerminalOutcome } from "../routing/terminal-outcome.ts";
 import { type Clock, systemClock } from "../routing/timing.ts";
 import { raceWithAbort } from "./abort-race.ts";
 import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.ts";
@@ -325,18 +326,20 @@ function createController(
           response.destroy();
         }
         const by = getCancellationBy();
-        const terminal = timeout
-          ? ({ kind: "failed", failure: timeoutFailure() } as const)
-          : ({ kind: "cancelled", by } as const);
-        await coordinator.finalize({
-          terminal,
-          outcomeCategory: timeout ? "failed" : "cancelled",
-          status: timeout ? 504 : 499,
-          attempts: coordinator.getAttempts(),
-          stream: streamRequested,
-          durationMs: clock.nowMonotonicMs() - startedMs,
-          canonicalPublicName,
-        });
+        const outcome: TerminalOutcome = timeout
+          ? { kind: "failed", failure: timeoutFailure(), status: 504 }
+          : { kind: "cancelled", by };
+        await finalizeTerminal(
+          coordinator,
+          {
+            attempts: coordinator.getAttempts(),
+            stream: streamRequested,
+            clientProtocol: protocol,
+            canonicalPublicName,
+          },
+          outcome,
+          clock.nowMonotonicMs() - startedMs,
+        );
         await coordinator.finalized;
         return;
       }
@@ -373,28 +376,27 @@ function createController(
         options.observer.cancelled({ aptusRequestId: requestId, phase: "relay", by });
         await trace.recordJson("cancellation", { phase: "relay", by });
       }
-      const terminal: TraceTerminal =
+      // A fully delivered response is a `complete` terminal carrying the actual status;
+      // an aborted delivery is a timeout failure or a client/shutdown cancellation.
+      // This fallback only wins when the gateway result carried no finalize seam, so the
+      // vocabulary derives both the trace terminal and the outcome category together.
+      const outcome: TerminalOutcome =
         delivery === "aborted"
           ? timeout
-            ? { kind: "failed", failure: timeoutFailure() }
+            ? { kind: "failed", failure: timeoutFailure(), status: 504 }
             : { kind: "cancelled", by }
           : { kind: "complete", status: response.statusCode || 200 };
-      await coordinator.finalize({
-        terminal,
-        outcomeCategory:
-          delivery === "aborted"
-            ? timeout
-              ? "failed"
-              : "cancelled"
-            : response.statusCode >= 400
-              ? "failed"
-              : "complete",
-        status: delivery === "aborted" ? (timeout ? 504 : 499) : response.statusCode || 200,
-        attempts: coordinator.getAttempts(),
-        stream: streamRequested,
-        durationMs: clock.nowMonotonicMs() - startedMs,
-        canonicalPublicName,
-      });
+      await finalizeTerminal(
+        coordinator,
+        {
+          attempts: coordinator.getAttempts(),
+          stream: streamRequested,
+          clientProtocol: protocol,
+          canonicalPublicName,
+        },
+        outcome,
+        clock.nowMonotonicMs() - startedMs,
+      );
 
       await coordinator.finalized;
     } catch {
@@ -413,15 +415,17 @@ function createController(
         response.destroy();
       }
       if (coordinator !== undefined) {
-        await coordinator.finalize({
-          terminal: { kind: "incomplete", reason: "internal_fault" },
-          outcomeCategory: "failed",
-          status: 500,
-          attempts: coordinator.getAttempts(),
-          stream: streamRequested,
-          durationMs: clock.nowMonotonicMs() - startedMs,
-          canonicalPublicName: canonicalPublicName ?? "unknown",
-        });
+        await finalizeTerminal(
+          coordinator,
+          {
+            attempts: coordinator.getAttempts(),
+            stream: streamRequested,
+            clientProtocol: protocol,
+            canonicalPublicName: canonicalPublicName ?? "unknown",
+          },
+          { kind: "fault" },
+          clock.nowMonotonicMs() - startedMs,
+        );
       }
     } finally {
       clearTimeout(deadline);
@@ -522,17 +526,19 @@ async function writeGatewayResult(
       .status(result.status)
       .send(JSON.stringify(result.body));
     coordinator.markClientFirstByte();
-    await coordinator.finalize({
-      terminal: { kind: "dry_run" },
-      outcomeCategory: "complete",
-      status: 200,
-      attempts: 0,
-      stream: false,
-      durationMs: clock.nowMonotonicMs() - startedMs,
-      canonicalPublicName,
-      targetProtocol: result.body.targetProtocol,
-      provider: result.body.candidate.provider,
-    });
+    await finalizeTerminal(
+      coordinator,
+      {
+        attempts: 0,
+        stream: false,
+        clientProtocol: protocol,
+        targetProtocol: result.body.targetProtocol,
+        provider: result.body.candidate.provider,
+        canonicalPublicName,
+      },
+      { kind: "dry_run" },
+      clock.nowMonotonicMs() - startedMs,
+    );
     return "complete";
   }
 

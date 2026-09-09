@@ -27,8 +27,9 @@ import type { EncodedFailure, ErrorEncoder, NormalizedFailure } from "../domain/
 import type { AptusRequestId } from "../domain/request-id.ts";
 import { createRequestId } from "../domain/request-id.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
-import { failureJson, notFoundFailure, statusFromCategory, timeoutFailure } from "../routing/failures.ts";
+import { failureJson, notFoundFailure, timeoutFailure } from "../routing/failures.ts";
 import { authorizePublicName, type NameIndex } from "../routing/resolution.ts";
+import { buildTerminalFact } from "../routing/terminal-outcome.ts";
 import type { Clock } from "../routing/timing.ts";
 import { raceWithAbort } from "./abort-race.ts";
 import type { AdmissionLimiter } from "./admission.ts";
@@ -252,9 +253,6 @@ export async function admitCreateRequest(
       deps.observer.cancelled({ aptusRequestId, phase: "admission", by });
       await trace.recordJson("cancellation", { phase: "admission", by });
     }
-    const terminal = timeout
-      ? ({ kind: "failed", failure: timeoutFailure() } as const)
-      : ({ kind: "cancelled", by } as const);
     if (!timeout) {
       return {
         ok: false,
@@ -265,14 +263,15 @@ export async function admitCreateRequest(
         startedMs,
         stream: false,
         aptusRequestId,
-        finalizeFact: {
-          terminal,
-          outcomeCategory: "cancelled",
-          status: 499,
-          attempts: coordinator.getAttempts(),
-          stream: false,
-          canonicalPublicName: "unknown",
-        },
+        finalizeFact: buildTerminalFact(
+          {
+            attempts: coordinator.getAttempts(),
+            stream: false,
+            clientProtocol: protocol,
+            canonicalPublicName: "unknown",
+          },
+          { kind: "cancelled", by },
+        ),
       };
     }
     return {
@@ -285,14 +284,15 @@ export async function admitCreateRequest(
       startedMs,
       stream: false,
       aptusRequestId,
-      finalizeFact: {
-        terminal,
-        outcomeCategory: "failed",
-        status: 504,
-        attempts: coordinator.getAttempts(),
-        stream: false,
-        canonicalPublicName: "unknown",
-      },
+      finalizeFact: buildTerminalFact(
+        {
+          attempts: coordinator.getAttempts(),
+          stream: false,
+          clientProtocol: protocol,
+          canonicalPublicName: "unknown",
+        },
+        { kind: "failed", failure: timeoutFailure(), status: 504 },
+      ),
     };
   }
 
@@ -309,14 +309,15 @@ export async function admitCreateRequest(
       startedMs,
       stream: false,
       aptusRequestId,
-      finalizeFact: {
-        terminal: { kind: "failed", failure },
-        outcomeCategory: "failed",
-        status: statusFromCategory(failure.category, protocol),
-        attempts: coordinator.getAttempts(),
-        stream: false,
-        canonicalPublicName: "unknown",
-      },
+      finalizeFact: buildTerminalFact(
+        {
+          attempts: coordinator.getAttempts(),
+          stream: false,
+          clientProtocol: protocol,
+          canonicalPublicName: "unknown",
+        },
+        { kind: "failed", failure },
+      ),
     };
   }
 
@@ -357,15 +358,16 @@ export async function admitCreateRequest(
       startedMs,
       stream: streamRequested,
       aptusRequestId,
-      finalizeFact: {
-        terminal: { kind: "failed", failure: publicNameResult.error },
-        outcomeCategory: "failed",
-        status: 400,
-        attempts: coordinator.getAttempts(),
-        stream: streamRequested,
-        canonicalPublicName: "unknown",
-        emitCompleted: false,
-      },
+      finalizeFact: buildTerminalFact(
+        {
+          attempts: coordinator.getAttempts(),
+          stream: streamRequested,
+          clientProtocol: protocol,
+          canonicalPublicName: "unknown",
+          emitCompleted: false,
+        },
+        { kind: "failed", failure: publicNameResult.error, status: 400 },
+      ),
     };
   }
 
@@ -384,15 +386,16 @@ export async function admitCreateRequest(
       startedMs,
       stream: streamRequested,
       aptusRequestId,
-      finalizeFact: {
-        terminal: { kind: "failed", failure },
-        outcomeCategory: "failed",
-        status: 404,
-        attempts: coordinator.getAttempts(),
-        stream: streamRequested,
-        canonicalPublicName: "unknown",
-        emitCompleted: false,
-      },
+      finalizeFact: buildTerminalFact(
+        {
+          attempts: coordinator.getAttempts(),
+          stream: streamRequested,
+          clientProtocol: protocol,
+          canonicalPublicName: "unknown",
+          emitCompleted: false,
+        },
+        { kind: "failed", failure, status: 404 },
+      ),
     };
   }
 

@@ -5,7 +5,9 @@
  * Coordinates the terminal phase of request execution: {@link relayComplete} transfers non-streaming
  * payloads (spooling memory vs disk payloads to trace), {@link relayTranslatedComplete} delivers
  * cross-protocol converted JSON responses, and {@link relayStream} streams chunked SSE events while
- * capturing raw bytes, collecting token usage, and finalizing lifecycle facts.
+ * capturing raw bytes and collecting token usage. Streaming delivery itself runs on the shared
+ * {@link runStreamRelay} engine in `stream-relay.ts`; this module supplies the native pass-through
+ * stream transform and the complete-response relay paths.
  */
 
 import type {
@@ -18,18 +20,23 @@ import type {
   Protocol,
   ProviderResponse,
   TerminalCoordinator,
-  TerminalFact,
+  TraceByteSink,
   TraceSession,
 } from "../domain/contracts.ts";
-import type { TraceTerminal } from "../domain/operations.ts";
 import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
 import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
 import type { TranslateCompleteOutcomeResult } from "../translation/contracts.ts";
-import { classifyAbortReason } from "./attempt.ts";
-import { failureFromObservation, interruptedFailure, streamFailure, timeoutFailure } from "./failures.ts";
+import { failureFromObservation } from "./failures.ts";
 import { createOwnedMemoryBody } from "./spool.ts";
+import { runStreamRelay, type StreamEofVerdict, type StreamTransform } from "./stream-relay.ts";
+import { buildTerminalFact } from "./terminal-outcome.ts";
 import type { Clock } from "./timing.ts";
-import { createStreamUsageCollector, extractCompleteUsage } from "./usage.ts";
+import {
+  createStreamUsageCollector,
+  extractCompleteUsage,
+  type StreamUsageCollector,
+  type UsageExtractionResult,
+} from "./usage.ts";
 
 const utf8Decoder = new TextDecoder();
 const utf8Encoder = new TextEncoder();
@@ -146,34 +153,22 @@ export async function relayComplete(
     }
   }
 
-  const baseFact = {
-    attempts: context.attemptCount,
-    stream: false as const,
-    targetProtocol: context.targetProtocol,
-    provider: context.providerName,
-    canonicalPublicName: context.canonicalName,
-  };
-
-  const fact: Omit<TerminalFact, "durationMs"> = success
-    ? {
-        terminal: {
-          kind: "complete",
-          status: response.status,
-          ...(rawUsage !== undefined ? { usage: rawUsage } : {}),
-          ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
-        },
-        outcomeCategory: "complete",
-        status: response.status,
-        ...baseFact,
-        usage: rawUsage,
-        estimatedCostUsd,
-      }
-    : {
-        terminal: { kind: "failed", failure: failureFromObservation(observation) },
-        outcomeCategory: "failed",
-        status: response.status,
-        ...baseFact,
-      };
+  // A success relays a clean complete terminal with whatever usage/cost was extracted;
+  // a failure relays the upstream error body verbatim, so the fact reports the upstream
+  // status that was actually delivered (an explicit status, not a category derivation).
+  const fact = buildTerminalFact(
+    {
+      attempts: context.attemptCount,
+      stream: false,
+      clientProtocol: context.endpointProtocol,
+      targetProtocol: context.targetProtocol,
+      provider: context.providerName,
+      canonicalPublicName: context.canonicalName,
+    },
+    success
+      ? { kind: "complete", status: response.status, usage: rawUsage, estimatedCostUsd }
+      : { kind: "failed", failure: failureFromObservation(observation), status: response.status },
+  );
 
   return {
     kind: "complete",
@@ -236,23 +231,17 @@ export async function relayTranslatedComplete(
     }
   }
 
-  const fact: Omit<TerminalFact, "durationMs"> = {
-    terminal: {
-      kind: "complete",
-      status: outcome.status,
-      ...(rawUsage !== undefined ? { usage: rawUsage } : {}),
-      ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+  const fact = buildTerminalFact(
+    {
+      attempts: context.attemptCount,
+      stream: false,
+      clientProtocol: context.endpointProtocol,
+      targetProtocol: context.targetProtocol,
+      provider: context.providerName,
+      canonicalPublicName: context.canonicalName,
     },
-    outcomeCategory: "complete",
-    status: outcome.status,
-    attempts: context.attemptCount,
-    stream: false,
-    targetProtocol: context.targetProtocol,
-    provider: context.providerName,
-    canonicalPublicName: context.canonicalName,
-    usage: rawUsage,
-    estimatedCostUsd,
-  };
+    { kind: "complete", status: outcome.status, usage: rawUsage, estimatedCostUsd },
+  );
 
   return {
     kind: "complete",
@@ -269,182 +258,80 @@ export async function relayTranslatedComplete(
 /**
  * Wraps a native streaming provider body for client relay, tapping chunks into trace and usage collectors.
  *
+ * Delegates the delivery spine to the shared {@link runStreamRelay} engine with a native
+ * pass-through stream transform: provider chunks are byte-relayed unchanged while the usage
+ * collector verifies protocol terminal markers and extracts token usage.
+ *
  * @param response - Upstream provider response holding readable stream body.
  * @param context - Relay execution context.
  * @returns Streaming gateway result managing chunk delivery and terminal finalization.
  */
 export function relayStream(response: ProviderResponse, context: RelayContext): GatewayResult {
-  const reader = response.body.getReader();
   const providerSink = context.trace.openBytes("provider_stream");
   const usageCollector = createStreamUsageCollector(context.targetProtocol);
-
-  let streamFinalized = false;
-  let deliver: ((durationMs: number) => Promise<void>) | undefined;
-
-  return {
-    kind: "stream",
+  return runStreamRelay({
+    aptusRequestId: context.aptusRequestId,
+    coordinator: context.coordinator,
+    clock: context.clock,
+    started: context.started,
+    attemptCount: context.attemptCount,
+    targetProtocol: context.targetProtocol,
+    clientProtocol: context.endpointProtocol,
+    providerName: context.providerName,
+    canonicalName: context.canonicalName,
+    pricing: context.pricing,
+    requestSignal: context.requestSignal,
+    trace: context.trace,
+    observer: context.observer,
+    reader: response.body.getReader(),
+    sinks: [providerSink],
+    transform: createNativeStreamTransform(usageCollector, providerSink),
     status: response.status,
     headers: response.headers,
-    body: new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        try {
-          const chunk = await reader.read();
-          if (chunk.done) {
-            if (streamFinalized) return;
-            streamFinalized = true;
+  });
+}
 
-            const usageResult = usageCollector.finish();
-            await providerSink.complete().catch(() => undefined);
+/**
+ * Builds the native pass-through stream transform used by {@link relayStream}.
+ *
+ * The transform byte-relays each provider chunk unchanged, feeding it to the stream usage
+ * collector for terminal-marker verification and usage extraction. Its end-of-stream verdict
+ * mirrors native relay semantics: a stream that reached a valid terminal marker or carried an
+ * explicit provider error event is a clean completion (the client parses any error payload from
+ * the relayed bytes), while a stream ending without either is interrupted.
+ *
+ * @param usageCollector - Incremental SSE usage and terminal-marker collector.
+ * @param providerSink - Trace byte sink receiving raw provider stream bytes.
+ * @returns Native pass-through stream transform adapter.
+ */
+function createNativeStreamTransform(
+  usageCollector: StreamUsageCollector,
+  providerSink: TraceByteSink,
+): StreamTransform {
+  let usageResult: UsageExtractionResult | undefined;
 
-            if (!usageResult.hasValidTerminal && !usageResult.isProviderError) {
-              const durationMs = context.clock.nowMonotonicMs() - context.started;
-              const failure = interruptedFailure();
-              await context.coordinator.finalize({
-                terminal: { kind: "failed", failure },
-                outcomeCategory: "failed",
-                status: response.status,
-                attempts: context.attemptCount,
-                stream: true,
-                durationMs,
-                targetProtocol: context.targetProtocol,
-                provider: context.providerName,
-                canonicalPublicName: context.canonicalName,
-              });
-              controller.error(new Error("stream ended unexpectedly before terminal marker"));
-              return;
-            }
+  return {
+    feed(chunk: Uint8Array) {
+      usageCollector.feed(chunk);
+      void providerSink.append(chunk);
+      return { ok: true as const, value: [chunk] };
+    },
 
-            let estimatedCostUsd: string | undefined;
-            if (context.pricing !== null && usageResult.normalizedUsage !== undefined) {
-              try {
-                estimatedCostUsd = estimateCostUsd(context.pricing, usageResult.normalizedUsage);
-              } catch {
-                // Suppress cost
-              }
-            }
+    finish() {
+      usageResult = usageCollector.finish();
+      return { ok: true as const, value: [] };
+    },
 
-            const terminal: TraceTerminal = {
-              kind: "complete",
-              status: response.status,
-              ...(usageResult.rawUsage !== undefined ? { usage: usageResult.rawUsage } : {}),
-              ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
-            };
-
-            deliver = async (durationMs) => {
-              await context.coordinator.finalize({
-                terminal,
-                outcomeCategory: "complete",
-                status: response.status,
-                attempts: context.attemptCount,
-                stream: true,
-                durationMs,
-                targetProtocol: context.targetProtocol,
-                provider: context.providerName,
-                canonicalPublicName: context.canonicalName,
-                usage: usageResult.rawUsage,
-                estimatedCostUsd,
-              });
-            };
-            controller.close();
-            return;
-          }
-
-          usageCollector.feed(chunk.value);
-          void providerSink.append(chunk.value);
-          controller.enqueue(chunk.value);
-        } catch (error) {
-          if (streamFinalized) return;
-          streamFinalized = true;
-
-          const durationMs = context.clock.nowMonotonicMs() - context.started;
-          if (context.requestSignal.aborted) {
-            const reason = classifyAbortReason(context.requestSignal);
-            await providerSink.discard().catch(() => undefined);
-            if (reason === "timeout") {
-              await context.coordinator.finalize({
-                terminal: { kind: "failed", failure: timeoutFailure() },
-                outcomeCategory: "failed",
-                status: 504,
-                attempts: context.attemptCount,
-                stream: true,
-                durationMs,
-                targetProtocol: context.targetProtocol,
-                provider: context.providerName,
-                canonicalPublicName: context.canonicalName,
-              });
-            } else {
-              const by = reason === "shutdown" ? "shutdown" : "client";
-              await context.trace.recordJson("cancellation", { phase: "relay", by });
-              context.observer.cancelled({ aptusRequestId: context.aptusRequestId, phase: "relay", by });
-              await context.coordinator.finalize({
-                terminal: { kind: "cancelled", by },
-                outcomeCategory: "cancelled",
-                status: 499,
-                attempts: context.attemptCount,
-                stream: true,
-                durationMs,
-                targetProtocol: context.targetProtocol,
-                provider: context.providerName,
-                canonicalPublicName: context.canonicalName,
-              });
-            }
-          } else {
-            await providerSink.complete().catch(() => undefined);
-            const failure = streamFailure(error);
-            await context.coordinator.finalize({
-              terminal: { kind: "failed", failure },
-              outcomeCategory: "failed",
-              status: response.status,
-              attempts: context.attemptCount,
-              stream: true,
-              durationMs,
-              targetProtocol: context.targetProtocol,
-              provider: context.providerName,
-              canonicalPublicName: context.canonicalName,
-            });
-          }
-          controller.error(error);
-        }
-      },
-      cancel() {
-        if (streamFinalized) return;
-        streamFinalized = true;
-        void reader.cancel();
-        void providerSink.discard().catch(() => undefined);
-        const durationMs = context.clock.nowMonotonicMs() - context.started;
-        const reason = classifyAbortReason(context.requestSignal);
-        if (reason === "timeout") {
-          void context.coordinator.finalize({
-            terminal: { kind: "failed", failure: timeoutFailure() },
-            outcomeCategory: "failed",
-            status: 504,
-            attempts: context.attemptCount,
-            stream: true,
-            durationMs,
-            targetProtocol: context.targetProtocol,
-            provider: context.providerName,
-            canonicalPublicName: context.canonicalName,
-          });
-        } else {
-          const by = reason === "shutdown" ? "shutdown" : "client";
-          void context.trace.recordJson("cancellation", { phase: "relay", by });
-          context.observer.cancelled({ aptusRequestId: context.aptusRequestId, phase: "relay", by });
-          void context.coordinator.finalize({
-            terminal: { kind: "cancelled", by },
-            outcomeCategory: "cancelled",
-            status: 499,
-            attempts: context.attemptCount,
-            stream: true,
-            durationMs,
-            targetProtocol: context.targetProtocol,
-            provider: context.providerName,
-            canonicalPublicName: context.canonicalName,
-          });
-        }
-      },
-    }),
-    onDelivered: async (durationMs) => {
-      await deliver?.(durationMs);
+    eofVerdict(): StreamEofVerdict {
+      const result = usageResult;
+      if (result === undefined || (!result.hasValidTerminal && !result.isProviderError)) {
+        return { kind: "no_terminal" };
+      }
+      return {
+        kind: "complete",
+        ...(result.rawUsage !== undefined ? { usageRecord: result.rawUsage } : {}),
+        ...(result.normalizedUsage !== undefined ? { costUsage: result.normalizedUsage } : {}),
+      };
     },
   };
 }

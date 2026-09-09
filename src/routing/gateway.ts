@@ -29,11 +29,12 @@ import type { TranslationCoordinator } from "../translation/contracts.ts";
 import { type AttemptContext, classifyAbortReason, executeAttempt } from "./attempt.ts";
 import { type RunnerShared, runCandidate } from "./candidate-runner.ts";
 import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
-import { statusFromCategory, unavailableFailure, unsupportedCapabilityFailure } from "./failures.ts";
+import { unavailableFailure, unsupportedCapabilityFailure } from "./failures.ts";
 import { createKeyPool } from "./key-pool.ts";
 import type { RelayContext } from "./relay.ts";
 import { createNameIndex, type NameIndex } from "./resolution.ts";
 import { shouldFallback } from "./retry-policy.ts";
+import { buildTerminalFact, finalizeTerminal } from "./terminal-outcome.ts";
 import {
   type Clock,
   type RandomSource,
@@ -176,19 +177,20 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
 
   let attemptNumber = 0;
 
-  // A terminal fact is built here but finalized by HTTP after the client write.
+  // Terminal facts are derived through the shared outcome vocabulary but finalized by
+  // HTTP only after the client write, so each result carries a deferred finalize seam.
   const terminalFailure = (failure: NormalizedFailure, candidate?: CandidateDescriptor): GatewayResult => {
-    const status = statusFromCategory(failure.category, request.protocol);
-    const fact = {
-      terminal: { kind: "failed" as const, failure },
-      outcomeCategory: "failed" as const,
-      status,
-      attempts: attemptNumber,
-      stream: request.stream,
-      targetProtocol: candidate?.provider.protocol,
-      provider: candidate?.provider.name,
-      canonicalPublicName: request.canonicalPublicName,
-    };
+    const fact = buildTerminalFact(
+      {
+        attempts: attemptNumber,
+        stream: request.stream,
+        clientProtocol: request.protocol,
+        targetProtocol: candidate?.provider.protocol,
+        provider: candidate?.provider.name,
+        canonicalPublicName: request.canonicalPublicName,
+      },
+      { kind: "failed", failure },
+    );
     return {
       kind: "failure",
       failure,
@@ -199,14 +201,15 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
   };
 
   const internalFault = (): GatewayResult => {
-    const fact = {
-      terminal: { kind: "incomplete" as const, reason: "internal_fault" as const },
-      outcomeCategory: "failed" as const,
-      status: 500,
-      attempts: attemptNumber,
-      stream: request.stream,
-      canonicalPublicName: request.canonicalPublicName,
-    };
+    const fact = buildTerminalFact(
+      {
+        attempts: attemptNumber,
+        stream: request.stream,
+        clientProtocol: request.protocol,
+        canonicalPublicName: request.canonicalPublicName,
+      },
+      { kind: "fault" },
+    );
     return {
       kind: "internal_fault",
       finalize: async (durationMs: number) => {
@@ -505,17 +508,19 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
     ): Promise<GatewayResult> => {
       const durationMs = clock.nowMonotonicMs() - started;
       const by = classifyAbortReason(request.signal) === "shutdown" ? "shutdown" : "client";
-      await request.coordinator.finalize({
-        terminal: { kind: "cancelled", by },
-        outcomeCategory: "cancelled",
-        status: 499,
-        attempts: attemptNumber,
-        stream,
+      await finalizeTerminal(
+        request.coordinator,
+        {
+          attempts: attemptNumber,
+          stream,
+          clientProtocol: request.protocol,
+          targetProtocol,
+          provider,
+          canonicalPublicName: request.canonicalPublicName,
+        },
+        { kind: "cancelled", by },
         durationMs,
-        targetProtocol,
-        provider,
-        canonicalPublicName: request.canonicalPublicName,
-      });
+      );
       return { kind: "cancelled", by };
     };
 

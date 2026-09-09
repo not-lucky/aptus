@@ -113,6 +113,7 @@ export async function executeTranslatedStreamAttempt(
   );
 
   const relayResult = relayTranslatedStream({
+    aptusRequestId: request.aptusRequestId,
     coordinator: request.coordinator,
     clock: ctx.clock,
     started: dispatchStarted,
@@ -123,6 +124,8 @@ export async function executeTranslatedStreamAttempt(
     canonicalName: request.canonicalPublicName,
     pricing: candidate.model.pricing ?? null,
     requestSignal: request.signal,
+    trace: request.trace,
+    observer: ctx.observer,
     reader: bootstrap.reader,
     pump: bootstrap.pump,
     providerSink: bootstrap.providerSink,

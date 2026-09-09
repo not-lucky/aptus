@@ -291,6 +291,44 @@ const SCENARIOS: readonly ScenarioEntry[] = [
     target: "messages",
     counts: { chatOrigin: 0, responsesOrigin: 0, messagesOrigin: 1 },
   },
+  // test/process/stream-terminal.test.ts (single Chat/Responses origins)
+  {
+    file: "stream-terminal",
+    descriptor:
+      "process: native Chat stream ending without [DONE] interrupts with a failed 502 terminal and no success marker",
+    harness: "single-origin",
+    target: "chat",
+    counts: { chatOrigin: 1, responsesOrigin: 0, messagesOrigin: 0 },
+  },
+  {
+    file: "stream-terminal",
+    descriptor: "process: native Chat mid-stream transport reset discards partial stream files with a failed terminal",
+    harness: "single-origin",
+    target: "chat",
+    counts: { chatOrigin: 1, responsesOrigin: 0, messagesOrigin: 0 },
+  },
+  {
+    file: "stream-terminal",
+    descriptor: "process: native Responses stream ending without a terminal event interrupts with a failed terminal",
+    harness: "single-origin",
+    target: "responses",
+    counts: { chatOrigin: 0, responsesOrigin: 1, messagesOrigin: 0 },
+  },
+  // test/process/terminal-vocabulary.test.ts (single Chat origin, zero dispatch)
+  {
+    file: "terminal-vocabulary",
+    descriptor: "process: unresolvable model name is rejected as a 404 failed terminal with zero dispatch",
+    harness: "single-origin",
+    target: "chat",
+    counts: { chatOrigin: 0, responsesOrigin: 0, messagesOrigin: 0 },
+  },
+  {
+    file: "terminal-vocabulary",
+    descriptor: "process: unusable model field is rejected as a 400 invalid_request terminal with zero dispatch",
+    harness: "single-origin",
+    target: "chat",
+    counts: { chatOrigin: 0, responsesOrigin: 0, messagesOrigin: 0 },
+  },
   // test/process/dry-run.test.ts (single Chat origin, zero dispatch)
   {
     file: "dry-run",

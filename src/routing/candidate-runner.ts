@@ -17,6 +17,7 @@ import { failureFromObservation, interruptedFailure, timeoutFailure, unavailable
 import { type RelayContext, relayComplete, relayStream, relayTranslatedComplete } from "./relay.ts";
 import { shouldRetry } from "./retry-policy.ts";
 import { spoolResponseBody } from "./spool.ts";
+import { finalizeTerminal } from "./terminal-outcome.ts";
 import type { Clock } from "./timing.ts";
 import type { TranslatedAttemptOutcome } from "./translated-attempt.ts";
 import type { TranslatedStreamAttemptOutcome } from "./translated-stream-attempt.ts";
@@ -156,17 +157,19 @@ export async function runCandidate(
           const by = classifyAbortReason(shared.request.signal) === "shutdown" ? "shutdown" : "client";
           await shared.request.trace.recordJson("cancellation", { phase: "relay", by });
           shared.observer.cancelled({ aptusRequestId: shared.request.aptusRequestId, phase: "relay", by });
-          await shared.request.coordinator.finalize({
-            terminal: { kind: "cancelled", by },
-            outcomeCategory: "cancelled",
-            status: 499,
-            attempts: outcome.attemptNumber,
-            stream: shared.request.stream,
+          await finalizeTerminal(
+            shared.request.coordinator,
+            {
+              attempts: outcome.attemptNumber,
+              stream: shared.request.stream,
+              clientProtocol: shared.request.protocol,
+              targetProtocol: candidate.provider.protocol,
+              provider: candidate.provider.name,
+              canonicalPublicName: shared.request.canonicalPublicName,
+            },
+            { kind: "cancelled", by },
             durationMs,
-            targetProtocol: candidate.provider.protocol,
-            provider: candidate.provider.name,
-            canonicalPublicName: shared.request.canonicalPublicName,
-          });
+          );
           return { kind: "returned", result: { kind: "cancelled", by } };
         }
         if (outcome.observation.result === "success") {
