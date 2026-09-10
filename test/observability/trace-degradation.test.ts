@@ -34,7 +34,7 @@ test.concurrent("runtime trace write failure degrades readiness without failing 
     root,
     secrets: new Set<string>(),
     onFailure: (operation, safeErrorCode, aptusRequestId) => {
-      observer.traceFailure({ aptusRequestId, operation, safeErrorCode });
+      observer.observe({ type: "trace_failure", aptusRequestId, operation, safeErrorCode });
     },
     onDegrade: () => {
       ready = false;
@@ -87,7 +87,7 @@ test.concurrent("a later successful write restores readiness after degradation",
     root,
     secrets: new Set<string>(),
     onFailure: (operation, safeErrorCode, aptusRequestId) => {
-      observer.traceFailure({ aptusRequestId, operation, safeErrorCode });
+      observer.observe({ type: "trace_failure", aptusRequestId, operation, safeErrorCode });
     },
     onDegrade: () => {
       ready = false;

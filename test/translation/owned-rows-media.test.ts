@@ -759,7 +759,7 @@ test.concurrent("audio rows: exact capability attribution on ingress", () => {
     messages: [{ role: "user", content: "hi" }],
     audio: { voice: "alloy", format: "wav" },
   };
-  const resStream = coord.translateStreamRequest({
+  const resStream = coord.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: cAudioStream,
@@ -1354,7 +1354,7 @@ test.concurrent("stream requests fail closed like complete: citations, .txt docu
   // Request-side citations reject on the streaming path with the same
   // capability attribution as the complete path (shared ingress decoder).
   for (const target of ["openai-chat", "openai-responses"] as const) {
-    const res = coord.translateStreamRequest({
+    const res = coord.translateRequest({ stream: true,
       sourceProtocol: "anthropic-messages",
       targetProtocol: target,
       logicalModel: "logical-key",
@@ -1385,7 +1385,7 @@ test.concurrent("stream requests fail closed like complete: citations, .txt docu
       },
     ],
   };
-  const cTxtStreamToR = coord.translateStreamRequest({
+  const cTxtStreamToR = coord.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     logicalModel: "logical-key",
@@ -1397,7 +1397,7 @@ test.concurrent("stream requests fail closed like complete: citations, .txt docu
     const input = cTxtStreamToR.value.body.input as Array<{ content: Array<{ type: string; file_data?: string }> }>;
     assert.equal(input[0]?.content[0]?.file_data, "aG Vsb G8=\n");
   }
-  const cTxtStreamToM = coord.translateStreamRequest({
+  const cTxtStreamToM = coord.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     logicalModel: "logical-key",

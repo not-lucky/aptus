@@ -20,7 +20,7 @@ import { ResponsesProviderStreamDecoder } from "../../src/translation/codecs/res
 import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
 import type { IrRequest } from "../../src/translation/ir.ts";
 import { preflightRequest } from "../../src/translation/preflight.ts";
-import { ALL_DIRECTIONS, sourceBodyFor, translateRequest } from "./owned-rows-helpers.ts";
+import { ALL_DIRECTIONS, createSessionBundle, sourceBodyFor, translateRequest } from "./owned-rows-helpers.ts";
 
 test.concurrent("row logical-model-selection: logical key resolves to target model and never leaks the wire model", () => {
   const coordinator = createDefaultTranslationCoordinator();
@@ -482,7 +482,7 @@ test.concurrent("row semantic-stream-lifecycle: streaming lifecycle translates a
   const coordinator = createDefaultTranslationCoordinator();
   for (const [source, target] of ALL_DIRECTIONS) {
     const body = { ...sourceBodyFor(source), stream: true };
-    const res = coordinator.translateStreamRequest({
+    const res = coordinator.translateRequest({ stream: true,
       sourceProtocol: source,
       targetProtocol: target,
       sourceBody: body,
@@ -499,9 +499,8 @@ test.concurrent("row semantic-stream-lifecycle: streaming lifecycle translates a
 });
 
 test.concurrent("row text-stream-delta: text delta frames encode and decode correctly across all codecs", () => {
-  const coordinator = createDefaultTranslationCoordinator();
   for (const [source, target] of ALL_DIRECTIONS) {
-    const sessionBundle = coordinator.createStreamSession({
+    const sessionBundle = createSessionBundle({
       sourceProtocol: source,
       targetProtocol: target,
       logicalModel: "logical-key",
@@ -524,9 +523,8 @@ test.concurrent("row text-stream-delta: text delta frames encode and decode corr
 });
 
 test.concurrent("row sse-named-events: Responses and Messages emit named SSE events", () => {
-  const coordinator = createDefaultTranslationCoordinator();
 
-  const respSession = coordinator.createStreamSession({
+  const respSession = createSessionBundle({
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     logicalModel: "logical-key",
@@ -542,7 +540,7 @@ test.concurrent("row sse-named-events: Responses and Messages emit named SSE eve
     assert.equal(respFrames.value[0]?.event, "response.created");
   }
 
-  const msgSession = coordinator.createStreamSession({
+  const msgSession = createSessionBundle({
     sourceProtocol: "anthropic-messages",
     targetProtocol: "openai-chat",
     logicalModel: "logical-key",
@@ -560,8 +558,7 @@ test.concurrent("row sse-named-events: Responses and Messages emit named SSE eve
 });
 
 test.concurrent("row chat-done-sentinel: Chat decoder requires [DONE] and encoder emits [DONE]", () => {
-  const coordinator = createDefaultTranslationCoordinator();
-  const sessionBundle = coordinator.createStreamSession({
+  const sessionBundle = createSessionBundle({
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-chat",
     logicalModel: "logical-key",
@@ -581,8 +578,7 @@ test.concurrent("row chat-done-sentinel: Chat decoder requires [DONE] and encode
 });
 
 test.concurrent("row responses-sequence-number: Responses encoder generates strictly monotonic sequence numbers", () => {
-  const coordinator = createDefaultTranslationCoordinator();
-  const sessionBundle = coordinator.createStreamSession({
+  const sessionBundle = createSessionBundle({
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     logicalModel: "logical-key",
@@ -613,8 +609,7 @@ test.concurrent("row responses-sequence-number: Responses encoder generates stri
 });
 
 test.concurrent("row messages-ping: Messages decoder safely consumes ping keepalive frames", () => {
-  const coordinator = createDefaultTranslationCoordinator();
-  const sessionBundle = coordinator.createStreamSession({
+  const sessionBundle = createSessionBundle({
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     logicalModel: "logical-key",
@@ -630,7 +625,7 @@ test.concurrent("row messages-ping: Messages decoder safely consumes ping keepal
 
 test.concurrent("row stream-obfuscation: request decoder accepts include_obfuscation and encoder sets false on provider", () => {
   const coordinator = createDefaultTranslationCoordinator();
-  const res = coordinator.translateStreamRequest({
+  const res = coordinator.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-chat",
     sourceBody: {

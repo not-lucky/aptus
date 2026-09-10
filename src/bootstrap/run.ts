@@ -93,7 +93,7 @@ export async function startRuntime(
         root: config.tracing.root,
         secrets,
         onFailure: (operation, safeErrorCode, aptusRequestId) => {
-          observer.traceFailure({ aptusRequestId, operation, safeErrorCode });
+          observer.observe({ type: "trace_failure", aptusRequestId, operation, safeErrorCode });
         },
         onDegrade: () => {
           state.traceReady = false;

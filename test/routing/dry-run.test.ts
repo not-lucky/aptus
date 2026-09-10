@@ -4,6 +4,7 @@ import type { AptusConfig, SecretString } from "../../src/config/types.ts";
 import type { GatewayRequest, JsonObject } from "../../src/domain/contracts.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
 import { createTerminalCoordinator } from "../../src/http/coordinator.ts";
+import type { LifecycleEvent, LifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
 import { createLifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
 import { aptusLogger } from "../../src/observability/logging.ts";
 import { createMetricsRegistry } from "../../src/observability/metrics.ts";
@@ -11,6 +12,7 @@ import { createNoopTraceRecorder } from "../../src/observability/trace/noop-reco
 import { createProtocolAdapters } from "../../src/providers/adapters.ts";
 import { createGateway } from "../../src/routing/gateway.ts";
 import { systemClock, systemSleeper } from "../../src/routing/timing.ts";
+import { COMPLETE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
 import { createFixtureDispatcher } from "../helpers/fixture-dispatcher.ts";
 
 function catalog() {
@@ -80,6 +82,17 @@ function buildDryRunConfig(): AptusConfig {
       retention: { maxAgeMs: 86400000, maxBytes: 10485760, cleanupIntervalMs: 60000 },
     },
     dryRun: { enabled: true },
+  };
+}
+
+/**
+ * Records observed telemetry moments for dry-run versus dispatch parity assertions.
+ */
+function parityObserver(logs: LifecycleEvent[]): LifecycleObserver {
+  return {
+    observe(event) {
+      logs.push(event);
+    },
   };
 }
 
@@ -228,4 +241,121 @@ test.concurrent("dry run returns failure when candidate key is unavailable", asy
   if (result.kind === "failure") {
     assert.equal(result.failure.category, "unavailable");
   }
+});
+
+test.concurrent("dry run and dispatch share candidate fallback bookkeeping", async () => {
+  const baseConfig = buildDryRunConfig();
+  const config: AptusConfig = {
+    ...baseConfig,
+    providers: [
+      {
+        name: "chat-provider",
+        protocol: "openai-chat",
+        baseUrl: "https://chat.example/v1",
+        headers: {},
+        keys: [{ name: "key-1", secret: "sec" as SecretString, enabled: false }],
+        keyStrategy: "fill-first",
+      },
+      {
+        name: "backup-chat-provider",
+        protocol: "openai-chat",
+        baseUrl: "https://backup.example/v1",
+        headers: {},
+        keys: [{ name: "backup-key-1", secret: "backup-secret-1" as SecretString, enabled: true }],
+        keyStrategy: "fill-first",
+      },
+    ],
+    models: [
+      {
+        name: "gpt-main",
+        aliases: [],
+        provider: "chat-provider",
+        upstreamModel: "gpt-5.4",
+        defaults: {},
+        extraBody: {},
+        overrides: {},
+        pricing: null,
+        catalog: catalog(),
+      },
+      {
+        name: "gpt-backup",
+        aliases: [],
+        provider: "backup-chat-provider",
+        upstreamModel: "gpt-5.4-backup",
+        defaults: {},
+        extraBody: {},
+        overrides: {},
+        pricing: null,
+        catalog: catalog(),
+      },
+    ],
+    routes: [
+      {
+        name: "fallback-route",
+        aliases: [],
+        candidates: ["gpt-main", "gpt-backup"],
+        retryOn: [],
+        fallbackOn: ["unavailable"],
+        catalog: catalog(),
+      },
+    ],
+  };
+
+  const request = createTestRequest({
+    model: "fallback-route",
+    messages: [{ role: "user", content: "Hello" }],
+  });
+
+  // Dry-run mode: first candidate's pool is empty, so the engine falls back to
+  // the second candidate and previews its key without ever dispatching.
+  const dryRunLogs: LifecycleEvent[] = [];
+  const dryRunObserver = parityObserver(dryRunLogs);
+  const dryRunGateway = createGateway({
+    config: { ...config, dryRun: { enabled: true } },
+    revision: "test-rev",
+    adapters: createProtocolAdapters(),
+    dispatcher: createFixtureDispatcher(),
+    traceRecorder: createNoopTraceRecorder(),
+    observer: dryRunObserver,
+    clock: systemClock,
+    sleeper: systemSleeper,
+  });
+  const dryRunResult = await dryRunGateway.execute(request);
+  assert.equal(dryRunResult.kind, "dry_run");
+  if (dryRunResult.kind === "dry_run") {
+    assert.equal(dryRunResult.body.candidate.provider, "backup-chat-provider");
+  }
+  assert.ok(
+    dryRunLogs.some(
+      (event) => event.type === "fallback_selected" && event.fromCandidateIndex === 0 && event.toCandidateIndex === 1,
+    ),
+    "dry run falls back through the engine",
+  );
+
+  // Dispatch mode: the same empty first pool takes the same fallback path, then
+  // the second candidate actually dispatches.
+  const dispatchLogs: LifecycleEvent[] = [];
+  const dispatchObserver = parityObserver(dispatchLogs);
+  const dispatchDispatcher = createFixtureDispatcher();
+  dispatchDispatcher.enqueue({ status: 200, body: COMPLETE_CHAT_BYTES });
+  const dispatchGateway = createGateway({
+    config: { ...config, dryRun: { enabled: false } },
+    revision: "test-rev",
+    adapters: createProtocolAdapters(),
+    dispatcher: dispatchDispatcher,
+    traceRecorder: createNoopTraceRecorder(),
+    observer: dispatchObserver,
+    clock: systemClock,
+    sleeper: systemSleeper,
+  });
+  const dispatchResult = await dispatchGateway.execute(request);
+  assert.equal(dispatchResult.kind, "complete");
+  assert.equal(dispatchDispatcher.dispatchCount(), 1);
+  assert.equal(dispatchDispatcher.lastRequest()?.prepared.provider, "backup-chat-provider");
+  assert.ok(
+    dispatchLogs.some(
+      (event) => event.type === "fallback_selected" && event.fromCandidateIndex === 0 && event.toCandidateIndex === 1,
+    ),
+    "dispatch falls back through the engine",
+  );
 });

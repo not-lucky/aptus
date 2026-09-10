@@ -14,9 +14,8 @@ import { MessagesProviderStreamDecoder } from "../../src/translation/codecs/mess
 import { ResponsesEgressEncoder } from "../../src/translation/codecs/responses/egress.ts";
 import { ResponsesIngressDecoder } from "../../src/translation/codecs/responses/ingress.ts";
 import { ResponsesProviderStreamDecoder } from "../../src/translation/codecs/responses/stream.ts";
-import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
 import type { IrOutcome } from "../../src/translation/ir.ts";
-import { sourceBodyFor } from "./owned-rows-helpers.ts";
+import { createSessionBundle, sourceBodyFor } from "./owned-rows-helpers.ts";
 
 test.concurrent("row usage-input-output-total: totals map directly; M input formula and absent total", () => {
   const chatDecoder = new ChatIngressDecoder();
@@ -121,8 +120,7 @@ test.concurrent("usage-absence: egress omits usage when the IR outcome reports n
 });
 
 test.concurrent("stream-final-usage: final usage arrives on end chunk or usage block; final carriers collapse subdivisions per protocol", () => {
-  const coordinator = createDefaultTranslationCoordinator();
-  const sessionBundle = coordinator.createStreamSession({
+  const sessionBundle = createSessionBundle({
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     logicalModel: "logical-key",

@@ -20,7 +20,7 @@ import type {
   TraceSession,
 } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import type { Direction, StreamSessionBundle } from "../translation/contracts.ts";
 import { createSseDecoder, createSseEncoder } from "../translation/sse.ts";
 import { TranslatedStreamPump } from "../translation/stream-pump.ts";
@@ -186,7 +186,7 @@ export interface TranslatedStreamRelayContext {
   /** Active trace session recording cancellation stages. */
   readonly trace: TraceSession;
   /** Telemetry observer receiving lifecycle and cancellation events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Provider stream reader transferred from bootstrap. */
   readonly reader: ReadableStreamDefaultReader<Uint8Array>;
   /** Translation pump instance transferred from bootstrap. */

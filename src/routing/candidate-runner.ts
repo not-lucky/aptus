@@ -10,9 +10,10 @@
 
 import type { AttemptObservation, GatewayRequest, GatewayResult, OwnedBody, Protocol } from "../domain/contracts.ts";
 import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import { type AttemptContext, type AttemptOutcome, classifyAbortReason } from "./attempt.ts";
 import type { CandidateDescriptor } from "./candidates.ts";
+import type { DryRunOutcome } from "./dry-run.ts";
 import { failureFromObservation, interruptedFailure, timeoutFailure, unavailableFailure } from "./failures.ts";
 import { type RelayContext, relayComplete, relayStream, relayTranslatedComplete } from "./relay.ts";
 import { shouldRetry } from "./retry-policy.ts";
@@ -22,15 +23,19 @@ import type { Clock } from "./timing.ts";
 import type { TranslatedAttemptOutcome } from "./translated-attempt.ts";
 import type { TranslatedStreamAttemptOutcome } from "./translated-stream-attempt.ts";
 
-/** Normalized attempt outcome across native, translated complete, and translated streaming paths. */
-export type RunnerAttemptOutcome = AttemptOutcome | TranslatedAttemptOutcome | TranslatedStreamAttemptOutcome;
+/** Normalized attempt outcome across native, translated complete, translated streaming, and dry-run paths. */
+export type RunnerAttemptOutcome =
+  | AttemptOutcome
+  | TranslatedAttemptOutcome
+  | TranslatedStreamAttemptOutcome
+  | DryRunOutcome;
 
 /**
  * Strategy contract providing per-path attempt execution mechanics.
  */
 export interface CandidateStrategy {
   /** Strategy discriminator indicating the execution mode. */
-  readonly kind: "native" | "translated-complete" | "translated-stream";
+  readonly kind: "native" | "translated-complete" | "translated-stream" | "dry-run";
   /** Executes the next attempt iteration. */
   execute(): Promise<RunnerAttemptOutcome>;
 }
@@ -42,7 +47,7 @@ export interface RunnerShared {
   /** Active inbound gateway request. */
   readonly request: GatewayRequest;
   /** Telemetry observer for lifecycle logging and metrics. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Monotonic and wall clock source. */
   readonly clock: Clock;
   /** Monotonic millisecond timestamp when request processing started. */
@@ -94,6 +99,17 @@ export async function runCandidate(
   while (true) {
     const outcome = await strategy.execute();
 
+    if (outcome.kind === "dry_run") {
+      return {
+        kind: "returned",
+        result: {
+          kind: "dry_run",
+          status: 200,
+          contentType: "application/vnd.aptus.dry-run+json",
+          body: outcome.result,
+        },
+      };
+    }
     if (outcome.kind === "cancelled") {
       const stream = strategy.kind === "native" ? shared.request.stream : strategy.kind === "translated-stream";
       return {
@@ -156,7 +172,12 @@ export async function runCandidate(
           const durationMs = shared.clock.nowMonotonicMs() - shared.started;
           const by = classifyAbortReason(shared.request.signal) === "shutdown" ? "shutdown" : "client";
           await shared.request.trace.recordJson("cancellation", { phase: "relay", by });
-          shared.observer.cancelled({ aptusRequestId: shared.request.aptusRequestId, phase: "relay", by });
+          shared.observer.observe({
+            type: "cancelled",
+            aptusRequestId: shared.request.aptusRequestId,
+            phase: "relay",
+            by,
+          });
           await finalizeTerminal(
             shared.request.coordinator,
             {
@@ -256,20 +277,14 @@ async function handleResponseFailure(
       category,
       delayMs,
     });
-    shared.observer.retryScheduled({
+    shared.observer.observe({
+      type: "retry_scheduled",
       aptusRequestId: shared.request.aptusRequestId,
       attemptNumber,
       provider: candidate.provider.name,
       targetProtocol: candidate.provider.protocol,
       category,
       delayMs,
-    });
-    shared.observer.observe({
-      type: "retry_scheduled",
-      aptusRequestId: shared.request.aptusRequestId,
-      attemptNumber,
-      delayMs,
-      category,
     });
     return "retry";
   }

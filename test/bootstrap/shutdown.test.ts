@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import { test } from "vitest";
 import { createGracefulShutdown } from "../../src/bootstrap/shutdown.ts";
+import type { LifecycleEvent } from "../../src/observability/lifecycle-observer.ts";
 
 interface MockServer {
   listening: boolean;
@@ -66,19 +67,16 @@ function mockCancellations(active: number): {
 
 /** Captures observer events without touching the real telemetry stack. */
 function mockObserver(): {
-  shutdownStarted(fields: unknown): void;
-  shutdownCompleted(fields: unknown): void;
   started: unknown[];
   completed: unknown[];
+  observe(event: LifecycleEvent): void;
 } {
   const started: unknown[] = [];
   const completed: unknown[] = [];
   return {
-    shutdownStarted(fields: unknown) {
-      started.push(fields);
-    },
-    shutdownCompleted(fields: unknown) {
-      completed.push(fields);
+    observe(event: LifecycleEvent) {
+      if (event.type === "shutdown_started") started.push(event);
+      if (event.type === "shutdown_completed") completed.push(event);
     },
     started,
     completed,
@@ -269,13 +267,15 @@ test.concurrent("createGracefulShutdown orders retention stop after drain and be
   const completedEvents: unknown[] = [];
 
   const mockObserver = {
-    shutdownStarted(fields: unknown) {
-      order.push("observer:shutdownStarted");
-      startedEvents.push(fields);
-    },
-    shutdownCompleted(fields: unknown) {
-      order.push("observer:shutdownCompleted");
-      completedEvents.push(fields);
+    observe(event: LifecycleEvent) {
+      if (event.type === "shutdown_started") {
+        order.push("observer:shutdownStarted");
+        startedEvents.push(event);
+      }
+      if (event.type === "shutdown_completed") {
+        order.push("observer:shutdownCompleted");
+        completedEvents.push(event);
+      }
     },
   };
 

@@ -23,7 +23,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   const reqId = "req-test-123" as AptusRequestId;
 
   // Ingress
-  observer.requestIngress({
+  observer.observe({
+    type: "request_ingress",
     aptusRequestId: reqId,
     endpointProtocol: "openai-chat",
     endpoint: "/v1/chat/completions",
@@ -31,21 +32,24 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Auth
-  observer.authResult({
+  observer.observe({
+    type: "auth_result",
     aptusRequestId: reqId,
     scheme: "bearer",
     result: "matched",
   });
 
   // Resolution
-  observer.nameResolved({
+  observer.observe({
+    type: "name_resolved",
     aptusRequestId: reqId,
     canonicalPublicName: "gpt-main",
     kind: "model",
   });
 
   // Key Selection
-  observer.keySelected({
+  observer.observe({
+    type: "key_selected",
     aptusRequestId: reqId,
     attemptNumber: 1,
     provider: "chat-provider",
@@ -54,7 +58,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Attempt Started
-  observer.attemptStarted({
+  observer.observe({
+    type: "attempt_started",
     aptusRequestId: reqId,
     attemptNumber: 1,
     candidateIndex: 0,
@@ -64,7 +69,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Retry Scheduled
-  observer.retryScheduled({
+  observer.observe({
+    type: "retry_scheduled",
     aptusRequestId: reqId,
     attemptNumber: 1,
     provider: "chat-provider",
@@ -74,7 +80,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Fallback Selected
-  observer.fallbackSelected({
+  observer.observe({
+    type: "fallback_selected",
     aptusRequestId: reqId,
     endpointProtocol: "openai-chat",
     targetProtocol: "openai-chat",
@@ -85,7 +92,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Candidate Skipped
-  observer.candidateSkipped({
+  observer.observe({
+    type: "candidate_skipped",
     aptusRequestId: reqId,
     endpointProtocol: "openai-chat",
     canonicalPublicName: "gpt-main",
@@ -96,7 +104,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Attempt Completed
-  observer.attemptCompleted({
+  observer.observe({
+    type: "attempt_completed",
     aptusRequestId: reqId,
     attemptNumber: 2,
     targetProtocol: "openai-chat",
@@ -107,29 +116,28 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
     stream: false,
   });
 
-  // First Byte
-  observer.firstByte({
-    aptusRequestId: reqId,
-    attemptNumber: 2,
-    durationMs: 45,
-  });
-
-  // Completed / Terminal
-  observer.completed({
+  // Completed / Terminal (completion log plus first-byte timing)
+  observer.observe({
+    type: "request_terminal",
     aptusRequestId: reqId,
     endpointProtocol: "openai-chat",
+    admissionStream: false,
+    stream: false,
+    result: "complete",
+    outcomeCategory: "complete",
     targetProtocol: "openai-chat",
     provider: "chat-provider",
     canonicalPublicName: "gpt-main",
     status: 200,
     attempts: 2,
-    stream: false,
-    outcomeCategory: "complete",
     durationMs: 150,
+    firstByteMs: 45,
+    emitCompleted: true,
   });
 
   // Background Retention Run with system fallback
-  observer.retentionRun({
+  observer.observe({
+    type: "retention_run",
     deletedForAge: 3,
     deletedForSize: 1,
     skipped: 0,
@@ -138,8 +146,8 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   });
 
   // Background Shutdown Started and Completed
-  observer.shutdownStarted({ activeRequests: 2, drainMs: 5000 });
-  observer.shutdownCompleted({ drained: 2, aborted: 0, durationMs: 120 });
+  observer.observe({ type: "shutdown_started", activeRequests: 2, drainMs: 5000 });
+  observer.observe({ type: "shutdown_completed", drained: 2, aborted: 0, durationMs: 120 });
 
   // Verify LogTape structured messages
   const messageNames = records.map((r) => r.rawMessage);
@@ -168,7 +176,7 @@ test.concurrent("lifecycle observer emits structured LogTape logs and observed m
   assert.equal(shutdownRecord?.properties.aptusRequestId, undefined);
 });
 
-test.concurrent("httpTerminal records the accepted-request counter without the completion log", async () => {
+test.concurrent("request_terminal without emitCompleted records the accepted-request counter without the completion log", async () => {
   const records: LogRecord[] = [];
   configureLogging({ enabled: true, level: "info" }, (record) => {
     records.push(record);
@@ -181,17 +189,21 @@ test.concurrent("httpTerminal records the accepted-request counter without the c
     metricsEnabled: true,
   });
 
-  observer.httpTerminal({
+  observer.observe({
+    type: "request_terminal",
     aptusRequestId: "req-pre-gateway",
     endpointProtocol: "openai-chat",
+    admissionStream: false,
+    stream: false,
+    result: "failed",
+    outcomeCategory: "failed",
     targetProtocol: "unknown",
     provider: "unknown",
     canonicalPublicName: "unknown",
-    outcomeCategory: "failed",
     status: 400,
     attempts: 0,
-    stream: false,
     durationMs: 12,
+    emitCompleted: false,
   });
 
   assert.ok(!records.some((r) => r.rawMessage === "aptus.request.completed"));

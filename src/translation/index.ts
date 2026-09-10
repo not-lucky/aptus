@@ -44,7 +44,6 @@ import { createTranslationCoordinator } from "./coordinator.ts";
 
 export type {
   ClientStreamEncoder,
-  CreateStreamSessionInput,
   Direction,
   EgressEncoder,
   IngressDecoder,
@@ -61,12 +60,8 @@ export type {
   StreamSession,
   StreamSessionBundle,
   StreamWireOptions,
-  TranslateCompleteInput,
   TranslateCompleteOutcomeInput,
   TranslateCompleteOutcomeResult,
-  TranslateCompleteRequestResult,
-  TranslateStreamRequestInput,
-  TranslateStreamRequestResult,
   TranslationCodecs,
   TranslationCoordinator,
 } from "./contracts.ts";

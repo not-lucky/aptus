@@ -9,7 +9,6 @@
  * deadlines, gateway dispatch, and streaming delivery backpressure with terminal lifecycle accounting.
  */
 
-import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import express, { type Request, type Response } from "express";
 import type { AptusConfig } from "../config/types.ts";
@@ -24,7 +23,7 @@ import type {
 } from "../domain/contracts.ts";
 import type { ErrorEncoder } from "../domain/operations.ts";
 import { type AptusRequestId, createRequestId } from "../domain/request-id.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import type { Redactor } from "../observability/trace/redaction.ts";
 import { timeoutFailure } from "../routing/failures.ts";
 import { createNameIndex, type NameIndex } from "../routing/resolution.ts";
@@ -35,6 +34,7 @@ import { type AdmissionLimiter, createAdmissionLimiter } from "./admission.ts";
 import { admitCreateRequest, type ClientEndpoint } from "./admission-request.ts";
 import { type AuthPurpose, authenticateClient } from "./auth.ts";
 import { authorizedCatalogEntries } from "./catalog.ts";
+import { pumpDelivery } from "./delivery.ts";
 import { encodeInternalFailure, encodeUnidentifiedInternalFailure, filterResponseHeaders } from "./error-encoder.ts";
 import type { RequestCancellationRegistry } from "./request-cancellation.ts";
 
@@ -70,7 +70,7 @@ export interface ClientAppOptions {
   /** Trace recorder for opening per-request trace sessions. */
   readonly traceRecorder: TraceRecorder;
   /** Shared telemetry observer for structured logs and metrics. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Optional monotonic and wall clock source. */
   readonly clock?: Clock;
   /** Optional field-aware secret redactor. */
@@ -373,7 +373,7 @@ function createController(
       const timeout = isTimeout();
       const by = getCancellationBy();
       if (delivery === "aborted" && !timeout && gatewayResult.value.kind === "complete") {
-        options.observer.cancelled({ aptusRequestId: requestId, phase: "relay", by });
+        options.observer.observe({ type: "cancelled", aptusRequestId: requestId, phase: "relay", by });
         await trace.recordJson("cancellation", { phase: "relay", by });
       }
       // A fully delivered response is a `complete` terminal carrying the actual status;
@@ -465,7 +465,7 @@ function catalogController(
       entries: authorizedCatalogEntries(options.config, nameIndex, authentication.name, protocol),
     });
 
-    options.observer.catalogCompleted({ endpointProtocol: protocol });
+    options.observer.observe({ type: "catalog_completed", endpointProtocol: protocol });
 
     response.set("x-aptus-request-id", aptusRequestId).type("application/json").status(200).send(JSON.stringify(body));
   };
@@ -548,81 +548,35 @@ async function writeGatewayResult(
     const reader = result.body.stream().getReader();
     const isDisk = result.body.inMemoryBytes === undefined;
     const clientSink = isDisk ? trace.openBytes("client_response") : undefined;
-    let delivery: "complete" | "aborted" = "complete";
-    try {
-      while (true) {
-        const chunk = await raceWithAbort(reader.read(), signal);
-        if (chunk.aborted) {
-          delivery = "aborted";
-          await clientSink?.discard().catch(() => undefined);
-          break;
-        }
-        if (chunk.value.done) break;
-        if (!response.write(chunk.value.value)) {
-          const drained = await raceWithAbort(once(response, "drain"), signal);
-          if (drained.aborted) {
-            delivery = "aborted";
-            await clientSink?.discard().catch(() => undefined);
-            break;
-          }
-        }
-        coordinator.markClientFirstByte();
-        if (clientSink !== undefined) {
-          await clientSink.append(chunk.value.value);
-        }
-      }
-      if (delivery === "complete") {
-        coordinator.markClientFirstByte();
-        await clientSink?.complete().catch(() => undefined);
-        response.end();
+    return pumpDelivery({
+      reader,
+      transport: response,
+      signal,
+      coordinator,
+      sink: clientSink,
+      onDelivered: async () => {
         await result.onDelivered?.(clock.nowMonotonicMs() - startedMs);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    await result.body.dispose();
-    return delivery;
+      },
+      onSettled: async () => {
+        await result.body.dispose();
+      },
+    });
   }
 
   // Handle streaming response with backpressure management.
   const reader = result.body.getReader();
   const clientSink = trace.openBytes("client_stream");
-  const cancelStream = (): void => {
-    void reader.cancel();
-  };
-  signal.addEventListener("abort", cancelStream, { once: true });
-  response.once("close", cancelStream);
-  try {
-    while (true) {
-      const chunk = await raceWithAbort(reader.read(), signal);
-      if (chunk.aborted) {
-        await clientSink.discard().catch(() => undefined);
-        return "aborted";
-      }
-      if (chunk.value.done) break;
-      coordinator.markClientFirstByte();
-      // Write chunk; if socket buffer is full (false), wait for 'drain' event before reading next chunk.
-      if (!response.write(chunk.value.value)) {
-        const drained = await raceWithAbort(once(response, "drain"), signal);
-        if (drained.aborted) {
-          await clientSink.discard().catch(() => undefined);
-          return "aborted";
-        }
-      }
-      await clientSink.append(chunk.value.value);
-    }
-    await clientSink.complete().catch(() => undefined);
-    response.end();
-    await result.onDelivered?.(clock.nowMonotonicMs() - startedMs);
-    return "complete";
-  } catch (err) {
-    await clientSink.discard().catch(() => undefined);
-    throw err;
-  } finally {
-    signal.removeEventListener("abort", cancelStream);
-    response.off("close", cancelStream);
-    reader.releaseLock();
-  }
+  return pumpDelivery({
+    reader,
+    transport: response,
+    signal,
+    coordinator,
+    sink: clientSink,
+    cancelOnAbort: true,
+    onDelivered: async () => {
+      await result.onDelivered?.(clock.nowMonotonicMs() - startedMs);
+    },
+  });
 }
 
 /**

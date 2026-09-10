@@ -13,8 +13,9 @@ import type {
 } from "../../src/domain/contracts.ts";
 import type { PricingConfig } from "../../src/domain/pricing.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import type { LifecycleEvent, LifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
 import { relayStream, type RelayContext } from "../../src/routing/relay.ts";
+import { createTrackingObserver, eventsOf } from "../helpers/tracking-observer.ts";
 import { SSE_CHAT_BYTES } from "../helpers/chat-fixtures.ts";
 import { SSE_RESPONSES_ERROR_BYTES } from "../helpers/responses-fixtures.ts";
 
@@ -102,40 +103,14 @@ function capturingCoordinator(): { coordinator: TerminalCoordinator; facts: Term
   return { coordinator, facts };
 }
 
-/** Tracking observer capturing cancellation events. */
-function trackingObserver(): { observer: GatewayObservability; cancelled: string[] } {
-  const cancelled: string[] = [];
-  const observer: GatewayObservability = {
-    observe: () => {},
-    requestIngress: () => {},
-    requestTerminal: () => {},
-    authResult: () => {},
-    nameResolved: () => {},
-    candidateSkipped: () => {},
-    keySelected: () => {},
-    attemptStarted: () => {},
-    attemptCompleted: () => {},
-    firstByte: () => {},
-    retryScheduled: () => {},
-    fallbackSelected: () => {},
-    completed: () => {},
-    httpTerminal: () => {},
-    catalogCompleted: () => {},
-    cancelled: () => {
-      cancelled.push("cancelled");
-    },
-    setKeyPoolAvailable: () => {},
-    traceFailure: () => {},
-    retentionRun: () => {},
-    shutdownStarted: () => {},
-    shutdownCompleted: () => {},
-  };
-  return { observer, cancelled };
+/** Tracking observer recording every telemetry moment. */
+function trackingObserver(): { observer: LifecycleObserver; events: LifecycleEvent[] } {
+  return createTrackingObserver();
 }
 
 function relayContext(overrides: Partial<RelayContext> = {}) {
   const { coordinator, facts } = capturingCoordinator();
-  const { observer, cancelled } = trackingObserver();
+  const { observer, events } = trackingObserver();
   const { trace, counts, stages } = recordingTrace();
   const context: RelayContext = {
     aptusRequestId: createRequestId(),
@@ -153,7 +128,7 @@ function relayContext(overrides: Partial<RelayContext> = {}) {
     pricing: null,
     ...overrides,
   };
-  return { context, facts, cancelled, counts, stages };
+  return { context, facts, events, counts, stages };
 }
 
 const PRICING: PricingConfig = {
@@ -270,7 +245,7 @@ test.concurrent("relayStream treats an anthropic error event without message_sto
 
 test.concurrent("relayStream consumer cancel discards the sink, records relay cancellation once, and finalizes 499", async () => {
   const controller = new AbortController();
-  const { context, facts, cancelled, counts, stages } = relayContext({ requestSignal: controller.signal });
+  const { context, facts, events, counts, stages } = relayContext({ requestSignal: controller.signal });
   const result = streamOf(
     relayStream(providerResponse(new TextEncoder().encode("data: start\n\n"), { holdOpen: true }), context),
   );
@@ -289,7 +264,7 @@ test.concurrent("relayStream consumer cancel discards the sink, records relay ca
     assert.equal(fact.terminal.by, "client");
   }
   assert.equal(fact.status, 499);
-  assert.equal(cancelled.length, 1);
+  assert.equal(eventsOf(events, "cancelled").length, 1);
   assert.deepEqual(stages, [{ stage: "cancellation", value: { phase: "relay", by: "client" } }]);
   assert.equal(counts.discarded, 1);
   assert.equal(counts.completed, 0);
@@ -297,7 +272,7 @@ test.concurrent("relayStream consumer cancel discards the sink, records relay ca
   // Close-once: a second cancel does not duplicate telemetry or sink work.
   await reader.cancel("client").catch(() => undefined);
   assert.equal(facts.length, 1);
-  assert.equal(cancelled.length, 1);
+  assert.equal(eventsOf(events, "cancelled").length, 1);
   assert.equal(counts.discarded, 1);
 });
 

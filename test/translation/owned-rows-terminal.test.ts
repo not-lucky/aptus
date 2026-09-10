@@ -721,7 +721,7 @@ test.concurrent("row chat-legacy-max-tokens: max_tokens on Chat request fails cl
     max_tokens: 100,
   };
 
-  const res = coord.translateCompleteRequest({
+  const res = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: chatRequestWithMaxTokens,
@@ -745,7 +745,7 @@ test.concurrent("row openai-prompt-cache-retention: prompt_cache_retention fails
     prompt_cache_retention: "in_memory",
   };
 
-  const chatRes = coord.translateCompleteRequest({
+  const chatRes = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: chatReq,
@@ -764,7 +764,7 @@ test.concurrent("row openai-prompt-cache-retention: prompt_cache_retention fails
     prompt_cache_retention: "in_memory",
   };
 
-  const respRes = coord.translateCompleteRequest({
+  const respRes = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     sourceBody: respReq,
@@ -786,7 +786,7 @@ test.concurrent("row responses-preview-multi-agent: multi_agent fails closed in 
     multi_agent: true,
   };
 
-  const res = coord.translateCompleteRequest({
+  const res = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     sourceBody: respReq,

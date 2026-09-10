@@ -236,7 +236,7 @@ test("conformance runner: T3 request-level capabilities reject before dispatch",
   ];
 
   for (const c of t3RequestCases) {
-    const res = coord.translateCompleteRequest({
+    const res = coord.translateRequest({ stream: false,
       sourceProtocol: c.sourceProtocol,
       targetProtocol: c.targetProtocol,
       sourceBody: c.body,
@@ -253,7 +253,7 @@ test("conformance runner: T3 request-level capabilities reject before dispatch",
 
 test("conformance runner: T1 complete turns translate without zero-dispatch failure", () => {
   // Core text turn C->R, R->C, C->M, M->C
-  const cToR = coord.translateCompleteRequest({
+  const cToR = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: { model: "gpt-4o", messages: [{ role: "user", content: "Hello world" }] },
@@ -262,7 +262,7 @@ test("conformance runner: T1 complete turns translate without zero-dispatch fail
   });
   assert.equal(cToR.ok, true);
 
-  const rToC = coord.translateCompleteRequest({
+  const rToC = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     sourceBody: { model: "gpt-4o", input: "Hello world" },
@@ -271,7 +271,7 @@ test("conformance runner: T1 complete turns translate without zero-dispatch fail
   });
   assert.equal(rToC.ok, true);
 
-  const cToM = coord.translateCompleteRequest({
+  const cToM = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: { model: "gpt-4o", messages: [{ role: "user", content: "Hello world" }] },
@@ -281,7 +281,7 @@ test("conformance runner: T1 complete turns translate without zero-dispatch fail
   });
   assert.equal(cToM.ok, true);
 
-  const mToC = coord.translateCompleteRequest({
+  const mToC = coord.translateRequest({ stream: false,
     sourceProtocol: "anthropic-messages",
     targetProtocol: "openai-chat",
     sourceBody: { model: "claude-3-5-sonnet", max_tokens: 1024, messages: [{ role: "user", content: "Hello" }] },
@@ -294,7 +294,7 @@ test("conformance runner: T1 complete turns translate without zero-dispatch fail
 test("conformance runner: T1 complete turns cover the remaining two directions R->M and M->R", () => {
   const coord = createDefaultTranslationCoordinator();
 
-  const rToM = coord.translateCompleteRequest({
+  const rToM = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-responses",
     targetProtocol: "anthropic-messages",
     sourceBody: { model: "gpt-4o", input: "Hello world" },
@@ -304,7 +304,7 @@ test("conformance runner: T1 complete turns cover the remaining two directions R
   });
   assert.equal(rToM.ok, true);
 
-  const mToR = coord.translateCompleteRequest({
+  const mToR = coord.translateRequest({ stream: false,
     sourceProtocol: "anthropic-messages",
     targetProtocol: "openai-responses",
     sourceBody: { model: "claude-3-5-sonnet", max_tokens: 1024, messages: [{ role: "user", content: "Hello" }] },
@@ -388,7 +388,7 @@ test("conformance runner: terminal request rows reject fail-closed in every T3 d
       if (row.tiers[dir] !== "T3") continue;
       const [source, target] = dir.split("->") as [Protocol, Protocol];
       const expected = expect(source);
-      const res = coord.translateCompleteRequest({
+      const res = coord.translateRequest({ stream: false,
         sourceProtocol: source,
         targetProtocol: target,
         sourceBody: buildBody(source),
@@ -427,7 +427,7 @@ test("conformance runner: preview tool rows reject with their row from Responses
       if (row.tiers[dir] !== "T3") continue;
       const [source, target] = dir.split("->") as [Protocol, Protocol];
       if (source !== "openai-responses") continue;
-      const res = coord.translateCompleteRequest({
+      const res = coord.translateRequest({ stream: false,
         sourceProtocol: source,
         targetProtocol: target,
         sourceBody: { ...(t1RequestBody(source) as Record<string, JsonObject>), tools: [tool] },

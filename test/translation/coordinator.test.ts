@@ -36,7 +36,7 @@ test.concurrent("translation coordinator: translates requests and outcomes acros
       };
     }
 
-    const reqResult = coordinator.translateCompleteRequest({
+    const reqResult = coordinator.translateRequest({ stream: false,
       sourceProtocol,
       targetProtocol,
       sourceBody,
@@ -121,7 +121,7 @@ test.concurrent("translation coordinator: translates requests and outcomes acros
 test.concurrent("translation coordinator: fails closed when Anthropic target is missing max_tokens default configuration", () => {
   const coordinator = createDefaultTranslationCoordinator();
 
-  const reqResult = coordinator.translateCompleteRequest({
+  const reqResult = coordinator.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: {

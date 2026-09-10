@@ -4,7 +4,7 @@ import type { TerminalFact, TraceSession } from "../../src/domain/contracts.ts";
 import type { TraceTerminal } from "../../src/domain/operations.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
 import { createTerminalCoordinator } from "../../src/http/coordinator.ts";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import { createTrackingObserver, eventsOf } from "../helpers/tracking-observer.ts";
 import { systemClock } from "../../src/routing/timing.ts";
 
 const noopTrace: TraceSession = {
@@ -13,50 +13,6 @@ const noopTrace: TraceSession = {
   openBytes: () => ({ append: async () => {}, complete: async () => {}, discard: async () => {} }),
   finish: async () => {},
 };
-
-function trackingObserver(): {
-  observer: GatewayObservability;
-  calls: string[];
-  terminalStreams: boolean[];
-  firstBytes: Array<{ attemptNumber: number; durationMs: number }>;
-} {
-  const calls: string[] = [];
-  const terminalStreams: boolean[] = [];
-  const firstBytes: Array<{ attemptNumber: number; durationMs: number }> = [];
-  const push = (name: string): void => {
-    calls.push(name);
-  };
-  const observer: GatewayObservability = {
-    observe: () => push("observe"),
-    requestIngress: () => push("requestIngress"),
-    requestTerminal: (f) => {
-      push("requestTerminal");
-      terminalStreams.push(f.stream);
-    },
-    authResult: () => push("authResult"),
-    nameResolved: () => push("nameResolved"),
-    candidateSkipped: () => push("candidateSkipped"),
-    keySelected: () => push("keySelected"),
-    attemptStarted: () => push("attemptStarted"),
-    attemptCompleted: () => push("attemptCompleted"),
-    firstByte: (f) => {
-      push("firstByte");
-      firstBytes.push({ attemptNumber: f.attemptNumber, durationMs: f.durationMs });
-    },
-    retryScheduled: () => push("retryScheduled"),
-    fallbackSelected: () => push("fallbackSelected"),
-    completed: () => push("completed"),
-    httpTerminal: () => push("httpTerminal"),
-    catalogCompleted: () => push("catalogCompleted"),
-    cancelled: () => push("cancelled"),
-    setKeyPoolAvailable: () => push("setKeyPoolAvailable"),
-    traceFailure: () => push("traceFailure"),
-    retentionRun: () => push("retentionRun"),
-    shutdownStarted: () => push("shutdownStarted"),
-    shutdownCompleted: () => push("shutdownCompleted"),
-  };
-  return { observer, calls, terminalStreams, firstBytes };
-}
 
 function completeFact(): TerminalFact {
   return {
@@ -70,7 +26,7 @@ function completeFact(): TerminalFact {
 }
 
 test.concurrent("pre-ingress finalization writes the trace terminal but skips accepted-request telemetry", async () => {
-  const { observer, calls } = trackingObserver();
+  const { observer, events } = createTrackingObserver();
   const terminals: TraceTerminal[] = [];
   const trace: TraceSession = {
     ...noopTrace,
@@ -92,12 +48,15 @@ test.concurrent("pre-ingress finalization writes the trace terminal but skips ac
 
   assert.equal(result.won, true);
   assert.deepEqual(terminals, [{ kind: "complete", status: 200 }]);
-  assert.ok(!calls.includes("requestTerminal"), "must not decrement in-flight before ingress");
-  assert.ok(!calls.includes("completed"), "must not emit an accepted-request counter before ingress");
+  assert.equal(
+    eventsOf(events, "request_terminal").length,
+    0,
+    "must not emit terminal telemetry before ingress",
+  );
 });
 
 test.concurrent("post-ingress finalization is atomic across duplicate claims", async () => {
-  const { observer, calls } = trackingObserver();
+  const { observer, events } = createTrackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
     endpointProtocol: "openai-chat",
@@ -114,12 +73,11 @@ test.concurrent("post-ingress finalization is atomic across duplicate claims", a
 
   assert.equal(first.won, true);
   assert.equal(second.won, false);
-  assert.equal(calls.filter((call) => call === "requestTerminal").length, 1);
-  assert.equal(calls.filter((call) => call === "completed").length, 1);
+  assert.equal(eventsOf(events, "request_terminal").length, 1, "one terminal moment despite duplicate claims");
 });
 
 test.concurrent("pre-Gateway finalization records HTTP terminal without the completion log", async () => {
-  const { observer, calls } = trackingObserver();
+  const { observer, events } = createTrackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
     endpointProtocol: "openai-chat",
@@ -138,14 +96,14 @@ test.concurrent("pre-Gateway finalization records HTTP terminal without the comp
   });
   await coordinator.finalized;
 
-  assert.ok(calls.includes("requestTerminal"), "pre-Gateway failures still decrement in-flight");
-  assert.ok(calls.includes("httpTerminal"), "pre-Gateway failures record the HTTP counter/duration");
-  assert.ok(!calls.includes("completed"), "pre-Gateway failures must not emit aptus.request.completed");
-  assert.ok(!calls.includes("firstByte"), "no attempt means no first-byte event");
+  const terminals = eventsOf(events, "request_terminal");
+  assert.equal(terminals.length, 1, "pre-Gateway failures still record the terminal moment");
+  assert.equal(terminals[0]?.emitCompleted, false, "pre-Gateway failures must not emit aptus.request.completed");
+  assert.equal(terminals[0]?.firstByteMs, undefined, "no attempt means no first-byte timing");
 });
 
-test.concurrent("first-byte is emitted with the winning attempt number when marked", async () => {
-  const { observer, firstBytes } = trackingObserver();
+test.concurrent("first-byte timing is carried on the terminal moment with the winning attempt number when marked", async () => {
+  const { observer, events } = createTrackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
     endpointProtocol: "openai-chat",
@@ -161,11 +119,14 @@ test.concurrent("first-byte is emitted with the winning attempt number when mark
   await coordinator.finalize({ ...completeFact(), attempts: 3 });
   await coordinator.finalized;
 
-  assert.deepEqual(firstBytes, [{ attemptNumber: 3, durationMs: 45 }]);
+  const terminal = eventsOf(events, "request_terminal")[0];
+  assert.ok(terminal, "a terminal moment must be emitted after ingress");
+  assert.equal(terminal.attempts, 3);
+  assert.equal(terminal.firstByteMs, 45);
 });
 
 test.concurrent("in-flight decrement uses the admitted stream label, not the terminal stream", async () => {
-  const { observer, terminalStreams } = trackingObserver();
+  const { observer, events } = createTrackingObserver();
   const coordinator = createTerminalCoordinator({
     aptusRequestId: createRequestId(),
     endpointProtocol: "openai-chat",
@@ -180,5 +141,8 @@ test.concurrent("in-flight decrement uses the admitted stream label, not the ter
   await coordinator.finalize({ ...completeFact(), stream: false, attempts: 0 });
   await coordinator.finalized;
 
-  assert.deepEqual(terminalStreams, [true], "decrement balances the ingress increment");
+  const terminal = eventsOf(events, "request_terminal")[0];
+  assert.ok(terminal, "a terminal moment must be emitted after ingress");
+  assert.equal(terminal.admissionStream, true, "decrement must balance the ingress increment");
+  assert.equal(terminal.stream, false, "the terminal stream label is carried separately");
 });

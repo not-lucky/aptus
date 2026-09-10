@@ -9,7 +9,7 @@
  */
 
 import type { AptusRequestId, Protocol, TerminalCoordinator, TerminalFact, TraceSession } from "../domain/contracts.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import type { Redactor } from "../observability/trace/redaction.ts";
 import { type Clock, systemClock } from "../routing/timing.ts";
 
@@ -24,7 +24,7 @@ export interface TerminalCoordinatorOptions {
   /** Trace session recording lifecycle stages for the request. */
   readonly trace: TraceSession;
   /** Telemetry observer receiving completion events and metrics. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Monotonic and wall clock source. */
   readonly clock?: Clock;
   /** Optional redactor for stripping sensitive tokens from recorded usage objects. */
@@ -119,20 +119,11 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
           }
         }
 
-        // Emit terminal metrics only if ingress was accepted, keeping rejected attempts silent.
+        // Emit terminal telemetry only if ingress was accepted, keeping rejected attempts silent.
         if (ingressEmitted) {
-          // Decrement the in-flight gauge matching the admitted stream label.
-          try {
-            observer.requestTerminal({
-              aptusRequestId,
-              endpointProtocol,
-              stream: ingressStream,
-            });
-          } catch {
-            // Observer errors are caught to avoid disrupting response finalization.
-          }
-
-          // Emit canonical terminal lifecycle event.
+          // One terminal moment carries the facts every sink needs: the in-flight
+          // gauge decrement (matched to the admitted stream label), the completion
+          // log when requested, accepted-request HTTP metrics, and first-byte timing.
           try {
             const terminalResult =
               fact.terminal.kind === "incomplete"
@@ -140,17 +131,6 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
                 : fact.terminal.kind === "dry_run"
                   ? "dry_run"
                   : fact.outcomeCategory;
-            observer.observe({
-              type: "request_terminal",
-              aptusRequestId,
-              result: terminalResult,
-            });
-          } catch {
-            // Contained observer fault.
-          }
-
-          // Emit completion log or HTTP terminal observation.
-          try {
             const targetProtocol = fact.targetProtocol ?? "unknown";
             const provider = fact.provider ?? "unknown";
             const canonicalPublicName = fact.canonicalPublicName ?? "unknown";
@@ -158,42 +138,27 @@ export function createTerminalCoordinator(options: TerminalCoordinatorOptions): 
             const redactedUsage =
               fact.usage !== undefined && redactor !== undefined ? redactor.redactJson(fact.usage) : fact.usage;
 
-            const completedFields = {
+            observer.observe({
+              type: "request_terminal",
               aptusRequestId,
               endpointProtocol,
+              admissionStream: ingressStream,
+              stream: fact.stream,
+              result: terminalResult,
+              outcomeCategory: fact.outcomeCategory,
               targetProtocol,
               provider,
               canonicalPublicName,
-              outcomeCategory: fact.outcomeCategory,
               status: fact.status,
               attempts,
-              stream: fact.stream,
               durationMs: fact.durationMs,
               firstByteMs,
               usage: redactedUsage,
               estimatedCostUsd: fact.estimatedCostUsd,
-            };
-
-            if (fact.emitCompleted === false) {
-              observer.httpTerminal(completedFields);
-            } else {
-              observer.completed(completedFields);
-            }
+              emitCompleted: fact.emitCompleted !== false,
+            });
           } catch {
-            // Contained observer fault.
-          }
-
-          // Emit first-byte timing when latency is tracked and attempts were made.
-          if (firstByteMs !== undefined && attempts > 0) {
-            try {
-              observer.firstByte({
-                aptusRequestId,
-                attemptNumber: attempts,
-                durationMs: firstByteMs,
-              });
-            } catch {
-              // Contained observer fault.
-            }
+            // Observer errors are caught to avoid disrupting response finalization.
           }
         }
       } finally {

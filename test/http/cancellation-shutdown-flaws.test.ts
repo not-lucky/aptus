@@ -35,7 +35,7 @@ test.concurrent("AbortSignal.any preserves the reason of the first aborting sign
 });
 
 test.concurrent("TerminalCoordinator tracks attempt counts and uses them on cancellation", async () => {
-  let completedFact: any = null;
+  const observedEvents: any[] = [];
   const mockTrace: TraceSession = {
     recordJson: async () => {},
     recordBytes: async () => {},
@@ -43,13 +43,9 @@ test.concurrent("TerminalCoordinator tracks attempt counts and uses them on canc
     finish: async () => {},
   };
   const mockObserver = {
-    requestTerminal: () => {},
-    observe: () => {},
-    completed: (fields: any) => {
-      completedFact = fields;
+    observe: (event: any) => {
+      observedEvents.push(event);
     },
-    httpTerminal: () => {},
-    firstByte: () => {},
   };
 
   const coordinator = createTerminalCoordinator({
@@ -87,6 +83,7 @@ test.concurrent("TerminalCoordinator tracks attempt counts and uses them on canc
   await coordinator.finalize(fact);
   await coordinator.finalized;
 
+  const completedFact = observedEvents.find((event: any) => event.type === "request_terminal");
   assert.equal(completedFact?.attempts, 2);
   assert.equal(completedFact?.outcomeCategory, "cancelled");
 });
@@ -105,11 +102,7 @@ test.concurrent("TerminalCoordinator falls back to shutdown_abort when trace.fin
     },
   };
   const mockObserver = {
-    requestTerminal: () => {},
     observe: () => {},
-    completed: () => {},
-    httpTerminal: () => {},
-    firstByte: () => {},
   };
 
   const coordinator = createTerminalCoordinator({

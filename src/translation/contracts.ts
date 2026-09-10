@@ -456,77 +456,6 @@ export interface PrepareTicketRequestInput {
 }
 
 /**
- * Input arguments for translating complete (non-streaming) requests.
- */
-export interface TranslateCompleteInput {
-  /** Inbound client protocol format. */
-  readonly sourceProtocol: Protocol;
-
-  /** Outbound upstream provider protocol format. */
-  readonly targetProtocol: Protocol;
-
-  /** Inbound client request body parsed as JSON. */
-  readonly sourceBody: JsonObject;
-
-  /** Logical model key requested by the client. */
-  readonly logicalModel: string;
-
-  /** Upstream concrete model name resolved by candidate selection. */
-  readonly targetModel: string;
-
-  /** Default output token limit injected for `anthropic-messages` targets when omitted. */
-  readonly targetDefaultMaxTokens?: number;
-}
-
-/**
- * Result of translating a complete request: encoded target body and IR request.
- */
-export interface TranslateCompleteRequestResult {
-  /** Encoded target provider request body. */
-  readonly body: JsonObject;
-
-  /** Semantic IR request preserved for telemetry and outcome correlation. */
-  readonly irRequest: IrRequest;
-}
-
-/**
- * Input arguments for translating streaming requests.
- */
-export interface TranslateStreamRequestInput {
-  /** Inbound client protocol format. */
-  readonly sourceProtocol: Protocol;
-
-  /** Outbound upstream provider protocol format. */
-  readonly targetProtocol: Protocol;
-
-  /** Inbound client request body parsed as JSON. */
-  readonly sourceBody: JsonObject;
-
-  /** Logical model key requested by the client. */
-  readonly logicalModel: string;
-
-  /** Upstream concrete model name resolved by candidate selection. */
-  readonly targetModel: string;
-
-  /** Default output token limit injected for `anthropic-messages` targets when omitted. */
-  readonly targetDefaultMaxTokens?: number;
-}
-
-/**
- * Result of translating a streaming request: encoded target body, IR request, and stream options.
- */
-export interface TranslateStreamRequestResult {
-  /** Encoded target provider streaming request body. */
-  readonly body: JsonObject;
-
-  /** Semantic IR request preserved for session binding and telemetry. */
-  readonly irRequest: IrRequest;
-
-  /** Stream options decoded from client request for session forwarding. */
-  readonly sourceWireOptions: StreamWireOptions;
-}
-
-/**
  * Input arguments for translating an upstream provider outcome into client format.
  */
 export interface TranslateCompleteOutcomeInput {
@@ -602,29 +531,6 @@ export interface PrepareTranslatedRequestInput {
 }
 
 /**
- * Input arguments for creating a streaming translation session without a ticket.
- */
-export interface CreateStreamSessionInput {
-  /** Protocol format of the upstream provider stream. */
-  readonly sourceProtocol: Protocol;
-
-  /** Protocol format expected by the client stream. */
-  readonly targetProtocol: Protocol;
-
-  /** Logical model key requested by the client. */
-  readonly logicalModel: string;
-
-  /** Optional response identifier override; generated if omitted. */
-  readonly responseId?: string;
-
-  /** Optional factory for part identifiers; defaults to monotonic counter. */
-  readonly createPartId?: () => string;
-
-  /** Stream options decoded from client request. */
-  readonly sourceWireOptions?: StreamWireOptions;
-}
-
-/**
  * Streaming session bundle containing session context and initialized stream codecs.
  */
 export interface StreamSessionBundle {
@@ -674,14 +580,6 @@ export interface TranslationCoordinator {
   ): StreamSessionBundle;
 
   /**
-   * Translates a complete request through decode, validate, preflight, and encode stages.
-   *
-   * @param input - Request parameters including protocols, body, and models.
-   * @returns Encoded provider body and IR request, or normalized failure.
-   */
-  translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure>;
-
-  /**
    * Translates an upstream provider response back into client-native format.
    *
    * @param input - Response parameters including status, headers, body, and protocols.
@@ -690,28 +588,4 @@ export interface TranslationCoordinator {
   translateCompleteOutcome(
     input: TranslateCompleteOutcomeInput,
   ): Result<TranslateCompleteOutcomeResult, NormalizedFailure>;
-
-  /**
-   * Translates a streaming request through decode, validate, preflight, and encode stages.
-   *
-   * @param input - Request parameters including protocols, body, and models.
-   * @returns Encoded streaming body, IR request, and stream options, or normalized failure.
-   */
-  translateStreamRequest(input: TranslateStreamRequestInput): Result<TranslateStreamRequestResult, NormalizedFailure>;
-
-  /**
-   * Creates a streaming session bundle from legacy parameters.
-   *
-   * @param input - Protocols, model, and optional identifier overrides.
-   * @returns Streaming session bundle with initialized codecs.
-   */
-  createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle;
-
-  /**
-   * Prepares an outbound provider request from legacy parameters.
-   *
-   * @param input - Connection, authentication, body, and timeout parameters.
-   * @returns Prepared provider request ready for HTTP dispatch.
-   */
-  prepareTranslatedProviderRequest(input: PrepareTranslatedRequestInput): PreparedProviderRequest;
 }

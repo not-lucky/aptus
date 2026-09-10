@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import type { AptusConfig, ProviderConfig, SecretString } from "../../src/config/types.ts";
-import type { Gateway, GatewayRequest, JsonObject, LifecycleEvent } from "../../src/domain/contracts.ts";
+import type { Gateway, GatewayRequest, JsonObject } from "../../src/domain/contracts.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
 import { createTerminalCoordinator } from "../../src/http/coordinator.ts";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import type { LifecycleEvent, LifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
+import { createTrackingObserver } from "../helpers/tracking-observer.ts";
 import { createFileTraceRecorder } from "../../src/observability/trace/file-recorder.ts";
 import { createProtocolAdapters } from "../../src/providers/adapters.ts";
 import { createGateway } from "../../src/routing/gateway.ts";
@@ -17,40 +18,11 @@ import { createFixtureDispatcher, type FixtureDispatcher } from "../helpers/fixt
 import { TestClock, TestRandomSource, TestSleeper } from "../helpers/test-timing.ts";
 
 let activeTraceRecorder: ReturnType<typeof createFileTraceRecorder> | undefined;
-let activeObserver: GatewayObservability | undefined;
+let activeObserver: LifecycleObserver | undefined;
 let activeClock: Clock | undefined;
 
-function trackingObserver(): { observer: GatewayObservability; events: LifecycleEvent[]; logs: string[] } {
-  const events: LifecycleEvent[] = [];
-  const logs: string[] = [];
-  const noop = (): void => undefined;
-
-  const observer: GatewayObservability = {
-    observe(event: LifecycleEvent) {
-      events.push(event);
-    },
-    requestIngress: () => logs.push("requestIngress"),
-    requestTerminal: () => logs.push("requestTerminal"),
-    authResult: () => logs.push("authResult"),
-    nameResolved: () => logs.push("nameResolved"),
-    candidateSkipped: (f) => logs.push(`candidateSkipped:${f.provider}`),
-    keySelected: (f) => logs.push(`keySelected:${f.keyName}`),
-    attemptStarted: (f) => logs.push(`attemptStarted:${f.attemptNumber}:${f.provider}`),
-    attemptCompleted: (f) => logs.push(`attemptCompleted:${f.attemptNumber}:${f.attemptResult}`),
-    firstByte: (f) => logs.push(`firstByte:${f.attemptNumber}`),
-    retryScheduled: (f) => logs.push(`retryScheduled:${f.attemptNumber}:${f.provider}:${f.category}`),
-    fallbackSelected: (f) => logs.push(`fallbackSelected:${f.fromCandidateIndex}->${f.toCandidateIndex}`),
-    completed: (f) => logs.push(`completed:${f.outcomeCategory}`),
-    httpTerminal: (f) => logs.push(`httpTerminal:${f.outcomeCategory}`),
-    catalogCompleted: () => logs.push("catalogCompleted"),
-    cancelled: (f) => logs.push(`cancelled:${f.phase}`),
-    setKeyPoolAvailable: noop,
-    traceFailure: noop,
-    retentionRun: noop,
-    shutdownStarted: noop,
-    shutdownCompleted: noop,
-  };
-  return { observer, events, logs };
+function trackingObserver(): { observer: LifecycleObserver; events: LifecycleEvent[] } {
+  return createTrackingObserver();
 }
 
 function catalog() {
@@ -237,9 +209,8 @@ interface Harness {
   traceRoot: string;
   clock: TestClock;
   sleeper: TestSleeper;
-  observer: GatewayObservability;
+  observer: LifecycleObserver;
   events: LifecycleEvent[];
-  logs: string[];
 }
 
 function buildHarness(configOverrides: Partial<AptusConfig> = {}): Harness {
@@ -248,7 +219,7 @@ function buildHarness(configOverrides: Partial<AptusConfig> = {}): Harness {
   const clock = new TestClock(1000);
   const sleeper = new TestSleeper(clock);
   const random = new TestRandomSource([0]);
-  const { observer, events, logs } = trackingObserver();
+  const { observer, events } = trackingObserver();
 
   const traceRecorder = createFileTraceRecorder({
     root: traceRoot,
@@ -279,7 +250,7 @@ function buildHarness(configOverrides: Partial<AptusConfig> = {}): Harness {
     sleeper,
     random,
   });
-  return { gateway, dispatcher, traceRoot, clock, sleeper, observer, events, logs };
+  return { gateway, dispatcher, traceRoot, clock, sleeper, observer, events };
 }
 
 const SINGLE_KEY_PROVIDERS: readonly ProviderConfig[] = [
@@ -324,7 +295,13 @@ async function request(body: JsonObject, overrides: Partial<GatewayRequest> = {}
       clock,
     });
   coordinator.markIngress(body.stream === true);
-  observer.observe({ type: "request_ingress", aptusRequestId, sourceProtocol: protocol, stream: body.stream === true });
+  observer.observe({
+    type: "request_ingress",
+    aptusRequestId,
+    endpointProtocol: protocol,
+    endpoint: "/chat/completions",
+    stream: body.stream === true,
+  });
   return {
     aptusRequestId,
     protocol,
@@ -437,8 +414,18 @@ test.concurrent("two 429s with three keys rotate keys with zero sleep and succee
   // Zero sleep occurred because a healthy key was available immediately for rotation
   assert.deepEqual(sleeper.sleeps, []);
 
-  // Assert lifecycle event sequence
-  const eventTypes = events.map((e) => e.type);
+  // Assert lifecycle event sequence across the routing-policy moments (the
+  // telemetry stream also carries attempt bookkeeping moments like key_selected,
+  // key_pool_available, and attempt_completed around each attempt).
+  const POLICY_TYPES = [
+    "request_ingress",
+    "candidate_skipped",
+    "attempt_started",
+    "retry_scheduled",
+    "fallback_selected",
+    "request_terminal",
+  ] as const;
+  const eventTypes = events.filter((e) => (POLICY_TYPES as readonly string[]).includes(e.type)).map((e) => e.type);
   assert.deepEqual(eventTypes, [
     "request_ingress",
     "attempt_started",
@@ -448,6 +435,7 @@ test.concurrent("two 429s with three keys rotate keys with zero sleep and succee
     "attempt_started",
     "request_terminal",
   ]);
+  assert.equal(events.filter((e) => e.type === "attempt_completed").length, 3);
 
   // Assert retry trace stages exist
   const files = traceFiles(traceRoot);

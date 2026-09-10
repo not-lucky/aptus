@@ -12,7 +12,8 @@ import type {
 import type { NormalizedFailure } from "../../src/domain/operations.ts";
 import type { PricingConfig } from "../../src/domain/pricing.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
+import { createTrackingObserver } from "../helpers/tracking-observer.ts";
 import { runStreamRelay, type StreamEofVerdict, type StreamTransform } from "../../src/routing/stream-relay.ts";
 import { systemClock } from "../../src/routing/timing.ts";
 
@@ -97,35 +98,22 @@ function capturingCoordinator(): { coordinator: TerminalCoordinator; facts: Term
   return { coordinator, facts };
 }
 
-/** Tracking observer capturing cancellation events. */
-function trackingObserver(): { observer: GatewayObservability; cancelled: Array<{ by: string; phase: string }> } {
+/** Tracking observer recording every telemetry moment plus cancellation facts. */
+function trackingObserver(): {
+  observer: LifecycleObserver;
+  cancelled: Array<{ by: string; phase: string }>;
+} {
   const cancelled: Array<{ by: string; phase: string }> = [];
-  const observer: GatewayObservability = {
-    observe: () => {},
-    requestIngress: () => {},
-    requestTerminal: () => {},
-    authResult: () => {},
-    nameResolved: () => {},
-    candidateSkipped: () => {},
-    keySelected: () => {},
-    attemptStarted: () => {},
-    attemptCompleted: () => {},
-    firstByte: () => {},
-    retryScheduled: () => {},
-    fallbackSelected: () => {},
-    completed: () => {},
-    httpTerminal: () => {},
-    catalogCompleted: () => {},
-    cancelled: (fields) => {
-      cancelled.push({ by: fields.by, phase: fields.phase });
+  const { observer } = createTrackingObserver();
+  const wrapped: LifecycleObserver = {
+    observe(event) {
+      observer.observe(event);
+      if (event.type === "cancelled") {
+        cancelled.push({ by: event.by, phase: event.phase });
+      }
     },
-    setKeyPoolAvailable: () => {},
-    traceFailure: () => {},
-    retentionRun: () => {},
-    shutdownStarted: () => {},
-    shutdownCompleted: () => {},
   };
-  return { observer, cancelled };
+  return { observer: wrapped, cancelled };
 }
 
 /** Tracking trace session capturing recorded cancellation stages. */

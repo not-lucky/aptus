@@ -614,7 +614,7 @@ test.concurrent("streaming parity: translateStreamRequest across all 6 direction
       };
     }
 
-    const res = coord.translateStreamRequest({
+    const res = coord.translateRequest({ stream: true,
       sourceProtocol: source,
       targetProtocol: target,
       logicalModel: "logical-model",
@@ -629,7 +629,7 @@ test.concurrent("streaming parity: translateStreamRequest across all 6 direction
   }
 
   // Legacy json_object in stream
-  const cToRStream = coord.translateStreamRequest({
+  const cToRStream = coord.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     logicalModel: "logical-model",
@@ -647,7 +647,7 @@ test.concurrent("streaming parity: translateStreamRequest across all 6 direction
   }
 
   // Legacy json_object into M rejects in stream
-  const cToMStream = coord.translateStreamRequest({
+  const cToMStream = coord.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     logicalModel: "logical-model",
@@ -817,7 +817,7 @@ test.concurrent("composition regressions: Responses text config owner merges ver
 
 test.concurrent("composition regressions: C->M structured output resolves targetDefaultMaxTokens", () => {
   const coord = coordinator();
-  const res = coord.translateCompleteRequest({
+  const res = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     logicalModel: "logical-key",

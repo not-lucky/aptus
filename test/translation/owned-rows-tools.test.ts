@@ -22,7 +22,7 @@ import { createSseDecoder, createSseEncoder } from "../../src/translation/sse.ts
 import { TranslatedStreamPump } from "../../src/translation/stream-pump.ts";
 import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
 import { validateIrRequest } from "../../src/translation/validate.ts";
-import { ALL_DIRECTIONS, translateRequest } from "./owned-rows-helpers.ts";
+import { ALL_DIRECTIONS, createSessionBundle, translateRequest } from "./owned-rows-helpers.ts";
 
 // =====================================================================
 // Helpers
@@ -35,7 +35,7 @@ function coordinator() {
 const UTF8_ENCODER = new TextEncoder();
 
 function createToolStreamPump(client: Protocol, provider: Protocol, responseId: string) {
-  const bundle = coordinator().createStreamSession({
+  const bundle = createSessionBundle({
     sourceProtocol: client,
     targetProtocol: provider,
     logicalModel: "logical-key",

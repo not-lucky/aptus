@@ -10,26 +10,23 @@
 
 import type { AptusConfig, ModelConfig, RouteConfig } from "../config/types.ts";
 import type {
-  DryRunProviderRequest,
-  DryRunResult,
   Gateway,
   GatewayRequest,
   GatewayResult,
-  JsonObject,
-  JsonValue,
   Protocol,
   ProtocolAdapter,
   ProviderDispatcher,
   TraceRecorder,
 } from "../domain/contracts.ts";
 import type { IrFailureCategory, NormalizedFailure } from "../domain/operations.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import { createRedactor, type Redactor } from "../observability/trace/redaction.ts";
 import type { TranslationCoordinator } from "../translation/contracts.ts";
 import { type AttemptContext, classifyAbortReason, executeAttempt } from "./attempt.ts";
 import { type RunnerShared, runCandidate } from "./candidate-runner.ts";
 import { type CandidateDescriptor, type ProviderEntry, resolveCandidates } from "./candidates.ts";
-import { unavailableFailure, unsupportedCapabilityFailure } from "./failures.ts";
+import { executeNativeDryRun, executeTranslatedDryRun } from "./dry-run.ts";
+import { unsupportedCapabilityFailure } from "./failures.ts";
 import { createKeyPool } from "./key-pool.ts";
 import type { RelayContext } from "./relay.ts";
 import { createNameIndex, type NameIndex } from "./resolution.ts";
@@ -43,7 +40,7 @@ import {
   systemRandomSource,
   systemSleeper,
 } from "./timing.ts";
-import { executeTranslatedAttempt, executeTranslatedDryRun } from "./translated-attempt.ts";
+import { executeTranslatedAttempt } from "./translated-attempt.ts";
 import { executeTranslatedStreamAttempt } from "./translated-stream-attempt.ts";
 
 /**
@@ -61,7 +58,7 @@ export interface GatewayOptions {
   /** Trace recorder opening per-request trace sessions. */
   readonly traceRecorder: TraceRecorder;
   /** Telemetry observer tracking request lifecycle events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Monotonic and wall clock source (defaults to `systemClock`). */
   readonly clock?: Clock;
   /** Abortable sleeper timer (defaults to `systemSleeper`). */
@@ -87,7 +84,7 @@ interface RunDependencies {
   /** Trace recorder opening per-request trace sessions. */
   readonly traceRecorder: TraceRecorder;
   /** Telemetry observer tracking request lifecycle events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Monotonic and wall clock source. */
   readonly clock: Clock;
   /** Abortable sleeper timer. */
@@ -237,18 +234,12 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         toCandidateIndex: to.index,
         category,
       });
-      deps.observer.fallbackSelected({
+      deps.observer.observe({
+        type: "fallback_selected",
         aptusRequestId,
         endpointProtocol: request.protocol,
         targetProtocol: from.provider.protocol,
         publicName: request.canonicalPublicName,
-        fromCandidateIndex: from.index,
-        toCandidateIndex: to.index,
-        category,
-      });
-      deps.observer.observe({
-        type: "fallback_selected",
-        aptusRequestId,
         fromCandidateIndex: from.index,
         toCandidateIndex: to.index,
         category,
@@ -282,7 +273,8 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         category: failure.category,
         capability: failure.capability ?? null,
       });
-      deps.observer.candidateSkipped({
+      deps.observer.observe({
+        type: "candidate_skipped",
         aptusRequestId,
         endpointProtocol: request.protocol,
         canonicalPublicName: request.canonicalPublicName,
@@ -291,14 +283,6 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         targetProtocol: candidate.provider.protocol,
         category: failure.category,
         capability: failure.capability,
-      });
-      deps.observer.observe({
-        type: "candidate_skipped",
-        aptusRequestId,
-        candidateIndex: candidate.index,
-        provider: candidate.provider.name,
-        targetProtocol: candidate.provider.protocol,
-        failure,
       });
     };
 
@@ -315,159 +299,9 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
     };
 
     // ==========================================
-    // DRY RUN PATH (zero dispatch, read-only key)
-    // ==========================================
-    if (deps.config.dryRun.enabled) {
-      for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
-        const candidate = candidates[candidateIndex];
-        if (candidate === undefined) continue;
-
-        // Protocol preflight check / Translation branch
-        if (candidate.provider.protocol !== request.protocol) {
-          const gate = translationGate(candidate);
-          if (gate.kind === "blocked") {
-            await emitCandidateSkip(candidate, gate.failure);
-            if (gate.terminal) lastCandidateFailure = gate.failure;
-            continue;
-          }
-          const translation = gate.translation;
-
-          await request.trace.recordJson("translation_ingress", {
-            sourceProtocol: request.protocol,
-            targetProtocol: candidate.provider.protocol,
-            publicName: request.canonicalPublicName,
-          });
-
-          const dryRunOutcome = await executeTranslatedDryRun(
-            candidate,
-            request,
-            {
-              adapters: deps.adapters,
-              dispatcher: deps.dispatcher,
-              trace: request.trace,
-              observer: deps.observer,
-              clock,
-              sleeper: deps.sleeper,
-              deadlineMs,
-              streamIdleMs,
-              nextAttemptNumber: () => ++attemptNumber,
-            },
-            translation,
-            deps.redactor,
-          );
-
-          if (dryRunOutcome.kind === "skipped") {
-            if (dryRunOutcome.failure.category === "unsupported_capability") {
-              await emitCandidateSkip(candidate, dryRunOutcome.failure);
-              lastCandidateFailure = dryRunOutcome.failure;
-              continue;
-            }
-            return terminalFailure(dryRunOutcome.failure, candidate);
-          }
-
-          if (dryRunOutcome.kind === "key_unavailable") {
-            lastCandidateFailure = dryRunOutcome.failure;
-            if (await tryFallback(candidate, candidateIndex, dryRunOutcome.failure.category)) {
-              continue;
-            }
-            return terminalFailure(dryRunOutcome.failure, candidate);
-          }
-
-          return {
-            kind: "dry_run",
-            status: 200,
-            contentType: "application/vnd.aptus.dry-run+json",
-            body: dryRunOutcome.result,
-          };
-        }
-
-        await request.trace.recordJson("preflight", {
-          ok: true,
-          provider: candidate.provider.name,
-          protocol: candidate.provider.protocol,
-        });
-
-        // Key preview (non-mutating)
-        const preview = candidate.pool.preview();
-        if (preview === undefined) {
-          const failure = unavailableFailure();
-          lastCandidateFailure = failure;
-          if (await tryFallback(candidate, candidateIndex, failure.category)) {
-            continue;
-          }
-          return terminalFailure(failure, candidate);
-        }
-
-        await request.trace.recordJson("key_selection", {
-          provider: candidate.provider.name,
-          keyName: preview.keyName,
-          strategy: candidate.provider.keyStrategy,
-        });
-
-        // Native preparation
-        const adapter = deps.adapters[request.protocol];
-        const prepareResult = adapter.prepareNative({
-          baseUrl: candidate.provider.baseUrl,
-          protocol: candidate.provider.protocol,
-          clientHeaders: request.headers,
-          clientBody: request.body,
-          mutations: candidate.mutations,
-          upstreamModel: candidate.model.upstreamModel,
-          providerSecret: preview.secret,
-          providerHeaders: candidate.provider.headers,
-          deadlineMs,
-          streamIdleMs,
-        });
-
-        if (!prepareResult.ok) {
-          return terminalFailure(prepareResult.error, candidate);
-        }
-
-        const prepared = prepareResult.value;
-        await request.trace.recordJson("mutation", { mutations: prepared.mutations });
-
-        const redactedHeaders = deps.redactor.redactHeaders(prepared.headers);
-        const parsedBody = JSON.parse(new TextDecoder().decode(prepared.body)) as JsonObject;
-        const redactedBody = deps.redactor.redactJson(parsedBody) as JsonObject;
-
-        const dryRunProviderRequest: DryRunProviderRequest = {
-          method: "POST",
-          url: prepared.url,
-          headers: redactedHeaders,
-          body: redactedBody,
-        };
-
-        await request.trace.recordJson("provider_request", dryRunProviderRequest as unknown as JsonValue);
-
-        const dryRunResult: DryRunResult = {
-          dryRun: true,
-          aptusRequestId,
-          sourceProtocol: request.protocol,
-          targetProtocol: candidate.provider.protocol,
-          publicName: request.canonicalPublicName,
-          candidate: {
-            provider: candidate.provider.name,
-            model: candidate.model.upstreamModel,
-            key: preview.keyName,
-          },
-          mutations: prepared.mutations,
-          preflight: { ok: true },
-          providerRequest: dryRunProviderRequest,
-        };
-
-        return {
-          kind: "dry_run",
-          status: 200,
-          contentType: "application/vnd.aptus.dry-run+json",
-          body: dryRunResult,
-        };
-      }
-
-      return terminalFailure(lastCandidateFailure ?? unsupportedCapabilityFailure(request.protocol));
-    }
-
-    // ==========================================
-    // NORMAL DISPATCH PATH
+    // CANDIDATE SWEEP — one engine drives dispatch and dry-run preview modes
+    // (native / translated-complete / translated-stream, plus the dry-run
+    // strategies when config.dryRun.enabled, all through runCandidate)
     // ==========================================
     const relayContextFor = (candidate: CandidateDescriptor, attempts: number): RelayContext => ({
       aptusRequestId,
@@ -556,6 +390,16 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
           publicName: request.canonicalPublicName,
         });
 
+        if (deps.config.dryRun.enabled) {
+          const dryRunResult = await runCandidate(candidate, candidateIndex, runnerShared, {
+            kind: "dry-run",
+            execute: () => executeTranslatedDryRun(candidate, request, attemptContext, translation, deps.redactor),
+          });
+          if (dryRunResult.kind === "returned") return dryRunResult.result;
+          lastCandidateFailure = dryRunResult.failure;
+          continue;
+        }
+
         const translatedResult = await runCandidate(
           candidate,
           candidateIndex,
@@ -580,6 +424,16 @@ async function runRequest(request: GatewayRequest, deps: RunDependencies): Promi
         provider: candidate.provider.name,
         protocol: candidate.provider.protocol,
       });
+
+      if (deps.config.dryRun.enabled) {
+        const dryRunResult = await runCandidate(candidate, candidateIndex, runnerShared, {
+          kind: "dry-run",
+          execute: () => executeNativeDryRun(candidate, request, attemptContext, deps.redactor),
+        });
+        if (dryRunResult.kind === "returned") return dryRunResult.result;
+        lastCandidateFailure = dryRunResult.failure;
+        continue;
+      }
 
       const nativeResult = await runCandidate(candidate, candidateIndex, runnerShared, {
         kind: "native",

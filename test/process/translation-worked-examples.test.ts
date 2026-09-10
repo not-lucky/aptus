@@ -32,6 +32,7 @@ import {
 } from "../helpers/cli-process.ts";
 import { COMPLETE_RESPONSES_BYTES } from "../helpers/responses-fixtures.ts";
 import { createThreeOriginHarness, type ThreeOriginHarness } from "../helpers/three-origin-harness.ts";
+import { createSessionBundle } from "../translation/owned-rows-helpers.ts";
 
 const ENV_NAMES = [
   "APTUS_CLIENT_PRIMARY",
@@ -166,7 +167,7 @@ test.concurrent("worked example 1: plain-text streamed turns across all six dire
       };
     }
 
-    const res = coord.translateStreamRequest({
+    const res = coord.translateRequest({ stream: true,
       sourceProtocol: dir.source,
       targetProtocol: dir.target,
       sourceBody,
@@ -176,7 +177,7 @@ test.concurrent("worked example 1: plain-text streamed turns across all six dire
     });
     assert.equal(res.ok, true);
 
-    const session = coord.createStreamSession({
+    const session = createSessionBundle({
       sourceProtocol: dir.source,
       targetProtocol: dir.target,
       logicalModel: "gpt-4o",
@@ -187,7 +188,7 @@ test.concurrent("worked example 1: plain-text streamed turns across all six dire
   }
 
   // End-to-end stream pump execution with live bytes: C client -> R provider
-  const cToRSession = coord.createStreamSession({
+  const cToRSession = createSessionBundle({
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     logicalModel: "gpt-4o",
@@ -286,7 +287,7 @@ test.concurrent("worked example 2: inline-image HTTPS URL + inline PNG", () => {
   };
 
   // C -> R passes (T1)
-  const cToR = coord.translateCompleteRequest({
+  const cToR = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: chatBody,
@@ -296,7 +297,7 @@ test.concurrent("worked example 2: inline-image HTTPS URL + inline PNG", () => {
   assert.equal(cToR.ok, true);
 
   // C -> M passes with media-type preflight (T2)
-  const cToM = coord.translateCompleteRequest({
+  const cToM = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: chatBody,
@@ -316,7 +317,7 @@ test.concurrent("worked example 2: inline-image HTTPS URL + inline PNG", () => {
       },
     ],
   };
-  const cWithId = coord.translateCompleteRequest({
+  const cWithId = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: chatWithId,
@@ -382,7 +383,7 @@ test.concurrent("worked example 3: function-loop parallel calls & invalid-JSON v
     assert.equal(toolCalls.length, 2);
   }
 
-  const toM = coord.translateCompleteRequest({
+  const toM = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: chatReqWithTools,
@@ -459,7 +460,7 @@ test.concurrent("worked example 4: structured-output JSON schema with strict: tr
   };
 
   // C -> R preserves strict subset (T1)
-  const cToR = coord.translateCompleteRequest({
+  const cToR = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: chatBody,
@@ -474,7 +475,7 @@ test.concurrent("worked example 4: structured-output JSON schema with strict: tr
   }
 
   // C -> M with strict: true fails closed (T3)
-  const cToM = coord.translateCompleteRequest({
+  const cToM = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: chatBody,
@@ -503,7 +504,7 @@ test.concurrent("worked example 4: structured-output JSON schema with strict: tr
     },
   };
 
-  const mToC = coord.translateCompleteRequest({
+  const mToC = coord.translateRequest({ stream: false,
     sourceProtocol: "anthropic-messages",
     targetProtocol: "openai-chat",
     sourceBody: mBodyWithSchema,
@@ -894,7 +895,7 @@ test.concurrent("worked example 8: native-only-state fails closed in translation
     previous_response_id: "resp_previous123",
   };
 
-  const toChat = coord.translateCompleteRequest({
+  const toChat = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     sourceBody: respBodyWithPreviousId,
@@ -916,7 +917,7 @@ test.concurrent("worked example 8: native-only-state fails closed in translation
       },
     ],
   };
-  const toChatRef = coord.translateCompleteRequest({
+  const toChatRef = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-responses",
     targetProtocol: "openai-chat",
     sourceBody: respWithItemRef,
@@ -948,7 +949,7 @@ test.concurrent("worked example 8: native-only-state fails closed in translation
     ],
   };
 
-  const mToChat = coord.translateCompleteRequest({
+  const mToChat = coord.translateRequest({ stream: false,
     sourceProtocol: "anthropic-messages",
     targetProtocol: "openai-chat",
     sourceBody: mWithThinking,
@@ -995,7 +996,7 @@ test.concurrent("worked example 9: multiple-candidates Chat n: 2 rejects before 
     n: 2,
   };
 
-  const toR = coord.translateCompleteRequest({
+  const toR = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: chatWithN2,
@@ -1007,7 +1008,7 @@ test.concurrent("worked example 9: multiple-candidates Chat n: 2 rejects before 
     assert.equal(toR.error.capability, "multiple-candidates");
   }
 
-  const toM = coord.translateCompleteRequest({
+  const toM = coord.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: chatWithN2,

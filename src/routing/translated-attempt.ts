@@ -10,8 +10,6 @@
 
 import type {
   AttemptObservation,
-  DryRunProviderRequest,
-  DryRunResult,
   GatewayRequest,
   JsonObject,
   JsonValue,
@@ -19,12 +17,10 @@ import type {
   ProviderResponse,
 } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { Redactor } from "../observability/trace/redaction.ts";
 import type { TranslateCompleteOutcomeResult, TranslationCoordinator } from "../translation/contracts.ts";
-import { targetDefaultMaxTokensFrom } from "../translation/coordinator.ts";
 import { type AttemptContext, dispatchOneAttempt, finishAttempt } from "./attempt.ts";
 import type { CandidateDescriptor } from "./candidates.ts";
-import { dispatchFailure, failureJson, unavailableFailure } from "./failures.ts";
+import { dispatchFailure, failureJson } from "./failures.ts";
 import { spoolResponseBody } from "./spool.ts";
 import { createTranslatedPreparer } from "./translated-preparer.ts";
 
@@ -207,105 +203,4 @@ export async function executeTranslatedAttempt(
     outcome: outcomeResult.value,
     attemptNumber,
   };
-}
-
-/** Outcome variants for a translated dry-run preview evaluation. */
-export type TranslatedDryRunOutcome =
-  | { readonly kind: "dry_run"; readonly result: DryRunResult }
-  | { readonly kind: "skipped"; readonly failure: NormalizedFailure }
-  | { readonly kind: "key_unavailable"; readonly failure: NormalizedFailure };
-
-/**
- * Previews translated request construction and credential selection without issuing network traffic.
- *
- * @param candidate - Target candidate descriptor.
- * @param request - Inbound gateway request.
- * @param ctx - Attempt execution context.
- * @param translation - Translation coordinator.
- * @param redactor - Redactor for scrubbing credentials from preview payloads.
- * @returns Dry-run preview result or skipping failure.
- */
-export async function executeTranslatedDryRun(
-  candidate: CandidateDescriptor,
-  request: GatewayRequest,
-  ctx: AttemptContext,
-  translation: TranslationCoordinator,
-  redactor: Redactor,
-): Promise<TranslatedDryRunOutcome> {
-  const translated = translation.translateRequest({
-    sourceProtocol: request.protocol,
-    targetProtocol: candidate.provider.protocol,
-    sourceBody: request.body,
-    logicalModel: request.canonicalPublicName,
-    targetModel: candidate.model.upstreamModel,
-    stream: request.stream,
-    targetDefaultMaxTokens: targetDefaultMaxTokensFrom(candidate.model.defaults),
-  });
-
-  if (!translated.ok) {
-    await request.trace.recordJson("ir_request", {
-      ok: false,
-      failure: failureJson(translated.error),
-    });
-    await request.trace.recordJson("translation_failure", failureJson(translated.error));
-    return { kind: "skipped", failure: translated.error };
-  }
-
-  await request.trace.recordJson("ir_request", {
-    ok: true,
-    ir: translated.value.irRequest as unknown as JsonValue,
-  });
-  await request.trace.recordJson("translation_egress", { ok: true });
-
-  const preview = candidate.pool.preview();
-  if (preview === undefined) {
-    return { kind: "key_unavailable", failure: unavailableFailure() };
-  }
-
-  await request.trace.recordJson("key_selection", {
-    provider: candidate.provider.name,
-    keyName: preview.keyName,
-    strategy: candidate.provider.keyStrategy,
-  });
-
-  const prepared = translation.prepareTicketRequest(translated.value, {
-    providerName: candidate.provider.name,
-    baseUrl: candidate.provider.baseUrl,
-    clientHeaders: request.headers,
-    providerHeaders: candidate.provider.headers,
-    providerSecret: preview.secret,
-    deadlineMs: ctx.deadlineMs,
-    streamIdleMs: ctx.streamIdleMs,
-  });
-
-  const redactedHeaders = redactor.redactHeaders(prepared.headers);
-  const parsedBody = JSON.parse(utf8Decoder.decode(prepared.body)) as JsonObject;
-  const redactedBody = redactor.redactJson(parsedBody) as JsonObject;
-
-  const dryRunProviderRequest: DryRunProviderRequest = {
-    method: "POST",
-    url: prepared.url,
-    headers: redactedHeaders,
-    body: redactedBody,
-  };
-
-  await request.trace.recordJson("provider_request", dryRunProviderRequest as unknown as JsonValue);
-
-  const dryRunResult: DryRunResult = {
-    dryRun: true,
-    aptusRequestId: request.aptusRequestId,
-    sourceProtocol: request.protocol,
-    targetProtocol: candidate.provider.protocol,
-    publicName: request.canonicalPublicName,
-    candidate: {
-      provider: candidate.provider.name,
-      model: candidate.model.upstreamModel,
-      key: preview.keyName,
-    },
-    mutations: prepared.mutations,
-    preflight: { ok: true },
-    providerRequest: dryRunProviderRequest,
-  };
-
-  return { kind: "dry_run", result: dryRunResult };
 }

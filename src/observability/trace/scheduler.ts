@@ -10,7 +10,7 @@
  */
 
 import type { TraceRetention } from "../../domain/operations.ts";
-import type { GatewayObservability } from "../lifecycle-observer.ts";
+import type { LifecycleObserver } from "../lifecycle-observer.ts";
 import { safeErrorCode } from "./file-recorder.ts";
 
 /**
@@ -37,7 +37,7 @@ export interface TraceRetentionSchedulerOptions {
   /** Retention engine responsible for scanning and deleting trace directories. */
   readonly retention: TraceRetention;
   /** Telemetry observer for reporting sweep metrics and degradation events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Interval in milliseconds between scheduled retention passes. */
   readonly intervalMs: number;
   /** Callback invoked when a sweep fails, degrading trace readiness. */
@@ -71,12 +71,13 @@ export function startRetentionScheduler(options: TraceRetentionSchedulerOptions)
       const nowMs = Date.now();
       const result = await retention.run(nowMs);
       if (!stopped) {
-        observer.retentionRun(result);
+        observer.observe({ type: "retention_run", ...result });
       }
     } catch (err) {
       if (!stopped) {
         onFailure();
-        observer.traceFailure({
+        observer.observe({
+          type: "trace_failure",
           aptusRequestId: "system",
           operation: "retention",
           safeErrorCode: safeErrorCode(err),

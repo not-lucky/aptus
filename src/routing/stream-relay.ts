@@ -30,7 +30,7 @@ import type {
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
 import type { Usage } from "../domain/usage.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import { classifyAbortReason } from "./attempt.ts";
 import { interruptedFailure, streamFailure, timeoutFailure } from "./failures.ts";
 import { buildTerminalFact, type TerminalFactContext } from "./terminal-outcome.ts";
@@ -121,7 +121,7 @@ export interface StreamRelayOptions {
   /** Trace session recording cancellation stages. */
   readonly trace: TraceSession;
   /** Telemetry observer receiving lifecycle and cancellation events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Provider stream reader transferring raw bytes into the engine. */
   readonly reader: ReadableStreamDefaultReader<Uint8Array>;
   /** Trace byte sinks whose terminal lifecycle the engine owns (complete all / discard all). */
@@ -196,7 +196,12 @@ export function runStreamRelay(options: StreamRelayOptions): GatewayResult {
 
   const recordCancellation = async (by: "client" | "shutdown"): Promise<void> => {
     await trace.recordJson("cancellation", { phase: "relay", by });
-    observer.cancelled({ aptusRequestId: options.aptusRequestId, phase: "relay", by });
+    observer.observe({
+      type: "cancelled",
+      aptusRequestId: options.aptusRequestId,
+      phase: "relay",
+      by,
+    });
   };
 
   /**

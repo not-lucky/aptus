@@ -10,7 +10,8 @@ import type {
 import type { IrFailureCategory, NormalizedFailure } from "../../src/domain/operations.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
 import { createTerminalCoordinator } from "../../src/http/coordinator.ts";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
+import { createTrackingObserver } from "../helpers/tracking-observer.ts";
 import {
   buildTerminalFact,
   finalizeTerminal,
@@ -200,42 +201,32 @@ const noopTrace: TraceSession = {
   finish: async () => {},
 };
 
-/** Observer capturing the fields the coordinator forwards to telemetry sinks. */
+/** Observer routing terminal moments into completion-log and HTTP-only snapshots. */
 function trackingObserver(): {
-  observer: GatewayObservability;
+  observer: LifecycleObserver;
   completed: Array<Record<string, unknown>>;
   httpTerminal: Array<Record<string, unknown>>;
 } {
   const completed: Array<Record<string, unknown>> = [];
   const httpTerminal: Array<Record<string, unknown>> = [];
-  const noop = (): void => undefined;
-  const observer: GatewayObservability = {
-    observe: noop,
-    requestIngress: noop,
-    requestTerminal: noop,
-    authResult: noop,
-    nameResolved: noop,
-    candidateSkipped: noop,
-    keySelected: noop,
-    attemptStarted: noop,
-    attemptCompleted: noop,
-    firstByte: noop,
-    retryScheduled: noop,
-    fallbackSelected: noop,
-    completed: (fields) => completed.push({ ...fields }),
-    httpTerminal: (fields) => httpTerminal.push({ ...fields }),
-    catalogCompleted: noop,
-    cancelled: noop,
-    setKeyPoolAvailable: noop,
-    traceFailure: noop,
-    retentionRun: noop,
-    shutdownStarted: noop,
-    shutdownCompleted: noop,
+  const { observer } = createTrackingObserver();
+  const wrapped: LifecycleObserver = {
+    observe(event) {
+      observer.observe(event);
+      if (event.type === "request_terminal") {
+        const snapshot = { ...event } as Record<string, unknown>;
+        if (event.emitCompleted) {
+          completed.push(snapshot);
+        } else {
+          httpTerminal.push(snapshot);
+        }
+      }
+    },
   };
-  return { observer, completed, httpTerminal };
+  return { observer: wrapped, completed, httpTerminal };
 }
 
-function coordinatorWith(overrides: { trace?: TraceSession; observer?: GatewayObservability } = {}): {
+function coordinatorWith(overrides: { trace?: TraceSession; observer?: LifecycleObserver } = {}): {
   coordinator: ReturnType<typeof createTerminalCoordinator>;
   terminals: unknown[];
   completed: Array<Record<string, unknown>>;

@@ -22,7 +22,7 @@ import type {
   TraceSession,
 } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import type { CandidateDescriptor } from "./candidates.ts";
 import { dispatchFailure, failureJson } from "./failures.ts";
 import type { Clock, Sleeper } from "./timing.ts";
@@ -58,7 +58,7 @@ export interface AttemptContext {
   /** Active trace session recording attempt stages. */
   readonly trace: TraceSession;
   /** Telemetry observer tracking request lifecycle events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Monotonic clock source. */
   readonly clock: Clock;
   /** Abortable sleep timer for cooldown waits. */
@@ -174,7 +174,8 @@ export async function dispatchOneAttempt<Pre>(
     strategy: candidate.provider.keyStrategy,
     keyName: lease.keyName,
   });
-  ctx.observer.keySelected({
+  ctx.observer.observe({
+    type: "key_selected",
     aptusRequestId: request.aptusRequestId,
     attemptNumber,
     provider: candidate.provider.name,
@@ -204,14 +205,6 @@ export async function dispatchOneAttempt<Pre>(
     body: parseJsonBytes(prepared.body),
   });
 
-  ctx.observer.attemptStarted({
-    aptusRequestId: request.aptusRequestId,
-    attemptNumber,
-    candidateIndex: candidate.index,
-    provider: candidate.provider.name,
-    targetProtocol: candidate.provider.protocol,
-    stream: prepared.stream,
-  });
   ctx.observer.observe({
     type: "attempt_started",
     aptusRequestId: request.aptusRequestId,
@@ -219,6 +212,7 @@ export async function dispatchOneAttempt<Pre>(
     candidateIndex: candidate.index,
     provider: candidate.provider.name,
     targetProtocol: candidate.provider.protocol,
+    stream: prepared.stream,
   });
 
   const dispatchStarted = ctx.clock.nowMonotonicMs();
@@ -369,11 +363,12 @@ export async function acquireLease(
   ctx: AttemptContext,
 ): Promise<LeaseResult> {
   const publishAvailability = (): void => {
-    ctx.observer.setKeyPoolAvailable(
-      candidate.provider.name,
-      candidate.provider.protocol,
-      candidate.pool.availableCount(ctx.clock.nowMonotonicMs()),
-    );
+    ctx.observer.observe({
+      type: "key_pool_available",
+      provider: candidate.provider.name,
+      targetProtocol: candidate.provider.protocol,
+      count: candidate.pool.availableCount(ctx.clock.nowMonotonicMs()),
+    });
   };
 
   for (;;) {
@@ -435,7 +430,8 @@ export function finishAttempt(
   durationMs: number,
   stream: boolean,
 ): number | undefined {
-  ctx.observer.attemptCompleted({
+  ctx.observer.observe({
+    type: "attempt_completed",
     aptusRequestId: request.aptusRequestId,
     attemptNumber,
     provider: candidate.provider.name,
@@ -446,11 +442,12 @@ export function finishAttempt(
     durationMs,
   });
   const cooldownMs = candidate.pool.observe(lease, observation, ctx.clock.nowMonotonicMs());
-  ctx.observer.setKeyPoolAvailable(
-    candidate.provider.name,
-    candidate.provider.protocol,
-    candidate.pool.availableCount(ctx.clock.nowMonotonicMs()),
-  );
+  ctx.observer.observe({
+    type: "key_pool_available",
+    provider: candidate.provider.name,
+    targetProtocol: candidate.provider.protocol,
+    count: candidate.pool.availableCount(ctx.clock.nowMonotonicMs()),
+  });
   return cooldownMs;
 }
 
@@ -469,7 +466,7 @@ export async function recordCancellation(
   by: "shutdown" | "client",
 ): Promise<void> {
   await ctx.trace.recordJson("cancellation", { phase, by });
-  ctx.observer.cancelled({ aptusRequestId: request.aptusRequestId, phase, by });
+  ctx.observer.observe({ type: "cancelled", aptusRequestId: request.aptusRequestId, phase, by });
 }
 
 /**

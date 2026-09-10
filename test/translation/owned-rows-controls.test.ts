@@ -350,7 +350,7 @@ test.concurrent("row output-token-limit: M target resolves user value first, def
   if (withDefault.ok) assert.equal(withDefault.value.body.max_tokens, 2048);
 
   // No user value and no resolvable default fails closed before dispatch.
-  const unresolved = coordinator.translateCompleteRequest({
+  const unresolved = coordinator.translateRequest({ stream: false,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: sourceBodyFor("openai-chat"),

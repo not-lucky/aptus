@@ -9,13 +9,13 @@ import type {
   TraceSession,
 } from "../../src/domain/contracts.ts";
 import { createRequestId } from "../../src/domain/request-id.ts";
-import type { GatewayObservability } from "../../src/observability/lifecycle-observer.ts";
+import { createTrackingObserver } from "../helpers/tracking-observer.ts";
 import {
   bootstrapTranslatedStream,
   relayTranslatedStream,
   type TranslatedStreamRelayContext,
 } from "../../src/routing/translated-stream-relay.ts";
-import { createDefaultTranslationCoordinator } from "../../src/translation/index.ts";
+import { createSessionBundle } from "../translation/owned-rows-helpers.ts";
 
 const utf8Decoder = new TextDecoder();
 
@@ -91,34 +91,8 @@ function capturingCoordinator(): { coordinator: TerminalCoordinator; facts: Term
   return { coordinator, facts };
 }
 
-function trackingObserver(): { observer: GatewayObservability; cancelled: string[] } {
-  const cancelled: string[] = [];
-  const observer: GatewayObservability = {
-    observe: () => {},
-    requestIngress: () => {},
-    requestTerminal: () => {},
-    authResult: () => {},
-    nameResolved: () => {},
-    candidateSkipped: () => {},
-    keySelected: () => {},
-    attemptStarted: () => {},
-    attemptCompleted: () => {},
-    firstByte: () => {},
-    retryScheduled: () => {},
-    fallbackSelected: () => {},
-    completed: () => {},
-    httpTerminal: () => {},
-    catalogCompleted: () => {},
-    cancelled: () => {
-      cancelled.push("cancelled");
-    },
-    setKeyPoolAvailable: () => {},
-    traceFailure: () => {},
-    retentionRun: () => {},
-    shutdownStarted: () => {},
-    shutdownCompleted: () => {},
-  };
-  return { observer, cancelled };
+function trackingObserver() {
+  return createTrackingObserver();
 }
 
 /** Narrow a gateway result to the streaming variant. */
@@ -152,8 +126,7 @@ test.concurrent("translated stream relay re-frames responses SSE into chat SSE t
   const { trace, provider, ir } = recordingTrace();
   const { coordinator, facts } = capturingCoordinator();
   const { observer } = trackingObserver();
-  const translation = createDefaultTranslationCoordinator();
-  const sessionBundle = translation.createStreamSession({
+  const sessionBundle = createSessionBundle({
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     logicalModel: "gpt-main",

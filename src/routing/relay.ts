@@ -24,7 +24,7 @@ import type {
   TraceSession,
 } from "../domain/contracts.ts";
 import { estimateCostUsd, type PricingConfig } from "../domain/pricing.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import type { TranslateCompleteOutcomeResult } from "../translation/contracts.ts";
 import { failureFromObservation } from "./failures.ts";
 import { createOwnedMemoryBody } from "./spool.ts";
@@ -62,7 +62,7 @@ export interface RelayContext {
   /** Terminal coordinator tracking lifecycle completion. */
   readonly coordinator: TerminalCoordinator;
   /** Telemetry observer for lifecycle and cancellation events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Inbound request abort signal. */
   readonly requestSignal: AbortSignal;
   /** Monotonic and wall clock source. */

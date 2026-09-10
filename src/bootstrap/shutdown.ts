@@ -9,7 +9,7 @@
 
 import type { Server } from "../http/listeners.ts";
 import type { RequestCancellationRegistry } from "../http/request-cancellation.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import type { TraceRetentionScheduler } from "../observability/trace/scheduler.ts";
 import { type Clock, systemClock } from "../routing/timing.ts";
 
@@ -47,7 +47,7 @@ export interface GracefulShutdownOptions {
   /** Request cancellation registry for tracking active requests and awaiting finalization. */
   readonly cancellations?: RequestCancellationRegistry;
   /** Observability observer for shutdown logs and metrics. */
-  readonly observer?: GatewayObservability;
+  readonly observer?: LifecycleObserver;
   /** Clock source for calculating shutdown duration. */
   readonly clock?: Clock;
   /** Callback triggered immediately upon shutdown initiation to set runtime `draining = true`. */
@@ -92,7 +92,11 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): Gracef
         const totalRegisteredAtStart = options.cancellations?.registeredCount() ?? 0;
 
         // Step 1: Emit shutdown started and mark runtime as draining
-        options.observer?.shutdownStarted({ activeRequests: initialActiveRequests, drainMs: options.drainMs });
+        options.observer?.observe({
+          type: "shutdown_started",
+          activeRequests: initialActiveRequests,
+          drainMs: options.drainMs,
+        });
         options.onDraining();
 
         // Step 2: Stop accepting new client connections and sever idle keep-alives
@@ -141,7 +145,8 @@ export function createGracefulShutdown(options: GracefulShutdownOptions): Gracef
         const drainedCount = Math.max(0, initialActiveRequests + lateAdmitted - abortedCount);
         const durationMs = clock.nowMonotonicMs() - startedMs;
 
-        options.observer?.shutdownCompleted({
+        options.observer?.observe({
+          type: "shutdown_completed",
           drained: drainedCount,
           aborted: abortedCount,
           durationMs,

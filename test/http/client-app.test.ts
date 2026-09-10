@@ -7,7 +7,7 @@ import type { Gateway, GatewayRequest, GatewayResult } from "../../src/domain/co
 import { type ClientAppOptions, createClientApp } from "../../src/http/client-app.ts";
 import { createErrorEncoder } from "../../src/http/error-encoder.ts";
 import { createOperationsApp } from "../../src/http/operations-app.ts";
-import { createLifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
+import { createLifecycleObserver, type LifecycleObserver } from "../../src/observability/lifecycle-observer.ts";
 import { aptusLogger } from "../../src/observability/logging.ts";
 import { createMetricsRegistry } from "../../src/observability/metrics.ts";
 import { createNoopTraceRecorder } from "../../src/observability/trace/noop-recorder.ts";
@@ -510,16 +510,19 @@ test.concurrent("stream relay cancels the owned stream when the client disconnec
 
 test.concurrent("complete body delivery records cancellation telemetry when client disconnects mid-delivery", async () => {
   const cancelledCalls: Array<{ aptusRequestId: string; phase: string; by: string }> = [];
-  const observer = createLifecycleObserver({
+  const baseObserver = createLifecycleObserver({
     logger: aptusLogger(),
     metrics: createMetricsRegistry(),
     loggingEnabled: false,
     metricsEnabled: false,
   });
-  const origCancelled = observer.cancelled.bind(observer);
-  observer.cancelled = (fields) => {
-    cancelledCalls.push(fields);
-    origCancelled(fields);
+  const observer: LifecycleObserver = {
+    observe(event) {
+      baseObserver.observe(event);
+      if (event.type === "cancelled") {
+        cancelledCalls.push({ aptusRequestId: event.aptusRequestId, phase: event.phase, by: event.by });
+      }
+    },
   };
 
   const gateway: Gateway = {

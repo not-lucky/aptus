@@ -26,10 +26,10 @@ import type {
 import type { EncodedFailure, ErrorEncoder, NormalizedFailure } from "../domain/operations.ts";
 import type { AptusRequestId } from "../domain/request-id.ts";
 import { createRequestId } from "../domain/request-id.ts";
-import type { GatewayObservability } from "../observability/lifecycle-observer.ts";
+import type { LifecycleObserver } from "../observability/lifecycle-observer.ts";
 import { failureJson, notFoundFailure, timeoutFailure } from "../routing/failures.ts";
 import { authorizePublicName, type NameIndex } from "../routing/resolution.ts";
-import { buildTerminalFact } from "../routing/terminal-outcome.ts";
+import { buildTerminalFact, type TerminalOutcome } from "../routing/terminal-outcome.ts";
 import type { Clock } from "../routing/timing.ts";
 import { raceWithAbort } from "./abort-race.ts";
 import type { AdmissionLimiter } from "./admission.ts";
@@ -57,7 +57,7 @@ export interface AdmissionDeps {
   /** Trace recorder used to open the per-request trace session. */
   readonly traceRecorder: TraceRecorder;
   /** Telemetry observer for lifecycle and admission events. */
-  readonly observer: GatewayObservability;
+  readonly observer: LifecycleObserver;
   /** Clock source for monotonic durations and wall-clock trace directory naming. */
   readonly clock: Clock;
   /** Process-local concurrency limiter for acquiring admission leases. */
@@ -140,6 +140,72 @@ export interface AdmissionFailure {
 
 /** Result union of the create admission pipeline. */
 export type AdmissionOutcome = AdmissionSuccess | AdmissionFailure;
+
+/** Session state shared by every post-trace admission rejection. */
+interface AdmissionSession {
+  /** Terminal coordinator tracking lifecycle stages and final outcome. */
+  readonly coordinator: TerminalCoordinator;
+  /** Open trace session for the rejected request. */
+  readonly trace: TraceSession;
+  /** Lease release callback to free the concurrency slot once settled. */
+  readonly release: () => void;
+  /** Monotonic start timestamp in milliseconds. */
+  readonly startedMs: number;
+  /** Minted unique request identifier. */
+  readonly aptusRequestId: AptusRequestId;
+}
+
+/**
+ * Builds a pre-gateway rejection outcome from an already-started admission session.
+ *
+ * Owns the shared rejection bundle — coordinator, trace, release, identity, stream label,
+ * and the terminal fact derived from the request context — so every rejection site states
+ * only what genuinely differs: how the request ended, the stream flag known at rejection
+ * time, and the pre-encoded error envelope. `write` is derived from `encoded`: a rejection
+ * without an envelope writes no response (client disconnect), one with an envelope does.
+ *
+ * @param session - Coordinator, trace, lease, and identity minted before the rejection.
+ * @param protocol - Client protocol spoken on the receiving endpoint.
+ * @param spec - Terminal outcome, stream flag, optional envelope, and completion-log gating.
+ * @returns An {@link AdmissionFailure} ready for the caller to write and finalize.
+ */
+function admissionRejection(
+  session: AdmissionSession,
+  protocol: Protocol,
+  spec: {
+    /** How the request ended: a normalized failure or a client/shutdown cancellation. */
+    readonly outcome: TerminalOutcome;
+    /** Stream flag known at rejection time. */
+    readonly stream: boolean;
+    /** Pre-encoded error envelope; its presence decides whether a response is written. */
+    readonly encoded?: EncodedFailure;
+    /** When `false`, finalization skips the completion log (pre-gateway 4xx rejections). */
+    readonly emitCompleted?: boolean;
+  },
+): AdmissionFailure {
+  const { coordinator, trace, release, startedMs, aptusRequestId } = session;
+  return {
+    ok: false,
+    write: spec.encoded !== undefined,
+    encoded: spec.encoded,
+    coordinator,
+    trace,
+    release,
+    startedMs,
+    stream: spec.stream,
+    aptusRequestId,
+    finalizeFact: buildTerminalFact(
+      {
+        attempts: coordinator.getAttempts(),
+        stream: spec.stream,
+        clientProtocol: protocol,
+        canonicalPublicName: "unknown",
+        ...(spec.emitCompleted === false ? { emitCompleted: false as const } : {}),
+      },
+      spec.outcome,
+    ),
+  };
+}
 
 /** Constructs a normalized authentication failure representation. */
 function authenticationFailure(): NormalizedFailure {
@@ -236,6 +302,7 @@ export async function admitCreateRequest(
     observer: deps.observer,
     clock,
   });
+  const session: AdmissionSession = { coordinator, trace, release, startedMs, aptusRequestId };
 
   // Race body ingress against the abort signal so disconnects, deadlines, and shutdown interrupt the read.
   const admissionRace = await raceWithAbort(
@@ -250,125 +317,60 @@ export async function admitCreateRequest(
     }
     const by = deps.getCancellationBy();
     if (!timeout) {
-      deps.observer.cancelled({ aptusRequestId, phase: "admission", by });
+      deps.observer.observe({ type: "cancelled", aptusRequestId, phase: "admission", by });
       await trace.recordJson("cancellation", { phase: "admission", by });
     }
     if (!timeout) {
-      return {
-        ok: false,
-        write: false,
-        coordinator,
-        trace,
-        release,
-        startedMs,
+      return admissionRejection(session, protocol, {
+        outcome: { kind: "cancelled", by },
         stream: false,
-        aptusRequestId,
-        finalizeFact: buildTerminalFact(
-          {
-            attempts: coordinator.getAttempts(),
-            stream: false,
-            clientProtocol: protocol,
-            canonicalPublicName: "unknown",
-          },
-          { kind: "cancelled", by },
-        ),
-      };
+      });
     }
-    return {
-      ok: false,
-      write: true,
-      encoded: deps.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }),
-      coordinator,
-      trace,
-      release,
-      startedMs,
+    return admissionRejection(session, protocol, {
+      outcome: { kind: "failed", failure: timeoutFailure(), status: 504 },
       stream: false,
-      aptusRequestId,
-      finalizeFact: buildTerminalFact(
-        {
-          attempts: coordinator.getAttempts(),
-          stream: false,
-          clientProtocol: protocol,
-          canonicalPublicName: "unknown",
-        },
-        { kind: "failed", failure: timeoutFailure(), status: 504 },
-      ),
-    };
+      encoded: deps.errorEncoder.encode({ protocol, aptusRequestId, failure: timeoutFailure() }),
+    });
   }
 
   const admission = admissionRace.value;
   if (!admission.ok) {
     const failure = { ...admission.failure, retryable: false as const };
-    return {
-      ok: false,
-      write: true,
-      encoded: encodeUnidentifiedFailure(protocol, failure),
-      coordinator,
-      trace,
-      release,
-      startedMs,
+    return admissionRejection(session, protocol, {
+      outcome: { kind: "failed", failure },
       stream: false,
-      aptusRequestId,
-      finalizeFact: buildTerminalFact(
-        {
-          attempts: coordinator.getAttempts(),
-          stream: false,
-          clientProtocol: protocol,
-          canonicalPublicName: "unknown",
-        },
-        { kind: "failed", failure },
-      ),
-    };
+      encoded: encodeUnidentifiedFailure(protocol, failure),
+    });
   }
 
   const streamRequested = (admission.body as JsonObject & { stream?: unknown }).stream === true;
 
   // Record admission telemetry and the trace ingress boundary now that the body is validated.
-  deps.observer.requestIngress({
+  deps.observer.observe({
+    type: "request_ingress",
     aptusRequestId,
     endpointProtocol: protocol,
     endpoint: label,
     stream: streamRequested,
   });
   coordinator.markIngress(streamRequested);
-  deps.observer.observe({
-    type: "request_ingress",
-    aptusRequestId,
-    sourceProtocol: protocol,
-    stream: streamRequested,
-  });
   await trace.recordJson("client_request", { headers: admission.headers as HeaderMap, body: admission.body });
 
   const scheme = authentication.kind === "api-key" ? "x-api-key" : "bearer";
   await trace.recordJson("authentication", { scheme, clientKeyName: authentication.name });
-  deps.observer.authResult({ aptusRequestId, scheme, result: "ok" });
+  deps.observer.observe({ type: "auth_result", aptusRequestId, scheme, result: "ok" });
 
   // Extract the public model name with the protocol adapter and reject bodies without a usable model field.
   const publicNameResult = deps.adapters[protocol].readPublicModel(admission.body);
   if (!publicNameResult.ok) {
     await trace.recordJson("resolution", { failure: failureJson(publicNameResult.error) });
     coordinator.markClientFirstByte();
-    return {
-      ok: false,
-      write: true,
-      encoded: deps.errorEncoder.encode({ protocol, aptusRequestId, failure: publicNameResult.error }),
-      coordinator,
-      trace,
-      release,
-      startedMs,
+    return admissionRejection(session, protocol, {
+      outcome: { kind: "failed", failure: publicNameResult.error, status: 400 },
       stream: streamRequested,
-      aptusRequestId,
-      finalizeFact: buildTerminalFact(
-        {
-          attempts: coordinator.getAttempts(),
-          stream: streamRequested,
-          clientProtocol: protocol,
-          canonicalPublicName: "unknown",
-          emitCompleted: false,
-        },
-        { kind: "failed", failure: publicNameResult.error, status: 400 },
-      ),
-    };
+      encoded: deps.errorEncoder.encode({ protocol, aptusRequestId, failure: publicNameResult.error }),
+      emitCompleted: false,
+    });
   }
 
   const canonicalPublicName = authorizePublicName(deps.nameIndex, authentication.name, publicNameResult.value);
@@ -376,27 +378,12 @@ export async function admitCreateRequest(
     const failure = notFoundFailure();
     await trace.recordJson("resolution", { requested: publicNameResult.value });
     coordinator.markClientFirstByte();
-    return {
-      ok: false,
-      write: true,
-      encoded: deps.errorEncoder.encode({ protocol, aptusRequestId, failure }),
-      coordinator,
-      trace,
-      release,
-      startedMs,
+    return admissionRejection(session, protocol, {
+      outcome: { kind: "failed", failure, status: 404 },
       stream: streamRequested,
-      aptusRequestId,
-      finalizeFact: buildTerminalFact(
-        {
-          attempts: coordinator.getAttempts(),
-          stream: streamRequested,
-          clientProtocol: protocol,
-          canonicalPublicName: "unknown",
-          emitCompleted: false,
-        },
-        { kind: "failed", failure, status: 404 },
-      ),
-    };
+      encoded: deps.errorEncoder.encode({ protocol, aptusRequestId, failure }),
+      emitCompleted: false,
+    });
   }
 
   const resolutionKind = deps.modelsByName.has(canonicalPublicName) ? ("model" as const) : ("route" as const);
@@ -405,7 +392,12 @@ export async function admitCreateRequest(
     canonicalPublicName,
     kind: resolutionKind,
   });
-  deps.observer.nameResolved({ aptusRequestId, canonicalPublicName, kind: resolutionKind });
+  deps.observer.observe({
+    type: "name_resolved",
+    aptusRequestId,
+    canonicalPublicName,
+    kind: resolutionKind,
+  });
 
   const gatewayRequest = {
     aptusRequestId,

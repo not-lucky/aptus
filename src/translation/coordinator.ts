@@ -6,28 +6,23 @@
  * compatibility, and encode into target wire formats. For Anthropic Messages targets, resolves
  * and injects mandatory `max_tokens` limits.
  *
- * Exposes both ticketed (`TranslatedTicket`) and direct execution paths for complete and streaming flows.
+ * Exposes the ticketed (`TranslatedTicket`) request pipeline plus complete outcome translation.
  */
 
 import { randomUUID } from "node:crypto";
-import type { Result } from "../domain/contracts.ts";
+import type { JsonObject, Result } from "../domain/contracts.ts";
 import type { NormalizedFailure } from "../domain/operations.ts";
 import { TRANSLATED_MEDIA_BODY_LIMIT_BYTES } from "./codecs/shared/media.ts";
 import type {
-  CreateStreamSessionInput,
   Direction,
   PrepareTicketRequestInput,
-  PrepareTranslatedRequestInput,
   StreamSession,
   StreamSessionBundle,
-  TranslateCompleteInput,
+  StreamWireOptions,
   TranslateCompleteOutcomeInput,
   TranslateCompleteOutcomeResult,
-  TranslateCompleteRequestResult,
   TranslatedTicket,
   TranslateRequestInput,
-  TranslateStreamRequestInput,
-  TranslateStreamRequestResult,
   TranslationCodecs,
   TranslationCoordinator,
 } from "./contracts.ts";
@@ -113,8 +108,8 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
    * validate, preflight capabilities, and encode target body with protocol finalization.
    */
   const runComplete = (
-    input: TranslateCompleteInput,
-  ): Result<{ body: TranslateCompleteRequestResult["body"]; irRequest: IrRequest }, NormalizedFailure> => {
+    input: Omit<TranslateRequestInput, "stream">,
+  ): Result<{ body: JsonObject; irRequest: IrRequest }, NormalizedFailure> => {
     const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
     const decoder = codecs.ingress[input.sourceProtocol];
     const encoder = codecs.egress[input.targetProtocol];
@@ -164,7 +159,9 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
    * Executes the 5-stage streaming request translation pipeline, preserving stream wire
    * options for subsequent session binding.
    */
-  const runStream = (input: TranslateStreamRequestInput): Result<TranslateStreamRequestResult, NormalizedFailure> => {
+  const runStream = (
+    input: Omit<TranslateRequestInput, "stream">,
+  ): Result<{ body: JsonObject; irRequest: IrRequest; sourceWireOptions: StreamWireOptions }, NormalizedFailure> => {
     const direction = `${input.sourceProtocol}->${input.targetProtocol}` as Direction;
     const streamDecoder = codecs.streamRequestDecoders[input.sourceProtocol];
     const streamEncoder = codecs.streamRequestEncoders[input.targetProtocol];
@@ -337,57 +334,6 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
     },
 
     /**
-     * Translates a complete (non-streaming) request without producing a branded ticket.
-     *
-     * @param input - Inbound request parameters, models, and fallback token limits.
-     * @returns Encoded target body and semantic IR request, or normalized failure.
-     */
-    translateCompleteRequest(input: TranslateCompleteInput): Result<TranslateCompleteRequestResult, NormalizedFailure> {
-      return runComplete(input);
-    },
-
-    /**
-     * Translates a streaming request without producing a branded ticket.
-     *
-     * @param input - Inbound streaming request parameters, models, and fallback token limits.
-     * @returns Encoded target streaming body, IR request, and stream wire options, or normalized failure.
-     */
-    translateStreamRequest(
-      input: TranslateStreamRequestInput,
-    ): Result<TranslateStreamRequestResult, NormalizedFailure> {
-      return runStream(input);
-    },
-
-    /**
-     * Constructs a streaming session bundle from direct parameters without a ticket.
-     *
-     * @param input - Source/target protocols, logical model, wire options, and optional ID overrides.
-     * @returns Session bundle holding shared session identity, provider decoder, and client encoder.
-     */
-    createStreamSession(input: CreateStreamSessionInput): StreamSessionBundle {
-      const responseId = input.responseId ?? randomUUID();
-      const createPartId = input.createPartId ?? (() => randomUUID().replace(/-/g, "").slice(0, 16));
-      const session: StreamSession = {
-        responseId,
-        model: input.logicalModel,
-        createPartId,
-      };
-
-      const providerDecoder = codecs.createProviderStreamDecoder(input.targetProtocol, session);
-      const clientEncoder = codecs.createClientStreamEncoder(
-        input.sourceProtocol,
-        session,
-        input.sourceWireOptions ?? {},
-      );
-
-      return {
-        session,
-        providerDecoder,
-        clientEncoder,
-      };
-    },
-
-    /**
      * Translates an upstream provider response back into the client-native protocol format.
      *
      * @param input - Response status, headers, body, protocols, and canonical model name.
@@ -438,16 +384,6 @@ export function createTranslationCoordinator(codecs: TranslationCodecs): Transla
         body: clientEncoded.body,
         irOutcome,
       });
-    },
-
-    /**
-     * Prepares an outbound provider HTTP request from direct input parameters without a ticket.
-     *
-     * @param input - Connection parameters, protocols, headers, credentials, body, and timeouts.
-     * @returns Prepared provider request ready for HTTP dispatch.
-     */
-    prepareTranslatedProviderRequest(input: PrepareTranslatedRequestInput) {
-      return prepareTranslatedProviderRequest(input);
     },
   };
 }

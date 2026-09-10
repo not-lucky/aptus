@@ -22,7 +22,7 @@ import { preflightOutcome } from "../../src/translation/preflight.ts";
 import { createSseDecoder, createSseEncoder } from "../../src/translation/sse.ts";
 import { TranslatedStreamPump } from "../../src/translation/stream-pump.ts";
 import { createIrStreamStateMachine } from "../../src/translation/stream-state.ts";
-import { irBase, sourceBodyFor, translateRequest } from "./owned-rows-helpers.ts";
+import { createSessionBundle, irBase, sourceBodyFor, translateRequest } from "./owned-rows-helpers.ts";
 
 // =====================================================================
 // Admitted wire-only mappings (sidecar translate, never reject)
@@ -207,7 +207,7 @@ test.concurrent("row prompt-cache-breakpoint: C↔R per-part markers re-anchor; 
     // Out of M, the sentinel re-anchors onto the item's reconstructed C part
     // (the two source text blocks merge into one Chat content part).
     const coordinator2 = createDefaultTranslationCoordinator();
-    const mToC = coordinator2.translateCompleteRequest({
+    const mToC = coordinator2.translateRequest({ stream: false,
       sourceProtocol: "anthropic-messages",
       targetProtocol: "openai-chat",
       sourceBody: {
@@ -820,7 +820,7 @@ const UTF8_ENCODER = new TextEncoder();
 
 /** Builds a pump over a coordinator stream session; records every client byte emitted before a failure. */
 function createSidecarPump(source: Protocol, target: Protocol, responseId: string) {
-  const bundle = createDefaultTranslationCoordinator().createStreamSession({
+  const bundle = createSessionBundle({
     sourceProtocol: source,
     targetProtocol: target,
     logicalModel: "logical-key",
@@ -1081,7 +1081,7 @@ test.concurrent("stream request sidecar: wire-only rows reject on M directions a
 
   // T3(a): responses-storage is C↔R-only — a C→M stream body carrying store rejects
   // in the coordinator's stream preflight before any dispatch.
-  const storeToM = coordinator.translateStreamRequest({
+  const storeToM = coordinator.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "anthropic-messages",
     sourceBody: { ...sourceBodyFor("openai-chat"), stream: true, store: true },
@@ -1093,7 +1093,7 @@ test.concurrent("stream request sidecar: wire-only rows reject on M directions a
   if (!storeToM.ok) assert.equal(storeToM.error.capability, "responses-storage");
 
   // T3(b): admitted sidecar rows project onto the encoded stream provider body.
-  const cToRStream = coordinator.translateStreamRequest({
+  const cToRStream = coordinator.translateRequest({ stream: true,
     sourceProtocol: "openai-chat",
     targetProtocol: "openai-responses",
     sourceBody: {
